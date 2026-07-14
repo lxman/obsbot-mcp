@@ -41,6 +41,12 @@ gh workflow run release.yml -f dry_run=true
 This builds the helper, stages it, verifies the tarball, and runs
 `npm publish --dry-run` — it never publishes or creates a Release.
 
+> **Note:** `npm publish --dry-run` does a registry preflight, so it fails with
+> *"cannot publish over the previously published versions"* if `package.json` is
+> at a version already on npm. Run the dry-run when `master` is at the **next,
+> unpublished** version (i.e. after bumping), or expect that one step to report
+> the duplicate — the build/stage/tarball checks before it still validate the pipeline.
+
 ## What ships in the package
 
 The npm tarball is limited by `package.json`'s `files` allowlist to
