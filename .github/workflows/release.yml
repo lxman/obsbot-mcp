@@ -80,10 +80,16 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm test
-      - name: Download helper artifacts into native/prebuilt
+      # Download each built helper into its <triple> dir — the exact layout
+      # resolveBinaryPath() expects. Downloading by name into an explicit path
+      # is deterministic and does not depend on download-artifact's default
+      # nesting behavior. Add one step per triple when you enable a
+      # macOS/Linux row in the build-helper matrix above.
+      - name: Download Windows helper (win32-x64)
         uses: actions/download-artifact@v8
         with:
-          path: native/prebuilt
+          name: win32-x64
+          path: native/prebuilt/win32-x64
       - name: Verify staged binary layout
         run: |
           echo "--- native/prebuilt tree ---"; ls -R native/prebuilt
