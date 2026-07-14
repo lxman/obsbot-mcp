@@ -1,0 +1,16 @@
+# Node
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Native build artifacts (the build dir; the prebuilt helper is handled separately)
+native/**/build/
+native/prebuilt/
+
+# OS cruft
+.DS_Store
+Thumbs.db
+
+# Editors
+.idea/
+.vscode/
