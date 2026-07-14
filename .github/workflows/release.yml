@@ -34,7 +34,7 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Configure (CMake)
         run: cmake -S native/windows -B native/windows/build -DCMAKE_BUILD_TYPE=Release
       - name: Build (CMake)
@@ -44,7 +44,7 @@ jobs:
           mkdir -p "native/prebuilt/${{ matrix.triple }}"
           cp "native/windows/build/Release/${{ matrix.helper }}" \
              "native/prebuilt/${{ matrix.triple }}/${{ matrix.helper }}"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.triple }}
           path: native/prebuilt/${{ matrix.triple }}/${{ matrix.helper }}
@@ -57,8 +57,8 @@ jobs:
       id-token: write   # OIDC trusted publishing (no npm token)
       contents: write   # create the GitHub Release
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
@@ -81,7 +81,7 @@ jobs:
       - run: npm run build
       - run: npm test
       - name: Download helper artifacts into native/prebuilt
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: native/prebuilt
       - name: Verify staged binary layout
