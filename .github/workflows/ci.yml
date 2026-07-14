@@ -8,12 +8,17 @@ on:
 permissions:
   contents: read
 
+# Cancel superseded runs on the same ref (e.g. rapid pushes to a PR).
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '20'
           cache: npm
@@ -27,7 +32,18 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      # Cache the CMake build dir, keyed on the native sources + runner image so
+      # any source change or image update busts it (incremental build on an exact
+      # hit). Marginal for this small build, but cheap and safe.
+      - name: Cache native build
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: native/windows/build
+          key: ${{ runner.os }}-${{ env.ImageOS }}-cmake-${{ hashFiles('native/windows/helper.cpp', 'native/windows/CMakeLists.txt') }}
+      # The CMake generator is deliberately left to the windows-latest default
+      # (currently VS 2026) rather than pinned with -G, so image updates don't
+      # break the build; --config Release selects the config at build time.
       - name: Configure (CMake)
         run: cmake -S native/windows -B native/windows/build -DCMAKE_BUILD_TYPE=Release
       - name: Build (CMake)

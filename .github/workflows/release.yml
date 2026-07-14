@@ -13,6 +13,12 @@ on:
 permissions:
   contents: read
 
+# Serialize releases so two tags never publish at once; never cancel an
+# in-flight publish.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
   build-helper:
     strategy:
@@ -34,7 +40,16 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      # Cache the CMake build dir, keyed on the native sources + runner image +
+      # triple so any change busts it (incremental build on an exact hit).
+      - name: Cache native build
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: native/windows/build
+          key: ${{ runner.os }}-${{ env.ImageOS }}-cmake-${{ matrix.triple }}-${{ hashFiles('native/windows/helper.cpp', 'native/windows/CMakeLists.txt') }}
+      # The CMake generator is deliberately left to the runner default (currently
+      # VS 2026) rather than pinned with -G, so image updates don't break the build.
       - name: Configure (CMake)
         run: cmake -S native/windows -B native/windows/build -DCMAKE_BUILD_TYPE=Release
       - name: Build (CMake)
@@ -44,7 +59,7 @@ jobs:
           mkdir -p "native/prebuilt/${{ matrix.triple }}"
           cp "native/windows/build/Release/${{ matrix.helper }}" \
              "native/prebuilt/${{ matrix.triple }}/${{ matrix.helper }}"
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ matrix.triple }}
           path: native/prebuilt/${{ matrix.triple }}/${{ matrix.helper }}
@@ -57,8 +72,8 @@ jobs:
       id-token: write   # OIDC trusted publishing (no npm token)
       contents: write   # create the GitHub Release
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
@@ -78,15 +93,11 @@ jobs:
             exit 1
           fi
       - run: npm ci
+      # Build dist/ for the tarball. Tests are NOT re-run here: the release flow
+      # tags a commit already proven green by ci.yml on master (see RELEASING.md).
       - run: npm run build
-      - run: npm test
-      # Download each built helper into its <triple> dir — the exact layout
-      # resolveBinaryPath() expects. Downloading by name into an explicit path
-      # is deterministic and does not depend on download-artifact's default
-      # nesting behavior. Add one step per triple when you enable a
-      # macOS/Linux row in the build-helper matrix above.
       - name: Download Windows helper (win32-x64)
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: win32-x64
           path: native/prebuilt/win32-x64
@@ -103,6 +114,10 @@ jobs:
           grep -q "dist/index.js" pack.txt \
             || { echo "::error::dist/index.js missing from tarball"; exit 1; }
           rm -f pack.txt
+      # On a tag push (real release) inputs.dry_run is empty -> real publish, and
+      # the tag/version guard above has already run. A manual workflow_dispatch
+      # with dry_run:false is an intentional escape hatch that publishes WITHOUT
+      # that guard (and creates no Release) — use it knowingly.
       - name: Publish to npm (OIDC) or dry-run
         run: |
           if [ "${{ inputs.dry_run }}" = "true" ]; then
