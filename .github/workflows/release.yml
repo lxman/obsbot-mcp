@@ -1,0 +1,116 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Build + pack + publish --dry-run only (no real publish/release)'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-helper:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            triple: win32-x64
+            helper: obsbot-helper.exe
+          # Enable once a macOS helper source exists:
+          # - os: macos-latest
+          #   triple: darwin-arm64
+          #   helper: obsbot-helper
+          # Enable once a Linux helper source exists:
+          # - os: ubuntu-latest
+          #   triple: linux-x64
+          #   helper: obsbot-helper
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure (CMake)
+        run: cmake -S native/windows -B native/windows/build -DCMAKE_BUILD_TYPE=Release
+      - name: Build (CMake)
+        run: cmake --build native/windows/build --config Release
+      - name: Stage binary into native/prebuilt/<triple>
+        run: |
+          mkdir -p "native/prebuilt/${{ matrix.triple }}"
+          cp "native/windows/build/Release/${{ matrix.helper }}" \
+             "native/prebuilt/${{ matrix.triple }}/${{ matrix.helper }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.triple }}
+          path: native/prebuilt/${{ matrix.triple }}/${{ matrix.helper }}
+          if-no-files-found: error
+
+  publish:
+    needs: build-helper
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # OIDC trusted publishing (no npm token)
+      contents: write   # create the GitHub Release
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+          cache: npm
+      - name: Upgrade npm to >= 11.5.1 (required for trusted publishing)
+        run: |
+          npm install -g npm@latest
+          npm --version
+      - name: Verify tag matches package.json (real releases only)
+        if: github.event_name == 'push'
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PKG="$(node -p "require('./package.json').version")"
+          echo "tag=$TAG package.json=$PKG"
+          if [ "$TAG" != "$PKG" ]; then
+            echo "::error::tag $TAG does not match package.json version $PKG"
+            exit 1
+          fi
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
+      - name: Download helper artifacts into native/prebuilt
+        uses: actions/download-artifact@v4
+        with:
+          path: native/prebuilt
+      - name: Verify staged binary layout
+        run: |
+          echo "--- native/prebuilt tree ---"; ls -R native/prebuilt
+          test -f native/prebuilt/win32-x64/obsbot-helper.exe \
+            || { echo "::error::helper not staged at native/prebuilt/win32-x64/obsbot-helper.exe"; exit 1; }
+      - name: Verify tarball contents
+        run: |
+          npm pack --dry-run 2>&1 | tee pack.txt
+          grep -q "native/prebuilt/win32-x64/obsbot-helper.exe" pack.txt \
+            || { echo "::error::helper missing from tarball"; exit 1; }
+          grep -q "dist/index.js" pack.txt \
+            || { echo "::error::dist/index.js missing from tarball"; exit 1; }
+          rm -f pack.txt
+      - name: Publish to npm (OIDC) or dry-run
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            echo "DRY RUN — not publishing"
+            npm publish --dry-run
+          else
+            npm publish
+          fi
+      - name: Create GitHub Release (real tags only)
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            native/prebuilt/win32-x64/obsbot-helper.exe \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes

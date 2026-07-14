@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
+
+  helper-windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure (CMake)
+        run: cmake -S native/windows -B native/windows/build -DCMAKE_BUILD_TYPE=Release
+      - name: Build (CMake)
+        run: cmake --build native/windows/build --config Release
+      - name: Verify helper binary exists
+        run: |
+          test -f native/windows/build/Release/obsbot-helper.exe \
+            && echo "OK: obsbot-helper.exe built" \
+            || { echo "::error::helper binary not produced"; exit 1; }
