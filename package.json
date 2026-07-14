@@ -1,17 +1,37 @@
 {
   "name": "obsbot-mcp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Cross-platform MCP server for OBSBOT Tiny 2 (UVC) camera control",
   "license": "MIT",
   "author": "Michael Jordan",
-  "repository": { "type": "git", "url": "git+https://github.com/lxman/obsbot-mcp.git" },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lxman/obsbot-mcp.git"
+  },
   "homepage": "https://github.com/lxman/obsbot-mcp#readme",
-  "bugs": { "url": "https://github.com/lxman/obsbot-mcp/issues" },
-  "keywords": ["mcp", "model-context-protocol", "obsbot", "webcam", "uvc", "ptz", "camera"],
+  "bugs": {
+    "url": "https://github.com/lxman/obsbot-mcp/issues"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "obsbot",
+    "webcam",
+    "uvc",
+    "ptz",
+    "camera"
+  ],
   "type": "module",
-  "bin": { "obsbot-mcp": "dist/index.js" },
-  "files": ["dist/", "native/prebuilt/"],
-  "engines": { "node": ">=18" },
+  "bin": {
+    "obsbot-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist/",
+    "native/prebuilt/"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "vitest run",
