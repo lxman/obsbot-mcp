@@ -49,13 +49,14 @@ jobs:
       - name: Install dependencies (Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libjpeg-dev
-      # Cache the CMake build dir, keyed on the native sources + runner image +
-      # triple so any change busts it (incremental build on an exact hit).
+      # Cache the CMake build dir. git-checkout timestamps mean cmake will
+      # recompile on source changes even on a cache hit, so the cache just
+      # skips re-running cmake itself (marginal but cheap).
       - name: Cache native build
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ matrix.build }}
-          key: ${{ runner.os }}-${{ env.ImageOS }}-cmake-${{ matrix.triple }}-${{ hashFiles(matrix.src + '/CMakeLists.txt', matrix.src + '/helper.*') }}
+          key: ${{ runner.os }}-${{ env.ImageOS }}-cmake-${{ matrix.triple }}
       # The CMake generator is deliberately left to the runner default (currently
       # VS 2026) rather than pinned with -G, so image updates don't break the build.
       - name: Configure (CMake)
