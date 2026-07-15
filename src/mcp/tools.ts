@@ -533,7 +533,9 @@ export function createTools(
       name: "obsbot_snapshot",
       description:
         "Grab one still frame from the camera and return it as an image (for you to see " +
-        "and for framing/lighting/exposure checks). source: device (default) | virtual | ndi. " +
+        "and for framing/lighting/exposure checks). NOTE: before calling, ensure the camera " +
+        "is focused (call obsbot_focus with mode:'auto' for autofocus) unless otherwise " +
+        "directed. source: device (default) | virtual | ndi. " +
         "If the camera is in use by another app, returns a message instead of an image.",
       schema: snapshotSchema,
       handler: async (args: unknown) => {
@@ -589,7 +591,9 @@ export function createTools(
       description:
         "Start recording the camera to an MP4 (for the user). durationSec optional (open-ended " +
         "recordings auto-stop after 60 min); audio defaults to on (the OBSBOT mic); outputPath " +
-        "optional (defaults under Videos\\OBSBOT). source: device|virtual|ndi. Returns a sessionId " +
+        "optional (defaults under Videos\\\\OBSBOT). NOTE: before calling, ensure the camera " +
+        "is focused (call obsbot_focus with mode:'auto' for autofocus) unless otherwise " +
+        "directed. source: device|virtual|ndi. Returns a sessionId " +
         "for obsbot_capture_stop.",
       schema: recordStartSchema,
       handler: async (args: unknown) => {
@@ -608,7 +612,9 @@ export function createTools(
     {
       name: "obsbot_preview_start",
       description:
-        "Open a live preview window of the camera (for the user to watch). source: device|virtual|ndi. " +
+        "Open a live preview window of the camera (for the user to watch). NOTE: before calling, " +
+        "ensure the camera is focused (call obsbot_focus with mode:'auto' for autofocus) unless " +
+        "otherwise directed. source: device|virtual|ndi. " +
         "Returns a sessionId for obsbot_capture_stop.",
       schema: previewStartSchema,
       handler: async (args: unknown) => {
