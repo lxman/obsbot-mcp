@@ -27,37 +27,45 @@ jobs:
           - os: windows-latest
             triple: win32-x64
             helper: obsbot-helper.exe
+            src: native/windows
+            build: native/windows/build
+            build_out: native/windows/build/Release
           # Enable once a macOS helper source exists:
           # - os: macos-latest
           #   triple: darwin-arm64
           #   helper: obsbot-helper
-          # Enable once a Linux helper source exists:
-          # - os: ubuntu-latest
-          #   triple: linux-x64
-          #   helper: obsbot-helper
+          - os: ubuntu-latest
+            triple: linux-x64
+            helper: obsbot-helper
+            src: native/linux
+            build: native/linux/build
+            build_out: native/linux/build
     runs-on: ${{ matrix.os }}
     defaults:
       run:
         shell: bash
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libjpeg-dev
       # Cache the CMake build dir, keyed on the native sources + runner image +
       # triple so any change busts it (incremental build on an exact hit).
       - name: Cache native build
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: native/windows/build
-          key: ${{ runner.os }}-${{ env.ImageOS }}-cmake-${{ matrix.triple }}-${{ hashFiles('native/windows/helper.cpp', 'native/windows/CMakeLists.txt') }}
+          path: ${{ matrix.build }}
+          key: ${{ runner.os }}-${{ env.ImageOS }}-cmake-${{ matrix.triple }}-${{ hashFiles(matrix.src + '/CMakeLists.txt', matrix.src + '/helper.*') }}
       # The CMake generator is deliberately left to the runner default (currently
       # VS 2026) rather than pinned with -G, so image updates don't break the build.
       - name: Configure (CMake)
-        run: cmake -S native/windows -B native/windows/build -DCMAKE_BUILD_TYPE=Release
+        run: cmake -S ${{ matrix.src }} -B ${{ matrix.build }} -DCMAKE_BUILD_TYPE=Release
       - name: Build (CMake)
-        run: cmake --build native/windows/build --config Release
+        run: cmake --build ${{ matrix.build }} --config Release
       - name: Stage binary into native/prebuilt/<triple>
         run: |
           mkdir -p "native/prebuilt/${{ matrix.triple }}"
-          cp "native/windows/build/Release/${{ matrix.helper }}" \
+          cp "${{ matrix.build_out }}/${{ matrix.helper }}" \
              "native/prebuilt/${{ matrix.triple }}/${{ matrix.helper }}"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -101,16 +109,25 @@ jobs:
         with:
           name: win32-x64
           path: native/prebuilt/win32-x64
+      - name: Download Linux helper (linux-x64)
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: linux-x64
+          path: native/prebuilt/linux-x64
       - name: Verify staged binary layout
         run: |
           echo "--- native/prebuilt tree ---"; ls -R native/prebuilt
           test -f native/prebuilt/win32-x64/obsbot-helper.exe \
             || { echo "::error::helper not staged at native/prebuilt/win32-x64/obsbot-helper.exe"; exit 1; }
+          test -f native/prebuilt/linux-x64/obsbot-helper \
+            || { echo "::error::helper not staged at native/prebuilt/linux-x64/obsbot-helper"; exit 1; }
       - name: Verify tarball contents
         run: |
           npm pack --dry-run 2>&1 | tee pack.txt
           grep -q "native/prebuilt/win32-x64/obsbot-helper.exe" pack.txt \
-            || { echo "::error::helper missing from tarball"; exit 1; }
+            || { echo "::error::win32-x64 helper missing from tarball"; exit 1; }
+          grep -q "native/prebuilt/linux-x64/obsbot-helper" pack.txt \
+            || { echo "::error::linux-x64 helper missing from tarball"; exit 1; }
           grep -q "dist/index.js" pack.txt \
             || { echo "::error::dist/index.js missing from tarball"; exit 1; }
           rm -f pack.txt
@@ -133,5 +150,6 @@ jobs:
         run: |
           gh release create "$GITHUB_REF_NAME" \
             native/prebuilt/win32-x64/obsbot-helper.exe \
+            native/prebuilt/linux-x64/obsbot-helper \
             --title "$GITHUB_REF_NAME" \
             --generate-notes
