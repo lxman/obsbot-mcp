@@ -1,6 +1,7 @@
 import { expect, test, vi } from "vitest";
 import { EventEmitter } from "node:events";
 import { CaptureManager, CaptureError, FfmpegMissingError } from "../../src/capture/manager.js";
+import { parseDshowDevices } from "../../src/capture/ffmpeg-args.js";
 
 const DEVICE_LIST = `
 [dshow @ 0] "OBSBOT Tiny 2 StreamCamera" (video)
@@ -48,6 +49,11 @@ function mkManager(over: Partial<{ hasBinary: (n: string) => boolean; existsSync
     clock: () => "2026-07-13T00:00:00.000Z",
     hasBinary: over.hasBinary ?? (() => true),
     fs: { existsSync: over.existsSync ?? (() => false), mkdirSync: vi.fn() },
+    // Use the dshow probe pattern so tests work identically on all OSes.
+    probeDevices: () => {
+      const devs = parseDshowDevices(DEVICE_LIST);
+      return Promise.resolve(devs);
+    },
   });
   return { mgr, spawn, children };
 }

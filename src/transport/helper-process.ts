@@ -12,7 +12,10 @@ interface RpcResponse {
   [key: string]: unknown;
 }
 
-const SUPPORTED: Record<string, string> = { win32: "obsbot-helper.exe" };
+const SUPPORTED: Record<string, string> = {
+  win32: "obsbot-helper.exe",
+  linux: "obsbot-helper",
+};
 
 export class HelperProcess {
   private proc?: ChildProcessByStdio<Writable, Readable, null>;

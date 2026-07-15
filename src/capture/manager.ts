@@ -1,10 +1,17 @@
 import { spawn as realSpawn, spawnSync, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import {
-  parseDshowDevices, resolveVideoName, resolveAudioName,
-  buildRecordArgs, buildPreviewArgs, type CaptureSource, type DshowDevices,
+  parseDshowDevices,
+  parseV4l2DeviceName,
+  resolveVideoName,
+  resolveAudioName,
+  buildRecordArgs,
+  buildPreviewArgs,
+  type CaptureSource,
+  type DeviceList,
+  type V4l2DeviceInfo,
 } from "./ffmpeg-args.js";
 
 export interface CaptureSession {
@@ -54,6 +61,8 @@ interface Deps {
   clock?: () => string;
   hasBinary?: (name: string) => boolean;
   fs?: FsLike;
+  /** Override for device probe logic (used by tests to avoid real V4L2/dshow probing). */
+  probeDevices?: () => Promise<DeviceList>;
 }
 
 export class CaptureManager {
@@ -61,8 +70,9 @@ export class CaptureManager {
   private readonly clock: () => string;
   private readonly hasBinary: (name: string) => boolean;
   private readonly fs: FsLike;
+  private readonly probeFn: (() => Promise<DeviceList>) | undefined;
   private readonly sessions = new Map<string, { session: CaptureSession; child: ChildProcess }>();
-  private devices?: DshowDevices;
+  private devices?: DeviceList;
   private seq = 0;
 
   constructor(deps: Deps = {}) {
@@ -70,6 +80,7 @@ export class CaptureManager {
     this.clock = deps.clock ?? (() => new Date().toISOString());
     this.hasBinary = deps.hasBinary ?? defaultHasBinary;
     this.fs = deps.fs ?? { existsSync, mkdirSync };
+    this.probeFn = deps.probeDevices;
   }
 
   private ensureFfmpeg(): void {
@@ -78,22 +89,72 @@ export class CaptureManager {
     }
   }
 
-  private probeDevices(): Promise<DshowDevices> {
+  private probeDevices(): Promise<DeviceList> {
     if (this.devices) return Promise.resolve(this.devices);
+    // Allow tests to inject a mock probe
+    if (this.probeFn) return this.probeFn();
     return new Promise((resolve, reject) => {
-      const child = this.spawn("ffmpeg", ["-hide_banner", "-f", "dshow", "-list_devices", "true", "-i", "dummy"]);
-      let err = "";
-      child.stderr?.on("data", (d) => { err += d.toString(); });
-      child.on("error", (e) => reject(new CaptureError(`failed to run ffmpeg for device probe: ${e.message}`)));
-      child.on("close", () => {
-        this.devices = parseDshowDevices(err);
-        resolve(this.devices);
-      });
+      if (process.platform === "linux") {
+        // On Linux, list /dev/video* devices and probe each one
+        this.probeV4l2Devices().then(resolve).catch(reject);
+      } else {
+        this.probeDshowDevices(resolve, reject);
+      }
+    });
+  }
+
+  private async probeV4l2Devices(): Promise<DeviceList> {
+    const video: V4l2DeviceInfo[] = [];
+    try {
+      const files = readdirSync("/dev");
+      const videoDevs = files
+        .filter((f) => /^video\d+$/.test(f))
+        .map((f) => `/dev/${f}`)
+        .sort();
+
+      for (const dev of videoDevs) {
+        const name = await this.probeV4l2Card(dev);
+        if (name) video.push({ path: dev, card: name });
+      }
+    } catch {
+      // /dev not readable
+    }
+    return { video, audio: [] };
+  }
+
+  private probeV4l2Card(dev: string): Promise<string | undefined> {
+    return new Promise((resolve) => {
+      try {
+        const idx = dev.match(/video(\d+)$/)?.[1];
+        if (!idx) return resolve(undefined);
+        const sysfs = `/sys/class/video4linux/video${idx}/name`;
+        const name = readFileSync(sysfs, 'utf-8').trim();
+        resolve(name || undefined);
+      } catch {
+        resolve(undefined);
+      }
+    });
+  }
+
+  private probeDshowDevices(
+    resolve: (devices: DeviceList) => void,
+    reject: (err: Error) => void,
+  ): void {
+    const child = this.spawn(
+      "ffmpeg",
+      ["-hide_banner", "-f", "dshow", "-list_devices", "true", "-i", "dummy"],
+      { stdio: ["pipe", "pipe", "pipe"] },
+    );
+    let err = "";
+    child.stderr?.on("data", (d: Buffer) => { err += d.toString(); });
+    child.on("error", (e) => reject(new CaptureError(`failed to run ffmpeg for device probe: ${e.message}`)));
+    child.on("close", () => {
+      this.devices = parseDshowDevices(err);
+      resolve(this.devices);
     });
   }
 
   private timestampName(): string {
-    // clock() -> "2026-07-13T09:33:58.000Z"; make obsbot-YYYYMMDD-HHMMSS.mp4
     const iso = this.clock();
     const compact = iso.replace(/[-:]/g, "").replace("T", "-").replace(/\..*$/, "");
     return `obsbot-${compact}.mp4`;
@@ -152,7 +213,6 @@ export class CaptureManager {
     const { session, child } = entry;
     let graceful = true;
     if (session.kind === "record") {
-      // 'q' on stdin is ffmpeg's clean stop (finalizes the MP4 moov atom).
       graceful = await new Promise<boolean>((resolve) => {
         let done = false;
         const timer = setTimeout(() => { if (!done) { done = true; child.kill(); resolve(false); } }, GRACEFUL_STOP_MS);
@@ -167,13 +227,11 @@ export class CaptureManager {
   }
 
   list(): CaptureSession[] {
-    return [...this.sessions.values()].map((e) => e.session);
+    return Array.from(this.sessions.values()).map((e) => e.session);
   }
 
-  // Hard-kill every child. Wired to server shutdown so nothing orphans; this is
-  // last-resort cleanup, not a graceful stop.
   stopAll(): void {
-    for (const { child } of this.sessions.values()) {
+    for (const { child } of Array.from(this.sessions.values())) {
       try { child.kill(); } catch { /* ignore */ }
     }
     this.sessions.clear();

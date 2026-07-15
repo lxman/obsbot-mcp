@@ -10,6 +10,10 @@ import {
   encodeVendorProbe,
   encodeZoomWithSpeed,
   encodeFaceFocus,
+  encodeSetExposureMode,
+  encodeSetExposureValue,
+  encodeGetExposureRange,
+  decodeExposureRange,
   decodeStatus,
   encodeFov,
   encodeHdr,
@@ -21,7 +25,6 @@ import {
   CAMERA_CONTROL_PAN,
   CAMERA_CONTROL_TILT,
   CAMERA_CONTROL_FOCUS,
-  CAMERA_CONTROL_EXPOSURE,
   VIDEO_PROCAMP_WHITE_BALANCE,
   IMAGE_CONTROL_PROP,
   IMAGE_CONTROLS,
@@ -506,20 +509,24 @@ export function createTools(
       name: "obsbot_exposure",
       description:
         "Set exposure. mode 'auto' enables auto-exposure; mode 'manual' sets level 0-100 " +
-        "(0 darkest → 100 brightest), mapped onto the device's exposure range. Standard UVC " +
-        "(IAMCameraControl).",
+        "(0 darkest → 100 brightest), mapped onto the device's exposure range. " +
+        "Uses proprietary V3 frame protocol (CAM_SET_EXPOSURE_MODE + CAM_SET_EXPOSURE_TINY2) " +
+        "because the standard UVC/IAMCameraControl V4L2 path is a stub on the Tiny 2.",
       schema: exposureSchema,
       handler: async (args: unknown) => {
         const { mode, level } = exposureSchema.parse(args);
         const t = await getTransport();
         if (mode === "auto") {
-          await t.camCtrlSet(CAMERA_CONTROL_EXPOSURE, 0, UVC_FLAG_AUTO);
+          await t.sendVendor(encodeSetExposureMode(false).buildFrame(t.nextSeq()));
           return { ok: true, mode };
         }
-        const { min, max } = await t.camCtrlRange(CAMERA_CONTROL_EXPOSURE);
-        const value = percentToRange(level, min, max);
-        await t.camCtrlSet(CAMERA_CONTROL_EXPOSURE, value, UVC_FLAG_MANUAL);
-        return { ok: true, mode, level, value };
+        // Switch to manual mode via V3 frame protocol (CAM_SET_EXPOSURE_MODE)
+        await t.sendVendor(encodeSetExposureMode(true).buildFrame(t.nextSeq()));
+        // Translate 0-100 percentage to raw 16-bit exposure value.
+        // Tiny 2 exposure range is 0-65535 (confirmed by Tiny4Linux reference).
+        const raw = percentToRange(level, 0, 65535);
+        await t.sendVendor(encodeSetExposureValue(raw).buildFrame(t.nextSeq()));
+        return { ok: true, mode, level, raw };
       },
     },
     {

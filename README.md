@@ -127,10 +127,26 @@ need ffmpeg — it grabs the frame through the native helper.
 
 - **Windows x64** — supported today. The native helper is built from source in `native/windows/`
   (CMake + MSVC); the published npm package ships a prebuilt binary so end users need no toolchain.
-- **Linux / macOS** — not yet implemented. The design is platform-agnostic (see [`PROTOCOL.md`](./PROTOCOL.md));
+- **Linux x64** — supported from v0.2. The native helper is in `native/linux/` (CMake + GCC);
+  it uses **V4L2** for standard UVC controls (zoom, focus, exposure, pan/tilt, white balance,
+  image controls) and `UVCIOC_CTRL_QUERY` for vendor Extension Unit commands (gimbal, AI tracking,
+  wake/sleep, HDR, FOV). Snapshots capture a MJPEG or YUYV frame via V4L2 mmap streaming and encode
+  to JPEG using **libjpeg**. The `linux-x64` prebuilt binary ships with the published npm package.
+  Build dependencies: `build-essential cmake libjpeg-dev libv4l-dev`.
+- **macOS** — not yet implemented. The design is platform-agnostic (see [`PROTOCOL.md`](./PROTOCOL.md));
   adding support means writing an equivalent native helper for each OS's UVC control APIs
-  (`V4L2` on Linux, `AVFoundation`/`IOKit` on macOS) behind the same JSON-RPC-over-stdio contract used by
-  the Windows helper. Contributions welcome.
+  (`AVFoundation`/`IOKit` on macOS) behind the same JSON-RPC-over-stdio contract used by the existing
+  Windows and Linux helpers. Contributions welcome.
+
+### Building the native helper (Linux)
+
+```bash
+cd native/linux
+mkdir build && cd build
+cmake ..
+make -j$(nproc)
+make install  # copies to native/prebuilt/linux-x64/
+```
 
 ## No proprietary SDK
 
@@ -151,11 +167,11 @@ mediating access and the camera remains usable as a normal webcam at the same ti
   are sent through the camera's UVC Extension Unit, driven via `IKsControl::KsProperty` against the
   XU's topology node on Windows.
 
-Both are issued through a small native helper process (`obsbot-helper.exe` on Windows) that the Node
-server spawns and talks to over a line-delimited JSON-RPC protocol on stdin/stdout. The helper is the
-only platform-specific piece; the codec (frame encoding, CRC-16/USB checksum, command table), transport
-abstraction, device manager, and MCP tool definitions are all pure TypeScript/JavaScript and shared across
-platforms.
+Both are issued through a small native helper process (`obsbot-helper.exe` on Windows, `obsbot-helper`
+on Linux) that the Node server spawns and talks to over a line-delimited JSON-RPC protocol on
+stdin/stdout. The helper is the only platform-specific piece; the codec (frame encoding, CRC-16/USB
+checksum, command table), transport abstraction, device manager, and MCP tool definitions are all pure
+TypeScript/JavaScript and shared across platforms.
 
 ## Verifying against real hardware
 

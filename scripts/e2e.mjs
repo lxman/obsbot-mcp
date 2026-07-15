@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// End-to-end hardware verification for obsbot-mcp.
+// End-to-end hardware verification for obsbot-mcp (Windows + Linux).
 //
 // Drives the REAL compiled stack (dist/) against a physically connected
 // OBSBOT Tiny 2: opens the device, wakes it, zooms in, pans, recenters,
