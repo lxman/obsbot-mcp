@@ -353,24 +353,28 @@ test("obsbot_image_control rejects an unsupported control via zod", async () => 
   ).rejects.toThrow();
 });
 
-test("obsbot_exposure auto uses the auto flag without querying range (camCtrl prop 4)", async () => {
+test("obsbot_exposure auto uses V3 frame protocol, not camCtrl", async () => {
   const transport = makeFakeTransport();
   const tools = createTools(async () => transport, makeFakeMgr());
   await tools.find((t) => t.name === "obsbot_exposure")!.handler({ mode: "auto" });
-  expect(transport.camCtrlSet).toHaveBeenCalledWith(4, 0, 1);
+  // Exposure now uses vendor V3 frames (CAM_SET_EXPOSURE_MODE) not UVC camCtrl
+  expect(transport.sendVendor).toHaveBeenCalledTimes(1);
+  expect(transport.camCtrlSet).not.toHaveBeenCalled();
   expect(transport.camCtrlRange).not.toHaveBeenCalled();
 });
 
-test("obsbot_exposure manual maps 0-100 onto the device range via camCtrl", async () => {
+test("obsbot_exposure manual sends V3 frame mode + value", async () => {
   const transport = makeFakeTransport();
-  transport.camCtrlRange = vi.fn(async () => ({ min: -13, max: -2 }));
   const tools = createTools(async () => transport, makeFakeMgr());
   const result = await tools
     .find((t) => t.name === "obsbot_exposure")!
     .handler({ mode: "manual", level: 25 });
-  expect(transport.camCtrlRange).toHaveBeenCalledWith(4);
-  expect(transport.camCtrlSet).toHaveBeenCalledWith(4, -10, 2); // 25% of [-13,-2] -> -10.25 -> -10
-  expect(result).toEqual({ ok: true, mode: "manual", level: 25, value: -10 });
+  // Two sendVendor calls: mode switch + value set
+  expect(transport.sendVendor).toHaveBeenCalledTimes(2);
+  expect(transport.camCtrlRange).not.toHaveBeenCalled();
+  expect(transport.camCtrlSet).not.toHaveBeenCalled();
+  // 25% of 0-65535 range => 16384
+  expect(result).toEqual({ ok: true, mode: "manual", level: 25, raw: 16384 });
 });
 
 // --- String-encoded args from clients that ignore the advertised schema ----

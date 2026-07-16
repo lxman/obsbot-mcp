@@ -15,6 +15,7 @@ interface RpcResponse {
 const SUPPORTED: Record<string, string> = {
   win32: "obsbot-helper.exe",
   darwin: "obsbot-helper",
+  linux: "obsbot-helper",
 };
 
 export class HelperProcess {

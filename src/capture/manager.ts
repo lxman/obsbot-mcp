@@ -1,13 +1,20 @@
 import { spawn as realSpawn, spawnSync, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { dirname, join } from "node:path";
 import {
-  parseDshowDevices, resolveVideoName, resolveAudioName,
-  buildRecordArgs, buildPreviewArgs,
+  parseDshowDevices,
+  resolveVideoName,
+  resolveAudioName,
+  buildRecordArgs,
+  buildPreviewArgs,
   parseAvfDevices, resolveAvfVideoName, resolveAvfAudioName,
   buildAvfRecordArgs, buildAvfPreviewArgs,
-  type CaptureSource, type DshowDevices, type AvfDevices,
+  type CaptureSource,
+  type DeviceList,
+  type V4l2DeviceInfo,
+  type DshowDevices,
+  type AvfDevices,
 } from "./ffmpeg-args.js";
 
 export interface CaptureSession {
@@ -41,7 +48,6 @@ export class FfmpegMissingError extends CaptureError {
 
 const OPEN_ENDED_CAP_SEC = 3600;
 const GRACEFUL_STOP_MS = 5000;
-const IS_MAC = platform() === "darwin";
 
 function defaultHasBinary(name: string): boolean {
   const r = spawnSync(name, ["-version"], { stdio: "ignore" });
@@ -60,9 +66,12 @@ interface Deps {
   fs?: FsLike;
   /** Override platform detection for testing. */
   platform?: "darwin" | "win32" | "linux";
+  /** Override for device probe logic (used by tests to avoid real V4L2/dshow/AVF probing). */
+  probeDevices?: () => Promise<PlatformDevices>;
 }
 
-type PlatformDevices = DshowDevices | AvfDevices;
+/** Union of all platform device-list shapes. */
+type PlatformDevices = DeviceList | AvfDevices;
 
 function isAvfDevices(d: PlatformDevices): d is AvfDevices {
   return "video" in d && typeof d.video === "object" && !Array.isArray(d.video);
@@ -74,6 +83,7 @@ export class CaptureManager {
   private readonly hasBinary: (name: string) => boolean;
   private readonly fs: FsLike;
   private readonly platform: string;
+  private readonly probeFn: (() => Promise<PlatformDevices>) | undefined;
   private readonly sessions = new Map<string, { session: CaptureSession; child: ChildProcess }>();
   private devices?: PlatformDevices;
   private seq = 0;
@@ -84,6 +94,7 @@ export class CaptureManager {
     this.hasBinary = deps.hasBinary ?? defaultHasBinary;
     this.fs = deps.fs ?? { existsSync, mkdirSync };
     this.platform = deps.platform ?? platform();
+    this.probeFn = deps.probeDevices;
   }
 
   private ensureFfmpeg(): void {
@@ -94,19 +105,86 @@ export class CaptureManager {
 
   private probeDevices(): Promise<PlatformDevices> {
     if (this.devices) return Promise.resolve(this.devices);
+    // Allow tests to inject a mock probe
+    if (this.probeFn) return this.probeFn();
     return new Promise((resolve, reject) => {
-      const isMac = this.platform === "darwin";
-      const args = isMac
-        ? ["-hide_banner", "-f", "avfoundation", "-list_devices", "true", "-i", ""]
-        : ["-hide_banner", "-f", "dshow", "-list_devices", "true", "-i", "dummy"];
-      const child = this.spawn("ffmpeg", args);
-      let err = "";
-      child.stderr?.on("data", (d) => { err += d.toString(); });
-      child.on("error", (e) => reject(new CaptureError(`failed to run ffmpeg for device probe: ${e.message}`)));
-      child.on("close", () => {
-        this.devices = isMac ? parseAvfDevices(err) : parseDshowDevices(err);
-        resolve(this.devices);
-      });
+      if (this.platform === "linux") {
+        // On Linux, list /dev/video* devices and probe each one
+        this.probeV4l2Devices().then(resolve).catch(reject);
+      } else if (this.platform === "darwin") {
+        this.probeAvfDevices(resolve, reject);
+      } else {
+        this.probeDshowDevices(resolve, reject);
+      }
+    });
+  }
+
+  private async probeV4l2Devices(): Promise<DeviceList> {
+    const video: V4l2DeviceInfo[] = [];
+    try {
+      const files = readdirSync("/dev");
+      const videoDevs = files
+        .filter((f) => /^video\d+$/.test(f))
+        .map((f) => `/dev/${f}`)
+        .sort();
+
+      for (const dev of videoDevs) {
+        const name = await this.probeV4l2Card(dev);
+        if (name) video.push({ path: dev, card: name });
+      }
+    } catch {
+      // /dev not readable
+    }
+    return { video, audio: [] };
+  }
+
+  private probeV4l2Card(dev: string): Promise<string | undefined> {
+    return new Promise((resolve) => {
+      try {
+        const idx = dev.match(/video(\d+)$/)?.[1];
+        if (!idx) return resolve(undefined);
+        const sysfs = `/sys/class/video4linux/video${idx}/name`;
+        const name = readFileSync(sysfs, 'utf-8').trim();
+        resolve(name || undefined);
+      } catch {
+        resolve(undefined);
+      }
+    });
+  }
+
+  private probeAvfDevices(
+    resolve: (devices: PlatformDevices) => void,
+    reject: (err: Error) => void,
+  ): void {
+    const child = this.spawn(
+      "ffmpeg",
+      ["-hide_banner", "-f", "avfoundation", "-list_devices", "true", "-i", ""],
+      { stdio: ["pipe", "pipe", "pipe"] },
+    );
+    let err = "";
+    child.stderr?.on("data", (d: Buffer) => { err += d.toString(); });
+    child.on("error", (e) => reject(new CaptureError(`failed to run ffmpeg for device probe: ${e.message}`)));
+    child.on("close", () => {
+      this.devices = parseAvfDevices(err);
+      resolve(this.devices);
+    });
+  }
+
+  private probeDshowDevices(
+    resolve: (devices: PlatformDevices) => void,
+    reject: (err: Error) => void,
+  ): void {
+    const child = this.spawn(
+      "ffmpeg",
+      ["-hide_banner", "-f", "dshow", "-list_devices", "true", "-i", "dummy"],
+      { stdio: ["pipe", "pipe", "pipe"] },
+    );
+    let err = "";
+    child.stderr?.on("data", (d: Buffer) => { err += d.toString(); });
+    child.on("error", (e) => reject(new CaptureError(`failed to run ffmpeg for device probe: ${e.message}`)));
+    child.on("close", () => {
+      this.devices = parseDshowDevices(err);
+      resolve(this.devices);
     });
   }
 
@@ -149,13 +227,13 @@ export class CaptureManager {
       return session;
     }
 
-    // Windows (dshow) path
-    const dshowDev = devices as DshowDevices;
-    const videoName = resolveVideoName(dshowDev, o.source);
+    // Windows (dshow) or Linux (v4l2) path — resolveVideoName/buildRecordArgs
+    // handle both via the DeviceList union and /dev/ prefix check.
+    const videoName = resolveVideoName(devices, o.source);
     if (!videoName) throw new CaptureError(`no '${o.source}' video source found (is OBSBOT Center / NDI running?)`);
     let audioName: string | undefined;
     if (o.audio) {
-      audioName = resolveAudioName(dshowDev);
+      audioName = resolveAudioName(devices);
       if (!audioName) throw new CaptureError("OBSBOT microphone not found; retry with audio:false for a silent clip");
     }
     const outputPath = o.outputPath ?? join(homedir(), "Videos", "OBSBOT", this.timestampName());
@@ -195,9 +273,8 @@ export class CaptureManager {
       return session;
     }
 
-    // Windows (dshow) path
-    const dshowDev = devices as DshowDevices;
-    const videoName = resolveVideoName(dshowDev, o.source);
+    // Windows (dshow) or Linux (v4l2) path
+    const videoName = resolveVideoName(devices, o.source);
     if (!videoName) throw new CaptureError(`no '${o.source}' video source found (is OBSBOT Center / NDI running?)`);
     const args = buildPreviewArgs({ videoName });
     const child = this.spawn("ffplay", args, { stdio: "ignore" });
@@ -231,13 +308,11 @@ export class CaptureManager {
   }
 
   list(): CaptureSession[] {
-    return [...this.sessions.values()].map((e) => e.session);
+    return Array.from(this.sessions.values()).map((e) => e.session);
   }
 
-  // Hard-kill every child. Wired to server shutdown so nothing orphans; this is
-  // last-resort cleanup, not a graceful stop.
   stopAll(): void {
-    for (const { child } of this.sessions.values()) {
+    for (const { child } of Array.from(this.sessions.values())) {
       try { child.kill(); } catch { /* ignore */ }
     }
     this.sessions.clear();

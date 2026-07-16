@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.20)
+project(obsbot_helper C)
+set(CMAKE_C_STANDARD 11)
+find_package(JPEG REQUIRED)
+add_executable(obsbot-helper helper.c)
+target_include_directories(obsbot-helper PRIVATE ${JPEG_INCLUDE_DIRS})
+target_link_libraries(obsbot-helper PRIVATE ${JPEG_LIBRARIES} m)
+set_target_properties(obsbot-helper PROPERTIES OUTPUT_NAME "obsbot-helper")

@@ -140,6 +140,43 @@ export const encodeFaceFocus = (enable: boolean): VendorFrame =>
   vendorOp("CAM_SET_FACE_FOCUS", i32le(enable ? 1 : 0));
 
 // ---------------------------------------------------------------------------
+//  Exposure (V3 frames, NOT UVC/IAMCameraControl) — Tiny 2's V4L2 UVC
+//  exposure path is a stub (VIDIOC_S_CTRL is accepted but ignored).
+//  These use the proprietary V3 frame protocol:
+//    - CAM_SET_EXPOSURE_MODE (0x2442): i32le(0=auto, 1=manual)
+//    - CAM_SET_EXPOSURE_TINY2  (0x2982): i32le(value) 0..65535
+// ---------------------------------------------------------------------------
+export const encodeSetExposureMode = (manual: boolean): VendorFrame =>
+  vendorOp("CAM_SET_EXPOSURE_MODE", i32le(manual ? 1 : 0));
+
+export const encodeSetExposureValue = (raw: number): VendorFrame =>
+  vendorOp("CAM_SET_EXPOSURE_TINY2", i32le(raw));
+
+export const encodeGetExposureMode = (): VendorFrame =>
+  vendorOp("CAM_GET_EXPOSURE_MODE", Buffer.alloc(0));
+
+export const encodeGetExposureValue = (): VendorFrame =>
+  vendorOp("CAM_GET_EXPOSURE_TINY2", Buffer.alloc(0));
+
+export const encodeGetExposureRange = (): VendorFrame =>
+  vendorOp("CAM_GET_EXPOSURE_RANGE_TINY2", Buffer.alloc(0));
+
+export interface ExposureRange {
+  min: number;
+  max: number;
+}
+
+export const decodeExposureRange = (payload: Buffer): ExposureRange => {
+  if (payload.length < 8) {
+    throw new Error(`exposure range reply too short: ${payload.length} bytes`);
+  }
+  return {
+    min: payload.readInt32LE(0),
+    max: payload.readInt32LE(4),
+  };
+};
+
+// ---------------------------------------------------------------------------
 //  Reads (Get commands) — the return channel. A GET request carries no nested
 //  payload (it asks, it does not set); the camera replies with a frame whose
 //  payload holds the state. Decoders take that reply payload.
