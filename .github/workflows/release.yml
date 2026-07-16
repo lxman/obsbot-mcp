@@ -136,12 +136,12 @@ jobs:
         with:
           name: darwin-x64
           path: native/prebuilt/darwin-x64
-      # upload-artifact does not preserve file modes: the helpers are built +x
-      # but the artifact round-trip zips and re-extracts them without it, and
-      # npm would then ship a binary the user cannot spawn. This chmod is a
-      # no-op if the bit survived — the `test -x` assertions below are the real
-      # guard, and they are why this is checked rather than assumed.
-      - name: Restore executable bit on POSIX helpers
+      # Belt and braces. Checked against run 29479953193: upload-artifact DOES
+      # preserve the +x bit (raw artifacts download as 0755), so this chmod is
+      # a no-op today. It stays because the round-trip preserving modes is not
+      # a documented guarantee, and a helper shipped without +x cannot be
+      # spawned at all. The `test -x` assertions below are the actual guard.
+      - name: Ensure executable bit on POSIX helpers
         run: |
           for t in linux-x64 darwin-arm64 darwin-x64; do
             chmod +x "native/prebuilt/$t/obsbot-helper"
