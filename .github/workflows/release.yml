@@ -126,20 +126,44 @@ jobs:
         with:
           name: linux-x64
           path: native/prebuilt/linux-x64
+      - name: Download macOS helper (darwin-arm64)
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: darwin-arm64
+          path: native/prebuilt/darwin-arm64
+      - name: Download macOS helper (darwin-x64)
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: darwin-x64
+          path: native/prebuilt/darwin-x64
+      # upload-artifact does not preserve file modes: the helpers are built +x
+      # but the artifact round-trip zips and re-extracts them without it, and
+      # npm would then ship a binary the user cannot spawn. This chmod is a
+      # no-op if the bit survived — the `test -x` assertions below are the real
+      # guard, and they are why this is checked rather than assumed.
+      - name: Restore executable bit on POSIX helpers
+        run: |
+          for t in linux-x64 darwin-arm64 darwin-x64; do
+            chmod +x "native/prebuilt/$t/obsbot-helper"
+          done
       - name: Verify staged binary layout
         run: |
-          echo "--- native/prebuilt tree ---"; ls -R native/prebuilt
+          echo "--- native/prebuilt tree ---"; ls -lR native/prebuilt
           test -f native/prebuilt/win32-x64/obsbot-helper.exe \
             || { echo "::error::helper not staged at native/prebuilt/win32-x64/obsbot-helper.exe"; exit 1; }
-          test -f native/prebuilt/linux-x64/obsbot-helper \
-            || { echo "::error::helper not staged at native/prebuilt/linux-x64/obsbot-helper"; exit 1; }
+          for t in linux-x64 darwin-arm64 darwin-x64; do
+            test -x "native/prebuilt/$t/obsbot-helper" \
+              || { echo "::error::helper missing or not executable at native/prebuilt/$t/obsbot-helper"; exit 1; }
+          done
       - name: Verify tarball contents
         run: |
           npm pack --dry-run 2>&1 | tee pack.txt
           grep -q "native/prebuilt/win32-x64/obsbot-helper.exe" pack.txt \
             || { echo "::error::win32-x64 helper missing from tarball"; exit 1; }
-          grep -q "native/prebuilt/linux-x64/obsbot-helper" pack.txt \
-            || { echo "::error::linux-x64 helper missing from tarball"; exit 1; }
+          for t in linux-x64 darwin-arm64 darwin-x64; do
+            grep -q "native/prebuilt/$t/obsbot-helper" pack.txt \
+              || { echo "::error::$t helper missing from tarball"; exit 1; }
+          done
           grep -q "dist/index.js" pack.txt \
             || { echo "::error::dist/index.js missing from tarball"; exit 1; }
           rm -f pack.txt
