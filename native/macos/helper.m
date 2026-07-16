@@ -425,33 +425,40 @@ static uint8_t procampSel(long prop) {
 // Snapshot via AVFoundation
 // ---------------------------------------------------------------------------
 
+// `done` is set from the capture callback and polled by a run-loop pump rather
+// than waited on with a semaphore: AVFoundation delivers this callback through
+// the run loop, so blocking the thread waiting for it deadlocks — the callback
+// can never arrive while we are the one not servicing the run loop.
 @interface SnapshotDelegate : NSObject <AVCapturePhotoCaptureDelegate>
-@property (nonatomic, strong) dispatch_semaphore_t sema;
+@property (atomic)            BOOL               done;
 @property (nonatomic, strong) NSData            *jpegData;
 @property (nonatomic)         CMVideoDimensions  dims;
 @end
 
 @implementation SnapshotDelegate
-- (instancetype)init {
-  if ((self = [super init])) {
-    _sema = dispatch_semaphore_create(0);
-  }
-  return self;
-}
 - (void)captureOutput:(AVCapturePhotoOutput *)output
   didFinishProcessingPhoto:(AVCapturePhoto *)photo
                     error:(NSError *)error {
   (void)output;
   if (error) {
     os_log_error(OS_LOG_DEFAULT, "snapshot: %{public}@", error.localizedDescription);
-    dispatch_semaphore_signal(self.sema);
+    self.done = YES;
     return;
   }
   self.jpegData = [photo fileDataRepresentation];
   self.dims = photo.resolvedSettings.photoDimensions;
-  dispatch_semaphore_signal(self.sema);
+  self.done = YES;
 }
 @end
+
+// Service the run loop for `seconds`, instead of sleeping. Used both to let the
+// capture session settle and to wait for the photo callback.
+static void pumpRunLoop(NSTimeInterval seconds) {
+  NSDate *until = [NSDate dateWithTimeIntervalSinceNow:seconds];
+  while ([until timeIntervalSinceNow] > 0) {
+    [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode beforeDate:until];
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Op handlers
@@ -787,92 +794,84 @@ static void doSnapshot(NSString *pathArg, long maxDim, long quality, long settle
 
   long actualSettle = (settleMs <= 0) ? 600 : settleMs;
 
-  dispatch_queue_t q = dispatch_queue_create("com.obsbot.snapshot", DISPATCH_QUEUE_SERIAL);
-  __block AVCaptureSession *session = [[AVCaptureSession alloc] init];
-  __block NSError *captureError = nil;
-  __block BOOL responded = NO;
+  // All of this runs on the calling (main) thread and services the run loop
+  // rather than blocking it. An earlier version wrapped the capture in
+  // dispatch_sync + dispatch_semaphore_wait, which deadlocked every time:
+  // AVFoundation delivers didFinishProcessingPhoto through the run loop, so a
+  // blocked thread guarantees the callback never arrives and the wait always
+  // hits its timeout.
+  NSError *error = nil;
+  AVCaptureSession *session = [[AVCaptureSession alloc] init];
 
-  dispatch_sync(q, ^{
-    NSError *error = nil;
-    AVCaptureDeviceInput *input = [AVCaptureDeviceInput deviceInputWithDevice:dev error:&error];
-    if (!input) { captureError = error; return; }
-    if (![session canAddInput:input]) { captureError = [NSError errorWithDomain:@"obsbot" code:-1 userInfo:@{NSLocalizedDescriptionKey: @"cannot add input"}]; return; }
-    [session addInput:input];
-
-    AVCapturePhotoOutput *output = [[AVCapturePhotoOutput alloc] init];
-    if (![session canAddOutput:output]) { captureError = [NSError errorWithDomain:@"obsbot" code:-1 userInfo:@{NSLocalizedDescriptionKey: @"cannot add photo output"}]; return; }
-    [session addOutput:output];
-
-    [session startRunning];
-
-    usleep((useconds_t)(actualSettle * 1000));
-
-    SnapshotDelegate *delegate = [[SnapshotDelegate alloc] init];
-    AVCapturePhotoSettings *settings = [AVCapturePhotoSettings photoSettingsWithFormat:@{
-      AVVideoCodecKey: AVVideoCodecTypeJPEG,
-    }];
-    [output capturePhotoWithSettings:settings delegate:delegate];
-
-    long waitResult = dispatch_semaphore_wait(delegate.sema,
-        dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC));
-
-    [session stopRunning];
-
-    if (waitResult != 0) {
-      captureError = [NSError errorWithDomain:@"obsbot" code:-2
-          userInfo:@{NSLocalizedDescriptionKey: @"snapshot timed out"}];
-      return;
-    }
-    if (!delegate.jpegData) {
-      captureError = [NSError errorWithDomain:@"obsbot" code:-3
-          userInfo:@{NSLocalizedDescriptionKey: @"snapshot produced no data"}];
-      return;
-    }
-
-    // Scale if maxDim is specified.
-    CGFloat w = delegate.dims.width;
-    CGFloat h = delegate.dims.height;
-    if (maxDim > 0 && (w > maxDim || h > maxDim)) {
-      CGFloat scale = (CGFloat)maxDim / MAX(w, h);
-      CGFloat dw = round(w * scale);
-      CGFloat dh = round(h * scale);
-      if (dw < 1) dw = 1;
-      if (dh < 1) dh = 1;
-
-      CGImageSourceRef src = CGImageSourceCreateWithData(
-          (__bridge CFDataRef)delegate.jpegData, NULL);
-      if (src) {
-        NSDictionary *opts = @{
-          (NSString *)kCGImageSourceThumbnailMaxPixelSize: @((CGFloat)maxDim),
-          (NSString *)kCGImageSourceCreateThumbnailFromImageAlways: @YES,
-        };
-        CGImageRef thumb = CGImageSourceCreateThumbnailAtIndex(src, 0,
-            (__bridge CFDictionaryRef)opts);
-        if (thumb) {
-          NSBitmapImageRep *rep = [[NSBitmapImageRep alloc] initWithCGImage:thumb];
-          NSData *scaledJPEG = [rep representationUsingType:NSBitmapImageFileTypeJPEG
-                                                 properties:@{NSImageCompressionFactor: @((CGFloat)quality / 100.0)}];
-          if (scaledJPEG) delegate.jpegData = scaledJPEG;
-          CGImageRelease(thumb);
-        }
-        CFRelease(src);
-      }
-      w = dw; h = dh;
-    }
-
-    NSString *b64 = [delegate.jpegData base64EncodedStringWithOptions:0];
-
-    responded = YES;
-    NSString *body = [NSString stringWithFormat:
-      @",\"mime\":\"image/jpeg\",\"width\":%ld,\"height\":%ld,\"base64\":\"%@\"",
-      (long)w, (long)h, b64];
-    ok(body);
-  });
-
-  if (!responded) {
-    err([NSString stringWithFormat:@"snapshot: %@",
-         captureError.localizedDescription ?: @"unknown error"]);
+  AVCaptureDeviceInput *input = [AVCaptureDeviceInput deviceInputWithDevice:dev error:&error];
+  if (!input) {
+    err([NSString stringWithFormat:@"snapshot: %@", error.localizedDescription]);
+    return;
   }
+  if (![session canAddInput:input]) { err(@"snapshot: cannot add input"); return; }
+  [session addInput:input];
+
+  AVCapturePhotoOutput *output = [[AVCapturePhotoOutput alloc] init];
+  if (![session canAddOutput:output]) { err(@"snapshot: cannot add photo output"); return; }
+  [session addOutput:output];
+
+  [session startRunning];
+
+  // Let the stream settle (pump, don't sleep — same reason as above).
+  pumpRunLoop((NSTimeInterval)actualSettle / 1000.0);
+
+  SnapshotDelegate *delegate = [[SnapshotDelegate alloc] init];
+  AVCapturePhotoSettings *settings = [AVCapturePhotoSettings photoSettingsWithFormat:@{
+    AVVideoCodecKey: AVVideoCodecTypeJPEG,
+  }];
+  [output capturePhotoWithSettings:settings delegate:delegate];
+
+  NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:5.0];
+  while (!delegate.done && [deadline timeIntervalSinceNow] > 0) {
+    [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
+                             beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
+  }
+
+  [session stopRunning];
+
+  if (!delegate.done)     { err(@"snapshot: snapshot timed out"); return; }
+  if (!delegate.jpegData) { err(@"snapshot: snapshot produced no data"); return; }
+
+  // Scale if maxDim is specified.
+  CGFloat w = delegate.dims.width;
+  CGFloat h = delegate.dims.height;
+  if (maxDim > 0 && (w > maxDim || h > maxDim)) {
+    CGFloat scale = (CGFloat)maxDim / MAX(w, h);
+    CGFloat dw = round(w * scale);
+    CGFloat dh = round(h * scale);
+    if (dw < 1) dw = 1;
+    if (dh < 1) dh = 1;
+
+    CGImageSourceRef src = CGImageSourceCreateWithData(
+        (__bridge CFDataRef)delegate.jpegData, NULL);
+    if (src) {
+      NSDictionary *opts = @{
+        (NSString *)kCGImageSourceThumbnailMaxPixelSize: @((CGFloat)maxDim),
+        (NSString *)kCGImageSourceCreateThumbnailFromImageAlways: @YES,
+      };
+      CGImageRef thumb = CGImageSourceCreateThumbnailAtIndex(src, 0,
+          (__bridge CFDictionaryRef)opts);
+      if (thumb) {
+        NSBitmapImageRep *rep = [[NSBitmapImageRep alloc] initWithCGImage:thumb];
+        NSData *scaledJPEG = [rep representationUsingType:NSBitmapImageFileTypeJPEG
+                                               properties:@{NSImageCompressionFactor: @((CGFloat)quality / 100.0)}];
+        if (scaledJPEG) delegate.jpegData = scaledJPEG;
+        CGImageRelease(thumb);
+      }
+      CFRelease(src);
+    }
+    w = dw; h = dh;
+  }
+
+  NSString *b64 = [delegate.jpegData base64EncodedStringWithOptions:0];
+  ok([NSString stringWithFormat:
+      @",\"mime\":\"image/jpeg\",\"width\":%ld,\"height\":%ld,\"base64\":\"%@\"",
+      (long)w, (long)h, b64]);
 }
 
 // ---------------------------------------------------------------------------
