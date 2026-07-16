@@ -184,8 +184,23 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # Release assets need unique names and every POSIX helper is called
+          # `obsbot-helper`, so the paths cannot be uploaded directly — the three
+          # would collide. Stage them under per-triple names, which is also what
+          # a human downloading one actually needs to tell them apart.
+          # Driven off one list so a new triple cannot be added to the matrix and
+          # silently skipped here (which is exactly how the macOS helpers were
+          # left off the v0.3.0 release).
+          mkdir -p release-assets
+          cp native/prebuilt/win32-x64/obsbot-helper.exe \
+             release-assets/obsbot-helper-win32-x64.exe
+          for t in linux-x64 darwin-arm64 darwin-x64; do
+            cp "native/prebuilt/$t/obsbot-helper" "release-assets/obsbot-helper-$t"
+          done
+          ls -l release-assets
+          test "$(ls release-assets | wc -l)" -eq 4 \
+            || { echo "::error::expected 4 release assets"; exit 1; }
           gh release create "$GITHUB_REF_NAME" \
-            native/prebuilt/win32-x64/obsbot-helper.exe \
-            native/prebuilt/linux-x64/obsbot-helper \
+            release-assets/* \
             --title "$GITHUB_REF_NAME" \
             --generate-notes
