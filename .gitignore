@@ -7,6 +7,18 @@ dist/
 native/**/build/
 native/prebuilt/
 
+# macOS: compiled helper + diagnostic binaries. The sources next to them are
+# tracked; these are build output that happens to live in the source dir.
+native/macos/obsbot-helper
+native/macos/diag_helper
+native/macos/debug_uvc
+native/macos/test_avf_uvc
+
+# macOS: retired CoreMediaIO extension experiment. Superseded by direct
+# device-level UVC control in helper.m; kept out of the repo (310MB of Xcode
+# build artifacts around a handful of dead sources).
+native/macos/cmio-ext/
+
 # OS cruft
 .DS_Store
 Thumbs.db
@@ -14,5 +26,7 @@ Thumbs.db
 # Editors
 .idea/
 .vscode/
-/native/macos/
 tools/
+
+# Logs
+logs/

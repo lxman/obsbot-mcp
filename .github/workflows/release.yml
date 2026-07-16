@@ -30,10 +30,12 @@ jobs:
             src: native/windows
             build: native/windows/build
             build_out: native/windows/build/Release
-          # Enable once a macOS helper source exists:
-          # - os: macos-latest
-          #   triple: darwin-arm64
-          #   helper: obsbot-helper
+          - os: macos-latest
+            triple: darwin-arm64
+            helper: obsbot-helper
+            src: native/macos
+            build: native/macos/build
+            build_out: native/macos/build
           - os: ubuntu-latest
             triple: linux-x64
             helper: obsbot-helper

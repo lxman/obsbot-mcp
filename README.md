@@ -133,10 +133,17 @@ need ffmpeg — it grabs the frame through the native helper.
   wake/sleep, HDR, FOV). Snapshots capture a MJPEG or YUYV frame via V4L2 mmap streaming and encode
   to JPEG using **libjpeg**. The `linux-x64` prebuilt binary ships with the published npm package.
   Build dependencies: `build-essential cmake libjpeg-dev libv4l-dev`.
-- **macOS** — not yet implemented. The design is platform-agnostic (see [`PROTOCOL.md`](./PROTOCOL.md));
-  adding support means writing an equivalent native helper for each OS's UVC control APIs
-  (`AVFoundation`/`IOKit` on macOS) behind the same JSON-RPC-over-stdio contract used by the existing
-  Windows and Linux helpers. Contributions welcome.
+- **macOS (Apple Silicon)** — supported. The native helper is in `native/macos/` (Objective-C +
+  **IOKit**/**AVFoundation**). It uses IOKit USB control transfers for both standard UVC controls
+  and vendor Extension Unit commands, and AVFoundation for enumeration and snapshots. The
+  `darwin-arm64` prebuilt binary ships with the published npm package.
+
+  Note on macOS specifically: `UVCAssistant` (a DriverKit system extension) owns the camera's UVC
+  *interfaces* exclusively, so `USBInterfaceOpen` — and even `USBInterfaceOpenSeize` — fail with
+  `kIOReturnExclusiveAccess`. The helper therefore opens the USB *device*, which is not locked, and
+  issues UVC control requests on its default control endpoint. This coexists with `UVCAssistant`:
+  the camera keeps working as a normal webcam while under control, so no driver-replacement step
+  is needed.
 
 ### Building the native helper (Linux)
 
@@ -147,6 +154,15 @@ cmake ..
 make -j$(nproc)
 make install  # copies to native/prebuilt/linux-x64/
 ```
+
+### Building the native helper (macOS)
+
+```bash
+make -C native/macos    # -> native/prebuilt/darwin-arm64/obsbot-helper
+```
+
+Requires the Xcode command line tools. CMake works too (`cmake -S native/macos -B
+native/macos/build && cmake --build native/macos/build`), which is what CI uses.
 
 ## No proprietary SDK
 

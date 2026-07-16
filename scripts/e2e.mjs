@@ -13,6 +13,10 @@
 // the camera always left asleep at the end (even on error, via try/finally).
 //
 // Usage: node scripts/e2e.mjs   (after `npm run build`)
+//
+// OBSBOT_HELPER_CMD overrides the helper binary, so the no-camera path can be
+// exercised without physically unplugging the camera:
+//   OBSBOT_HELPER_CMD="node test/device/fake-helper-no-obsbot.mjs" node scripts/e2e.mjs
 
 import { HelperProcess } from "../dist/transport/helper-process.js";
 import { DeviceManager } from "../dist/device/manager.js";
@@ -28,30 +32,34 @@ const STEP_PAUSE_MS = 1500;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function main() {
-  const helper = new HelperProcess();
+  const helper = new HelperProcess(process.env.OBSBOT_HELPER_CMD?.split(" "));
   console.log("→ starting native helper process...");
   await helper.start();
 
-  const mgr = new DeviceManager(helper);
-
-  console.log("→ enumerating devices...");
-  const devices = await mgr.list();
-  console.log(`  found ${devices.length} device(s):`);
-  for (const d of devices) {
-    console.log(`    - ${d.name}  (${d.path})`);
-  }
-
-  let transport;
+  // Everything below runs inside try/finally: the helper is a child process
+  // whose stdio keeps the event loop alive, so any path that leaves without
+  // closing it hangs the script forever and orphans the helper. That includes
+  // the no-camera path — the most likely one to hit.
   try {
-    transport = await mgr.openFirstObsbot();
-  } catch (err) {
-    console.error("\nNo OBSBOT Tiny 2 found. Is it plugged in?");
-    console.error(err instanceof Error ? err.message : err);
-    process.exitCode = 1;
-    return;
-  }
+    const mgr = new DeviceManager(helper);
 
-  try {
+    console.log("→ enumerating devices...");
+    const devices = await mgr.list();
+    console.log(`  found ${devices.length} device(s):`);
+    for (const d of devices) {
+      console.log(`    - ${d.name}  (${d.path})`);
+    }
+
+    let transport;
+    try {
+      transport = await mgr.openFirstObsbot();
+    } catch (err) {
+      console.error("\nNo OBSBOT Tiny 2 found. Is it plugged in?");
+      console.error(err instanceof Error ? err.message : err);
+      process.exitCode = 1;
+      return;
+    }
+
     console.log("\n→ waking (set_run_status: run)...");
     await transport.sendVendor(encodeSetRunStatus("run").buildFrame(transport.nextSeq()));
     await sleep(STEP_PAUSE_MS);
@@ -88,8 +96,10 @@ async function main() {
 
     console.log("\ne2e sequence complete. Camera left recentered + asleep.");
   } finally {
-    console.log("→ closing transport...");
-    await transport.close();
+    // Closing the helper is what releases the child process; every transport's
+    // close() just delegates here anyway.
+    console.log("→ closing helper...");
+    await helper.close();
   }
 }
 

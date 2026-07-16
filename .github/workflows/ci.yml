@@ -54,6 +54,25 @@ jobs:
             && echo "OK: obsbot-helper.exe built" \
             || { echo "::error::helper binary not produced"; exit 1; }
 
+  helper-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Cache native build
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: native/macos/build
+          key: ${{ runner.os }}-cmake-${{ hashFiles('native/macos/helper.m', 'native/macos/CMakeLists.txt') }}
+      - name: Configure (CMake)
+        run: cmake -S native/macos -B native/macos/build -DCMAKE_BUILD_TYPE=Release
+      - name: Build (CMake)
+        run: cmake --build native/macos/build
+      - name: Verify helper binary exists
+        run: |
+          test -f native/macos/build/obsbot-helper \
+            && echo "OK: obsbot-helper built" \
+            || { echo "::error::helper binary not produced"; exit 1; }
+
   helper-linux:
     runs-on: ubuntu-latest
     steps:
