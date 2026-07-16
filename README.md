@@ -133,10 +133,14 @@ need ffmpeg — it grabs the frame through the native helper.
   wake/sleep, HDR, FOV). Snapshots capture a MJPEG or YUYV frame via V4L2 mmap streaming and encode
   to JPEG using **libjpeg**. The `linux-x64` prebuilt binary ships with the published npm package.
   Build dependencies: `build-essential cmake libjpeg-dev libv4l-dev`.
-- **macOS (Apple Silicon)** — supported. The native helper is in `native/macos/` (Objective-C +
-  **IOKit**/**AVFoundation**). It uses IOKit USB control transfers for both standard UVC controls
-  and vendor Extension Unit commands, and AVFoundation for enumeration and snapshots. The
-  `darwin-arm64` prebuilt binary ships with the published npm package.
+- **macOS 14+ (Apple Silicon and Intel)** — supported. The native helper is in `native/macos/`
+  (Objective-C + **IOKit**/**AVFoundation**). It uses IOKit USB control transfers for both standard
+  UVC controls and vendor Extension Unit commands, and AVFoundation for enumeration and snapshots.
+  Both `darwin-arm64` and `darwin-x64` prebuilt binaries ship with the published npm package
+  (`darwin-x64` also covers Apple Silicon running Node under Rosetta, where `process.arch` reports
+  `x64`). macOS 14 is the floor because the helper uses `AVCaptureDeviceTypeExternal`; the build
+  pins `-mmacosx-version-min` so the binary does not inherit the build machine's OS as its
+  minimum.
 
   Note on macOS specifically: `UVCAssistant` (a DriverKit system extension) owns the camera's UVC
   *interfaces* exclusively, so `USBInterfaceOpen` — and even `USBInterfaceOpenSeize` — fail with

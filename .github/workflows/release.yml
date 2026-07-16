@@ -36,6 +36,15 @@ jobs:
             src: native/macos
             build: native/macos/build
             build_out: native/macos/build
+          # Intel Macs, and Apple Silicon running Node under Rosetta (where
+          # process.arch reports x64). Cross-compiled from the arm64 runner.
+          - os: macos-latest
+            triple: darwin-x64
+            helper: obsbot-helper
+            src: native/macos
+            build: native/macos/build-x64
+            build_out: native/macos/build-x64
+            cmake_extra: -DCMAKE_OSX_ARCHITECTURES=x86_64
           - os: ubuntu-latest
             triple: linux-x64
             helper: obsbot-helper
@@ -62,7 +71,7 @@ jobs:
       # The CMake generator is deliberately left to the runner default (currently
       # VS 2026) rather than pinned with -G, so image updates don't break the build.
       - name: Configure (CMake)
-        run: cmake -S ${{ matrix.src }} -B ${{ matrix.build }} -DCMAKE_BUILD_TYPE=Release
+        run: cmake -S ${{ matrix.src }} -B ${{ matrix.build }} -DCMAKE_BUILD_TYPE=Release ${{ matrix.cmake_extra }}
       - name: Build (CMake)
         run: cmake --build ${{ matrix.build }} --config Release
       - name: Stage binary into native/prebuilt/<triple>

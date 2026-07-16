@@ -5,6 +5,7 @@ dist/
 
 # Native build artifacts (the build dir; the prebuilt helper is handled separately)
 native/**/build/
+native/**/build-*/
 native/prebuilt/
 
 # macOS: compiled helper + diagnostic binaries. The sources next to them are

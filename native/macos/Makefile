@@ -13,6 +13,13 @@ PROJ_ROOT := ../..
 TARGET_DIR := $(PROJ_ROOT)/native/prebuilt/darwin-arm64
 HELPER    := $(TARGET_DIR)/obsbot-helper
 
+# Minimum macOS version. Without this the binary inherits the build machine's OS
+# as its floor and refuses to launch on anything older — a build on macOS 26
+# emits minos 26.0. Keep in sync with CMakeLists.txt, which CI uses; a local
+# build that differs from the shipped one is how that bug stayed hidden.
+# 14.0 is the newest API the helper uses (AVCaptureDeviceTypeExternal).
+MIN_MACOS := 14.0
+
 .PHONY: all clean run dist
 
 all: $(HELPER)
@@ -20,6 +27,7 @@ all: $(HELPER)
 $(HELPER): helper.m
 	mkdir -p $(TARGET_DIR)
 	xcrun clang -fobjc-arc \
+		-mmacosx-version-min=$(MIN_MACOS) \
 		-framework IOKit \
 		-framework AVFoundation \
 		-framework CoreMedia \
@@ -27,15 +35,15 @@ $(HELPER): helper.m
 		-framework AppKit \
 		-o $@ $^
 	chmod +x $@
-	@echo "Built: $@"
+	@echo "Built: $@ (minos $(MIN_MACOS))"
 
 # Build a fat binary (arm64 + x86_64) for distributable builds (archived
 # under native/prebuilt/darwin/ for the CI release pipeline).
 dist:
 	mkdir -p $(PROJ_ROOT)/native/prebuilt/darwin
-	xcrun clang -fobjc-arc -target arm64-apple-macos11 \
+	xcrun clang -fobjc-arc -target arm64-apple-macos$(MIN_MACOS) \
 		-c helper.m -o /tmp/obsbot-helper-arm64.o
-	xcrun clang -fobjc-arc -target x86_64-apple-macos11 \
+	xcrun clang -fobjc-arc -target x86_64-apple-macos$(MIN_MACOS) \
 		-c helper.m -o /tmp/obsbot-helper-x86_64.o
 	xcrun clang -arch arm64 -arch x86_64 \
 		-framework IOKit \
@@ -60,7 +68,7 @@ X64_HELPER := $(X64_DIR)/obsbot-helper
 
 $(X64_HELPER): helper.m
 	mkdir -p $(X64_DIR)
-	xcrun clang -fobjc-arc -target x86_64-apple-macos11 \
+	xcrun clang -fobjc-arc -target x86_64-apple-macos$(MIN_MACOS) \
 		-framework IOKit \
 		-framework AVFoundation \
 		-framework CoreMedia \
