@@ -734,6 +734,24 @@ static void doCamCtrlGet(NSString *propStr) {
   uint8_t ent = camctrlEnt(prop);
   if (sel == 0) { err(@"camctrl_get: unsupported property"); return; }
 
+  if (prop == 0 || prop == 1) {
+    // The Tiny 2's pan/tilt control (selector 0x0E) is a 4-byte pair of int16:
+    // pan at offset 0, tilt at offset 2 — the same layout doCamCtrlSet writes.
+    // The old code read the whole 4 bytes as one int32 and returned it for BOTH
+    // pan and tilt, so tilt never saw its own field and obsbot_gimbal_position
+    // reported pitch == -yaw. Confirmed on hardware: yaw moves the pan int16 and
+    // leaves the tilt int16 fixed, and vice-versa.
+    struct __attribute__((packed)) { int16_t pan; int16_t tilt; } pt = {0, 0};
+    IOReturn kr = uvcGetCur(g_session.usbDevice, sel, ent, &pt, sizeof(pt));
+    if (kr != kIOReturnSuccess) {
+      err([NSString stringWithFormat:@"camctrl_get: GET_CUR pan/tilt failed (0x%x)", kr]);
+      return;
+    }
+    int16_t value = (prop == 0) ? pt.pan : pt.tilt;
+    ok([NSString stringWithFormat:@",\"value\":%d,\"flags\":2", value]);
+    return;
+  }
+
   int32_t value = 0;
   IOReturn kr = uvcGetCur(g_session.usbDevice, sel, ent, &value, sizeof(value));
   if (kr != kIOReturnSuccess) {
