@@ -1,9 +1,14 @@
 # Releasing obsbot-mcp
 
 Releases are automated: pushing a `vX.Y.Z` git tag triggers
-`.github/workflows/release.yml`, which builds the Windows native helper,
+`.github/workflows/release.yml`, which builds the native helper for every
+supported triple (`win32-x64`, `linux-x64`, `darwin-arm64`, `darwin-x64`),
 publishes the package to npm via **OIDC trusted publishing** (no tokens),
-and creates a GitHub Release with the helper binary attached.
+and creates a GitHub Release with the helper binaries attached.
+
+Adding a triple means touching the build matrix **and** the `publish` job,
+which downloads each artifact by name — a matrix entry alone builds a helper
+that never reaches the tarball.
 
 ## One-time bootstrap (already done for 0.1.0)
 

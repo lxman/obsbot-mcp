@@ -168,6 +168,38 @@ make -C native/macos    # -> native/prebuilt/darwin-arm64/obsbot-helper
 Requires the Xcode command line tools. CMake works too (`cmake -S native/macos -B
 native/macos/build && cmake --build native/macos/build`), which is what CI uses.
 
+## Known limitations
+
+What has actually been exercised against hardware, and what hasn't:
+
+| Platform | Status |
+|---|---|
+| `win32-x64` | Builds in CI |
+| `linux-x64` | Builds in CI |
+| `darwin-arm64` | **Hardware-verified** — control, gimbal, zoom, and snapshot on a real Tiny 2 |
+| `darwin-x64` | **Build-verified only** — compiles with the right architecture and deployment target, never executed |
+
+- **The Intel (`darwin-x64`) helper has never been run.** No Intel Mac was available to test it. It
+  cross-compiles cleanly and is packaged, but nothing has confirmed it talks to a camera. It also
+  covers Apple Silicon running Node under Rosetta, where `process.arch` reports `x64` — likewise
+  untested. Reports from Intel users are welcome.
+- **macOS 14 or newer is required**, and macOS runtime is verified on **26.5 only**. The helper uses
+  `AVCaptureDeviceTypeExternal` (macOS 14+), so the build pins `-mmacosx-version-min=14.0`. The
+  binary will *load* on 14 through 25, but behavior there is untested — in particular the UVC
+  control path relies on `UVCAssistant` holding the camera's UVC interfaces while leaving the USB
+  device itself openable. That is how current macOS behaves; older releases are unconfirmed.
+- **The first snapshot on macOS raises a camera permission prompt.** The helper is a plain CLI tool
+  with no bundle identifier, so macOS attributes camera access to whichever app spawned it — your
+  MCP client — and that app is named in the prompt and holds the grant. Approve once; the grant
+  survives helper updates, since it is keyed to the client rather than to the helper's signature.
+- **The camera may not enumerate through a USB hub or dock.** A Tiny 2 connected through a USB-C
+  dock was invisible to `ioreg` and `system_profiler` entirely — not just to this server. If
+  `obsbot_list_devices` comes back empty, try a direct connection before assuming a software fault.
+- **Only the OBSBOT Tiny 2 is supported.** On macOS the USB vendor/product IDs are hardcoded
+  (`0x3564`/`0xFEF8`), so no other model is detected at all. Windows and Linux match devices by
+  name, so a different OBSBOT may be *found* — but the vendor command set is Tiny 2 specific
+  either way.
+
 ## No proprietary SDK
 
 This project speaks the camera's USB protocol directly through the OS's standard UVC driver stack and
