@@ -176,7 +176,7 @@ What has actually been exercised against hardware, and what hasn't:
 |---|---|
 | `win32-x64` | Builds in CI |
 | `linux-x64` | Builds in CI |
-| `darwin-arm64` | **Hardware-verified** — control, gimbal, zoom, and snapshot on a real Tiny 2 |
+| `darwin-arm64` | **Hardware-verified** — control, gimbal movement **and per-axis position readback**, zoom, and snapshot on a real Tiny 2 |
 | `darwin-x64` | **Build-verified only** — compiles with the right architecture and deployment target, never executed |
 
 - **The Intel (`darwin-x64`) helper has never been run.** No Intel Mac was available to test it. It
@@ -192,6 +192,10 @@ What has actually been exercised against hardware, and what hasn't:
   with no bundle identifier, so macOS attributes camera access to whichever app spawned it — your
   MCP client — and that app is named in the prompt and holds the grant. Approve once; the grant
   survives helper updates, since it is keyed to the client rather than to the helper's signature.
+- **AI tracking overrides manual gimbal moves.** When AI tracking is active (the Tiny 2's default
+  on wake), a commanded pan/tilt executes and is then pulled back to the tracked subject —
+  `obsbot_gimbal_position` shows the yaw/pitch move out and decay back to rest. This is the camera's
+  behaviour, not a bug: turn tracking off for unopposed manual control.
 - **The camera may not enumerate through a USB hub or dock.** A Tiny 2 connected through a USB-C
   dock was invisible to `ioreg` and `system_profiler` entirely — not just to this server. If
   `obsbot_list_devices` comes back empty, try a direct connection before assuming a software fault.
