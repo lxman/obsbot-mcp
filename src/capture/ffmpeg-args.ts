@@ -1,6 +1,10 @@
-// Pure helpers for the recording/preview subsystem: parse ffmpeg's dshow device
-// listing and build the exact ffmpeg/ffplay argv arrays. No side effects.
+// Pure helpers for the recording/preview subsystem: parse ffmpeg's dshow
+// (Windows) or avfoundation (macOS) device listing and build the exact
+// ffmpeg/ffplay argv arrays. No side effects.
+
 export type CaptureSource = "device" | "virtual" | "ndi";
+
+// ── Windows (dshow) ────────────────────────────────────────────────────────
 
 export interface DshowDevices {
   video: string[];
@@ -58,6 +62,88 @@ export function buildPreviewArgs(o: { videoName: string }): string[] {
   return [
     "-hide_banner", "-loglevel", "warning", "-f", "dshow",
     "-i", `video=${o.videoName}`,
+    "-window_title", "OBSBOT preview",
+  ];
+}
+
+// ── macOS (avfoundation) ───────────────────────────────────────────────────
+
+export interface AvfDevices {
+  /** Device indices, keyed by display name (the name shown by ffmpeg). */
+  video: Record<string, number>;
+  audio: Record<string, number>;
+}
+
+// ffmpeg -f avfoundation -list_devices true -i ""  prints on stderr:
+//   [AVFoundation indev @ 0x...] AVFoundation video devices:
+//   [AVFoundation indev @ 0x...] [0] FaceTime HD Camera
+//   [AVFoundation indev @ 0x...] [1] OBSBOT Tiny 2
+//   [AVFoundation indev @ 0x...] AVFoundation audio devices:
+//   [AVFoundation indev @ 0x...] [0] Built-in Microphone
+//   [AVFoundation indev @ 0x...] [1] OBSBOT Tiny 2 Microphone
+export function parseAvfDevices(stderr: string): AvfDevices {
+  const video: Record<string, number> = {};
+  const audio: Record<string, number> = {};
+  let section: "video" | "audio" | null = null;
+  for (const line of stderr.split(/\r?\n/)) {
+    if (/AVFoundation video devices/i.test(line)) { section = "video"; continue; }
+    if (/AVFoundation audio devices/i.test(line)) { section = "audio"; continue; }
+    if (!section) continue;
+    const m = line.match(/\[\s*(\d+)\]\s+(.+)/);
+    if (m) {
+      const idx = parseInt(m[1], 10);
+      const name = m[2].trim();
+      if (section === "video") video[name] = idx;
+      else audio[name] = idx;
+    }
+  }
+  return { video, audio };
+}
+
+export function resolveAvfVideoName(
+  devices: AvfDevices,
+  source: CaptureSource,
+): { name: string; index: number } | undefined {
+  const names = Object.keys(devices.video);
+  let match: string | undefined;
+  if (source === "virtual") match = names.find((n) => /OBSBOT Virtual Camera/i.test(n));
+  else if (source === "ndi") match = names.find((n) => /NDI Webcam/i.test(n));
+  else match = names.find((n) => /OBSBOT/i.test(n) && !/Virtual/i.test(n));
+  if (!match) return undefined;
+  return { name: match, index: devices.video[match] };
+}
+
+export function resolveAvfAudioName(
+  devices: AvfDevices,
+): { name: string; index: number } | undefined {
+  const entry = Object.entries(devices.audio).find(([name]) => /OBSBOT.*Mic/i.test(name));
+  if (!entry) return undefined;
+  return { name: entry[0], index: entry[1] };
+}
+
+export function buildAvfRecordArgs(o: {
+  videoIndex: number;
+  audioIndex?: number;
+  durationSec: number;
+  outputPath: string;
+}): string[] {
+  const input = o.audioIndex !== undefined
+    ? `${o.videoIndex}:${o.audioIndex}`
+    : `${o.videoIndex}`;
+  return [
+    "-hide_banner", "-loglevel", "warning", "-f", "avfoundation",
+    "-i", input,
+    "-t", String(o.durationSec),
+    "-c:v", "libx264", "-pix_fmt", "yuv420p",
+    ...(o.audioIndex !== undefined ? ["-c:a", "aac"] : []),
+    "-y", o.outputPath,
+  ];
+}
+
+export function buildAvfPreviewArgs(o: { videoIndex: number }): string[] {
+  return [
+    "-hide_banner", "-loglevel", "warning", "-f", "avfoundation",
+    "-i", `${o.videoIndex}`,
     "-window_title", "OBSBOT preview",
   ];
 }

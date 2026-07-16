@@ -48,6 +48,7 @@ function mkManager(over: Partial<{ hasBinary: (n: string) => boolean; existsSync
     clock: () => "2026-07-13T00:00:00.000Z",
     hasBinary: over.hasBinary ?? (() => true),
     fs: { existsSync: over.existsSync ?? (() => false), mkdirSync: vi.fn() },
+    platform: "win32",
   });
   return { mgr, spawn, children };
 }
