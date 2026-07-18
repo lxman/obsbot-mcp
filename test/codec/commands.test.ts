@@ -3,6 +3,7 @@ import {
   encodeSetRunStatus, encodePtzMoveAngle, encodePtzMoveSpeed, encodeRecenter, zoomRatioToUnits,
   encodeAiTrackEnable, encodeAiTrackDisable, encodeAiGroupEnable, encodeAiTrackSpeed,
   encodeZoomWithSpeed, encodeFaceFocus, encodeGetFaceFocus, decodeFaceFocus, encodeFov, encodeHdr, encodeAiTracking, AI_FRAMING_MODES, percentToRange,
+  encodeAiMode, AI_WORK_MODES, encodeFaceAe,
 } from "../../src/codec/commands.js";
 import { decodeStatus } from "../../src/codec/commands.js";
 import { bufToHex } from "../../src/codec/encoding.js";
@@ -156,6 +157,43 @@ test("AI_FRAMING_MODES lists the five device-real framings", () => {
   expect(AI_FRAMING_MODES).toEqual(["normal", "upper-body", "close-up", "headless", "lower-body"]);
 });
 
+// Non-human AI work modes share the sel-6 [0x16,0x02,work,framing] command. byte[2]
+// is the libdev AiWorkModeType value, hardware-verified 2026-07-18 (the status m-byte
+// at 0x18 echoes it directly): none=0, group=1, human=2, hand=3, whiteboard=4, desk=5.
+// framing (byte[3]) is only meaningful for human; other work modes force it to 0.
+test("AI_WORK_MODES lists the six device work modes", () => {
+  expect(AI_WORK_MODES).toEqual(["none", "group", "human", "hand", "whiteboard", "desk"]);
+});
+
+test.each([
+  ["none", 0x00],
+  ["group", 0x01],
+  ["hand", 0x03],
+  ["whiteboard", 0x04],
+  ["desk", 0x05],
+] as const)("encodeAiMode(%s) sets byte[2]=%i and framing byte[3]=0", (work, byte2) => {
+  const buf = encodeAiMode(work);
+  expect(buf.length).toBe(60);
+  expect([...buf.subarray(0, 4)]).toEqual([0x16, 0x02, byte2, 0x00]);
+});
+
+test("encodeAiMode('human', framing) sets byte[2]=2 and byte[3]=framing", () => {
+  expect([...encodeAiMode("human", "close-up").subarray(0, 4)]).toEqual([0x16, 0x02, 0x02, 0x02]);
+  expect([...encodeAiMode("human", "lower-body").subarray(0, 4)]).toEqual([0x16, 0x02, 0x02, 0x04]);
+});
+
+test("encodeAiMode ignores the framing arg for non-human work modes", () => {
+  expect([...encodeAiMode("whiteboard", "close-up").subarray(0, 4)]).toEqual([0x16, 0x02, 0x04, 0x00]);
+});
+
+// Face-priority auto-exposure: sel-6 tag 0x03, [0x03,0x01,v] v=1 face / 0 global.
+// Hardware-verified 2026-07-18 (moves status offset 0x07). Distinct from face_focus.
+test("encodeFaceAe builds a 60-byte tag-0x03 uvcExt write [03 01 v]", () => {
+  expect(encodeFaceAe(true).length).toBe(60);
+  expect([...encodeFaceAe(true).subarray(0, 3)]).toEqual([0x03, 0x01, 0x01]);
+  expect([...encodeFaceAe(false).subarray(0, 3)]).toEqual([0x03, 0x01, 0x00]);
+});
+
 test("percentToRange maps 0..100 onto [min,max]", () => {
   expect(percentToRange(0, 10, 20)).toBe(10);
   expect(percentToRange(100, 10, 20)).toBe(20);
@@ -192,6 +230,7 @@ test("decodeStatus reads awake (0x02===0) and hdr (0x06!==0)", () => {
   expect(decodeStatus(statusBlock({ 0x02: 0, 0x06: 1 }))).toEqual({
     awake: true,
     hdr: true,
+    faceAe: false,
     aiMode: "no-tracking",
     trackSpeed: "standard",
   });
@@ -201,9 +240,19 @@ test("decodeStatus reports sleep and hdr-off", () => {
   expect(decodeStatus(statusBlock({ 0x02: 1, 0x06: 0 }))).toEqual({
     awake: false,
     hdr: false,
+    faceAe: false,
     aiMode: "no-tracking",
     trackSpeed: "standard",
   });
+});
+
+// Face-priority auto-exposure is reported at status offset 0x07 (1=face, 0=global).
+// Hardware-verified 2026-07-18 by toggling face/global and diffing the status block.
+test.each([
+  [1, true],
+  [0, false],
+])("decodeStatus maps face-AE byte 0x07=%i -> faceAe:%s", (v, expected) => {
+  expect(decodeStatus(statusBlock({ 0x07: v })).faceAe).toBe(expected);
 });
 
 test("decodeStatus throws on a block too short to hold the track-speed offset 0x24", () => {
@@ -229,6 +278,7 @@ test.each([
   [2, 4, "lower-body"],
   [5, 0, "desk"],
   [4, 0, "whiteboard"],
+  [3, 0, "hand"],
   [6, 0, "hand"],
   [1, 0, "group"],
   [7, 9, "unknown"],

@@ -88,7 +88,7 @@ With the installed binary, use `"command": "obsbot-mcp"` and `"args": ["--debug"
 
 | Tool | Parameters | Description |
 |------|------------|-------------|
-| `obsbot_ai_tracking` | `enabled` (bool), `mode` (default `"normal"`) | Enable/disable AI subject tracking and choose framing: `normal \| upper-body \| close-up \| headless \| lower-body`. Polls status and returns `{ verified, matched }` (`matched:false` = no subject tracked yet). |
+| `obsbot_ai_tracking` | `enabled` (bool), `mode` (default `"normal"`) | Enable/disable AI tracking and choose the mode: a human framing (`normal \| upper-body \| close-up \| headless \| lower-body`) or a scene mode (`group \| whiteboard \| desk \| hand`). Polls status and returns `{ verified, matched }` (`matched:false` = no subject tracked yet). |
 | `obsbot_ai_track_speed` | `speed`: `"standard" \| "sport"` | Set the tracking-speed preset (Center's Standard/Sport): `standard` (slower follow) or `sport` (snappier). |
 | `obsbot_face_focus` | `enabled` (bool) | Enable or disable face-priority autofocus. |
 
@@ -99,7 +99,7 @@ With the installed binary, use `"command": "obsbot-mcp"` and `"args": ["--debug"
 | `obsbot_fov` | `fov`: `"wide" \| "medium" \| "narrow"` | Set the field of view: wide (86°), medium (78°), narrow (65°). |
 | `obsbot_hdr` | `enabled` (bool) | Toggle HDR/WDR imaging on or off. |
 | `obsbot_focus` | `mode`: `"auto" \| "manual"`, `position` (`0`–`100`, default `50`) | `auto` = continuous autofocus; `manual` = set the focus motor to `position` (near→far). |
-| `obsbot_exposure` | `mode`: `"auto" \| "manual"`, `level` (`0`–`100`, default `50`) | `auto` = auto-exposure; `manual` = set `level` (0 darkest → 100 brightest). |
+| `obsbot_exposure` | `mode`: `"auto" \| "manual"`, `level` (`0`–`100`, default `50`), `priority` (`"global" \| "face"`, optional) | `auto` = auto-exposure (optional `priority` selects global vs face metering); `manual` = set `level` (0 darkest → 100 brightest). |
 | `obsbot_white_balance` | `mode`: `"auto" \| "manual"`, `temperature` (Kelvin, default `5000`) | `auto` = auto white balance; `manual` = set a colour temperature (clamped to device range). |
 | `obsbot_image_control` | `control`, `level` (`0`–`100`) | Adjust `brightness \| contrast \| hue \| saturation \| sharpness \| gain \| backlight-compensation`; `level` maps onto the device range. |
 

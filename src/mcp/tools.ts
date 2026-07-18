@@ -7,6 +7,8 @@ import {
   zoomRatioToUnits,
   encodeAiTrackSpeed,
   encodeAiTracking,
+  encodeAiMode,
+  encodeFaceAe,
   encodeVendorProbe,
   encodeZoomWithSpeed,
   encodeFaceFocus,
@@ -19,6 +21,7 @@ import {
   encodeHdr,
   percentToRange,
   AI_FRAMING_MODES,
+  AI_SCENE_MODES,
   AI_TRACK_SPEEDS,
   FOV_TYPES,
   UVC_XU_SELECTOR,
@@ -31,7 +34,7 @@ import {
   UVC_FLAG_AUTO,
   UVC_FLAG_MANUAL,
 } from "../codec/commands.js";
-import type { AiTrackSpeed, AiFramingMode, AiModeStatus, FovType, ImageControl } from "../codec/commands.js";
+import type { AiTrackSpeed, AiFramingMode, AiSceneMode, AiModeStatus, FovType, ImageControl } from "../codec/commands.js";
 import { verifyFraming } from "./framing.js";
 import { parseFrame } from "../codec/frame.js";
 import { ObsbotTransport, CameraBusyError } from "../transport/transport.js";
@@ -83,10 +86,15 @@ const ptzMoveSpeedSchema = z.object({
 const gimbalRecenterSchema = z.object({});
 const zoomAbsoluteSchema = z.object({ ratio: num() });
 
+// mode covers the human framings AND the standalone scene modes (group/whiteboard/
+// desk/hand). For a framing, enable = human tracking with that framing; for a scene
+// mode, `enabled` is implied true (disable via enabled:false, which cancels tracking).
+const AI_TRACKING_MODES = [...AI_FRAMING_MODES, ...AI_SCENE_MODES];
 const aiTrackingSchema = z.object({
   enabled: bool(),
-  mode: z.enum(AI_FRAMING_MODES as [AiFramingMode, ...AiFramingMode[]]).default("normal"),
+  mode: z.enum(AI_TRACKING_MODES as [string, ...string[]]).default("normal"),
 });
+const isSceneMode = (m: string): m is AiSceneMode => (AI_SCENE_MODES as string[]).includes(m);
 const aiTrackSpeedSchema = z.object({
   speed: z.enum(AI_TRACK_SPEEDS as [AiTrackSpeed, ...AiTrackSpeed[]]),
 });
@@ -123,6 +131,9 @@ const imageControlSchema = z.object({
 const exposureSchema = z.object({
   mode: z.enum(["auto", "manual"]),
   level: num().pipe(z.number().min(0).max(100)).default(50),
+  // Auto-exposure metering priority: global (whole frame) or face. Only meaningful
+  // with mode 'auto'; ignored for manual. Optional so existing calls are unchanged.
+  priority: z.enum(["global", "face"]).optional(),
 });
 const gimbalPositionSchema = z.object({});
 const snapshotSchema = z.object({
@@ -263,12 +274,13 @@ export function createTools(
     {
       name: "obsbot_ai_tracking",
       description:
-        "Enable or disable AI subject tracking, and choose the framing sub-mode. When " +
-        "enabled the camera follows the subject; disabling stops tracking. `mode` forces " +
-        "the composition: normal | upper-body | close-up | headless | lower-body. After " +
-        "writing, the tool polls the status block until the framing settles and returns " +
+        "Enable or disable AI tracking and choose the mode. When enabled the camera " +
+        "follows the subject; disabling stops tracking. `mode` is either a human framing " +
+        "(normal | upper-body | close-up | headless | lower-body) or a standalone scene " +
+        "mode (group | whiteboard | desk | hand); scene modes imply enabled:true. After " +
+        "writing, the tool polls the status block until the mode settles and returns " +
         "{ verified, matched } — the aiMode the device actually landed on (matched:false " +
-        "means no subject was being tracked, so the framing could not take effect yet).",
+        "means no subject was being tracked, so the mode could not take effect yet).",
       schema: aiTrackingSchema,
       handler: async (args: unknown) => {
         const { enabled, mode } = aiTrackingSchema.parse(args);
@@ -285,13 +297,19 @@ export function createTools(
         // Snapshot the framing before the write so verify can tell a real change
         // from the pre-write value (and skip the m=6 transient). See verifyFraming.
         const before = await readAiMode();
-        // OBSBOT Center toggles tracking + framing with a raw uvcExt write to selector 6,
-        // NOT a framed V3 command (which the Tiny 2 ACKs but ignores). byte[3] is the
-        // framing sub-mode. See encodeAiTracking.
-        await t.xuRaw(UVC_XU_SELECTOR, encodeAiTracking(enabled, mode));
-        // Verify by readback: aiMode settles to (m=2, n=framing) after a brief m=6
-        // transient. want == the requested framing (or no-tracking on disable).
-        const want: AiModeStatus = enabled ? mode : "no-tracking";
+        // OBSBOT Center toggles tracking/mode with a raw uvcExt write to selector 6,
+        // NOT a framed V3 command (which the Tiny 2 ACKs but ignores). byte[2] is the
+        // work mode, byte[3] the human framing sub-mode. A scene mode (group/whiteboard/
+        // desk/hand) is its own work mode; a framing is the human work mode. See
+        // encodeAiMode / encodeAiTracking.
+        const payload =
+          !enabled ? encodeAiMode("none")
+          : isSceneMode(mode) ? encodeAiMode(mode)
+          : encodeAiTracking(true, mode as AiFramingMode);
+        await t.xuRaw(UVC_XU_SELECTOR, payload);
+        // Verify by readback: aiMode settles to the requested mode after a brief m=6
+        // transient. The mode name doubles as its aiMode readback value.
+        const want: AiModeStatus = enabled ? (mode as AiModeStatus) : "no-tracking";
         const { verified, matched } = await verifyFraming(readAiMode, want, before);
         return { ok: true, enabled, mode, verified, matched, ...(ready.reconnected && { reconnected: true }) };
       },
@@ -509,15 +527,23 @@ export function createTools(
       name: "obsbot_exposure",
       description:
         "Set exposure. mode 'auto' enables auto-exposure; mode 'manual' sets level 0-100 " +
-        "(0 darkest → 100 brightest), mapped onto the device's exposure range. " +
+        "(0 darkest → 100 brightest), mapped onto the device's exposure range. With auto, " +
+        "an optional priority 'global' | 'face' selects the metering region (face-priority " +
+        "meters for a detected face). " +
         "Uses proprietary V3 frame protocol (CAM_SET_EXPOSURE_MODE + CAM_SET_EXPOSURE_TINY2) " +
         "because the standard UVC/IAMCameraControl V4L2 path is a stub on the Tiny 2.",
       schema: exposureSchema,
       handler: async (args: unknown) => {
-        const { mode, level } = exposureSchema.parse(args);
+        const { mode, level, priority } = exposureSchema.parse(args);
         const t = await getTransport();
         if (mode === "auto") {
           await t.sendVendor(encodeSetExposureMode(false).buildFrame(t.nextSeq()));
+          // Face vs global metering is a sel-6 uvcExt write applied after auto-exposure
+          // is on (readback surfaces at status offset 0x07). See encodeFaceAe.
+          if (priority) {
+            await t.xuRaw(UVC_XU_SELECTOR, encodeFaceAe(priority === "face"));
+            return { ok: true, mode, priority };
+          }
           return { ok: true, mode };
         }
         // Switch to manual mode via V3 frame protocol (CAM_SET_EXPOSURE_MODE)

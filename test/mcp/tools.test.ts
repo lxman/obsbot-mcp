@@ -180,6 +180,35 @@ test("obsbot_ai_tracking disable writes [16 02 00 00] and verifies no-tracking",
   expect(result).toMatchObject({ ok: true, enabled: false, verified: "no-tracking", matched: true });
 });
 
+test("obsbot_ai_tracking enable in whiteboard scene mode writes [16 02 04 00] and verifies whiteboard", async () => {
+  const transport = makeFakeTransport();
+  transport.recvStatus = vi.fn(async () => aiStatusBlock(4, 0)); // awake + whiteboard
+  const tools = createTools(async () => transport, makeFakeMgr());
+  const tool = findTool(tools, "obsbot_ai_tracking");
+
+  const result = await tool.handler({ enabled: true, mode: "whiteboard" });
+
+  const [selector, data] = transport.xuRaw.mock.calls[0];
+  expect(selector).toBe(6);
+  expect([...data.subarray(0, 4)]).toEqual([0x16, 0x02, 0x04, 0x00]);
+  expect(transport.sendVendor).not.toHaveBeenCalled();
+  expect(result).toMatchObject({ ok: true, enabled: true, mode: "whiteboard", verified: "whiteboard", matched: true });
+});
+
+test("obsbot_ai_tracking enable in hand scene mode writes byte[2]=0x03 and verifies hand", async () => {
+  const transport = makeFakeTransport();
+  transport.recvStatus = vi.fn(async () => aiStatusBlock(3, 0)); // awake + hand (m=3 on this firmware)
+  const tools = createTools(async () => transport, makeFakeMgr());
+  const tool = findTool(tools, "obsbot_ai_tracking");
+
+  const result = await tool.handler({ enabled: true, mode: "hand" });
+
+  const [selector, data] = transport.xuRaw.mock.calls[0];
+  expect(selector).toBe(6);
+  expect([...data.subarray(0, 4)]).toEqual([0x16, 0x02, 0x03, 0x00]);
+  expect(result).toMatchObject({ ok: true, enabled: true, mode: "hand", verified: "hand", matched: true });
+});
+
 test("obsbot_ai_tracking rejects a retired framing name via zod", async () => {
   const transport = makeFakeTransport();
   const tools = createTools(async () => transport, makeFakeMgr());
@@ -361,6 +390,36 @@ test("obsbot_exposure auto uses V3 frame protocol, not camCtrl", async () => {
   expect(transport.sendVendor).toHaveBeenCalledTimes(1);
   expect(transport.camCtrlSet).not.toHaveBeenCalled();
   expect(transport.camCtrlRange).not.toHaveBeenCalled();
+});
+
+test("obsbot_exposure auto with priority:face sends the AE mode frame then a sel-6 face-AE write [03 01 01]", async () => {
+  const transport = makeFakeTransport();
+  const tools = createTools(async () => transport, makeFakeMgr());
+  const result = await tools
+    .find((t) => t.name === "obsbot_exposure")!
+    .handler({ mode: "auto", priority: "face" });
+  expect(transport.sendVendor).toHaveBeenCalledTimes(1); // AE mode frame
+  const [selector, data] = transport.xuRaw.mock.calls[0];
+  expect(selector).toBe(6);
+  expect([...data.subarray(0, 3)]).toEqual([0x03, 0x01, 0x01]);
+  expect(result).toMatchObject({ ok: true, mode: "auto", priority: "face" });
+});
+
+test("obsbot_exposure auto with priority:global writes [03 01 00]", async () => {
+  const transport = makeFakeTransport();
+  const tools = createTools(async () => transport, makeFakeMgr());
+  await tools
+    .find((t) => t.name === "obsbot_exposure")!
+    .handler({ mode: "auto", priority: "global" });
+  const [, data] = transport.xuRaw.mock.calls[0];
+  expect([...data.subarray(0, 3)]).toEqual([0x03, 0x01, 0x00]);
+});
+
+test("obsbot_exposure auto without priority does not write face-AE", async () => {
+  const transport = makeFakeTransport();
+  const tools = createTools(async () => transport, makeFakeMgr());
+  await tools.find((t) => t.name === "obsbot_exposure")!.handler({ mode: "auto" });
+  expect(transport.xuRaw).not.toHaveBeenCalled();
 });
 
 test("obsbot_exposure manual sends V3 frame mode + value", async () => {

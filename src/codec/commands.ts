@@ -220,6 +220,12 @@ const FOV_VALUE: Record<FovType, number> = { wide: 0, medium: 1, narrow: 2 };
 export const FOV_TYPES = Object.keys(FOV_VALUE) as FovType[];
 export const encodeFov = (fov: FovType): Buffer => uvcExt(0x04, FOV_VALUE[fov]);
 
+// Face-priority auto-exposure toggle. Same sel-6 uvcExt family, tag 0x03:
+// [0x03, 0x01, v] with v=1 face / 0 global. Hardware-verified 2026-07-18 — the write
+// moves status offset 0x07 (1=face, 0=global). Precondition: auto-exposure must be on
+// first. This is AE priority, distinct from face_focus (which is autofocus).
+export const encodeFaceAe = (face: boolean): Buffer => uvcExt(0x03, face ? 1 : 0);
+
 // HDR/WDR on/off.
 export const encodeHdr = (on: boolean): Buffer => uvcExt(0x01, on ? 1 : 0);
 
@@ -259,14 +265,46 @@ const AI_FRAMING: Record<AiFramingMode, number> = {
 
 export const AI_FRAMING_MODES = Object.keys(AI_FRAMING) as AiFramingMode[];
 
-export const encodeAiTracking = (on: boolean, mode: AiFramingMode = "normal"): Buffer => {
+// AI WORK MODE is byte[2] of the same sel-6 [0x16, 0x02, work, framing] command.
+// The value is the libdev AiWorkModeType enum, hardware-verified 2026-07-18 on a live
+// Tiny 2: after each write the status m-byte (offset 0x18) echoed byte[2] directly, so
+// none=0, group=1, human=2, hand=3, whiteboard=4, desk=5 all round-trip. Only "human"
+// uses the framing sub-mode (byte[3]); the scene modes force it to 0.
+// (Community note: hand shows up in the status tuple as m=3 on this firmware, NOT the
+// m=6 the Tiny4Linux table lists — see AI_MODE_TABLE below, which maps both.)
+export type AiWorkMode = "none" | "group" | "human" | "hand" | "whiteboard" | "desk";
+
+const AI_WORK_MODE: Record<AiWorkMode, number> = {
+  none: 0,
+  group: 1,
+  human: 2,
+  hand: 3,
+  whiteboard: 4,
+  desk: 5,
+};
+
+export const AI_WORK_MODES = Object.keys(AI_WORK_MODE) as AiWorkMode[];
+
+// The standalone AI scene modes a caller can select (the work modes that are NOT
+// "none"/"human" — enable/disable of human tracking is a separate boolean). Their
+// names double as the status readback (aiMode) they settle to, so a set can be
+// verified directly. Hardware-verified 2026-07-18.
+export type AiSceneMode = "group" | "whiteboard" | "desk" | "hand";
+export const AI_SCENE_MODES: AiSceneMode[] = ["group", "whiteboard", "desk", "hand"];
+
+export const encodeAiMode = (work: AiWorkMode, framing: AiFramingMode = "normal"): Buffer => {
   const b = Buffer.alloc(60);
   b[0] = 0x16;
   b[1] = 0x02;
-  b[2] = on ? 0x02 : 0x00;
-  b[3] = on ? AI_FRAMING[mode] : 0x00;
+  b[2] = AI_WORK_MODE[work];
+  b[3] = work === "human" ? AI_FRAMING[framing] : 0x00;
   return b;
 };
+
+// Enable/disable human subject tracking with a framing sub-mode. This is the common
+// case, kept as a thin wrapper over encodeAiMode: enable = human, disable = none.
+export const encodeAiTracking = (on: boolean, mode: AiFramingMode = "normal"): Buffer =>
+  encodeAiMode(on ? "human" : "none", mode);
 
 // ---------------------------------------------------------------------------
 //  UVC standard controls (IAMCameraControl / IAMVideoProcAmp) — property ids
@@ -316,6 +354,7 @@ export const percentToRange = (pct: number, min: number, max: number): number =>
 // ---------------------------------------------------------------------------
 const STATUS_OFF_SLEEP = 0x02; // 0 = awake, 1 = sleep
 const STATUS_OFF_HDR = 0x06;   // 0 = off, non-zero = on
+const STATUS_OFF_FACE_AE = 0x07; // 0 = global AE, 1 = face-priority AE (HW-verified 2026-07-18)
 const STATUS_OFF_AI_MODE_M = 0x18; // AI mode tuple, first value
 const STATUS_OFF_AI_MODE_N = 0x1c; // AI mode tuple, second value
 // Track speed lives at 0x24 on the Tiny 2 — NOT the reference's 0x21 (which reads
@@ -348,6 +387,10 @@ const AI_MODE_TABLE: Record<string, AiModeStatus> = {
   "2,4": "lower-body",
   "5,0": "desk",
   "4,0": "whiteboard",
+  // Hand shows up as m=3 (= AiWorkModeType Hand) on the live Tiny 2 firmware
+  // (verified 2026-07-18); the Tiny4Linux reference lists m=6. Map both so the
+  // readback decodes on either.
+  "3,0": "hand",
   "6,0": "hand",
   "1,0": "group",
 };
@@ -363,6 +406,7 @@ const TRACK_SPEED_TABLE: Record<number, TrackSpeedStatus> = {
 export interface CameraStatus {
   awake: boolean;
   hdr: boolean;
+  faceAe: boolean;
   aiMode: AiModeStatus;
   trackSpeed: TrackSpeedStatus;
 }
@@ -376,6 +420,7 @@ export const decodeStatus = (block: Buffer): CameraStatus => {
   return {
     awake: block[STATUS_OFF_SLEEP] === 0,
     hdr: block[STATUS_OFF_HDR] !== 0,
+    faceAe: block[STATUS_OFF_FACE_AE] === 1,
     aiMode: AI_MODE_TABLE[`${m},${n}`] ?? "unknown",
     trackSpeed: TRACK_SPEED_TABLE[block[STATUS_OFF_TRACK_SPEED]] ?? "unknown",
   };
