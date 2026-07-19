@@ -37,17 +37,41 @@ export const encodePresetValueGet = (seq: number, slot: number): Buffer =>
 export const encodePresetNameGet = (seq: number, slot: number): Buffer =>
   buildFrame({ seq, cmd: CMD_GET.NAME, receiver: RECEIVER, payload: idx(slot) });
 
-export const decodePresetCount = (payload: Buffer): number => payload.readUInt16LE(0);
+// Flat XU selector 12 (list): <count:u8> <slotIdx:u8> x count. Hardware-verified
+// 2026-07-19 — the framed-reply model (recvVendor + parseFrame) does NOT carry
+// preset data; reads on the vendor reply path just return the flat status block.
+export interface PresetListBlock { count: number; slots: number[] }
 
-export const decodePresetName = (payload: Buffer): string => {
-  const len = payload.readUInt16LE(0);
-  return payload.subarray(2, 2 + len).toString("ascii");
+export const decodePresetList = (block: Buffer): PresetListBlock => {
+  const count = block[0];
+  const slots: number[] = [];
+  for (let i = 0; i < count; i++) slots.push(block[1 + i]);
+  return { count, slots };
 };
 
-export const decodePresetPose = (payload: Buffer): PresetPose => ({
-  pan: payload.readFloatLE(0), tilt: payload.readFloatLE(4),
-  roll: payload.readFloatLE(8), zoom: payload.readFloatLE(12),
-});
+// Flat XU selector 13 (entry cursor): each GET returns the next preset and
+// advances the cursor; the cursor is reset by echo-writing the selector-12
+// block back (see getPresetSlots in mcp/tools.ts).
+export interface PresetEntry {
+  end: boolean;
+  slot?: 1 | 2 | 3;
+  name?: string;
+  pose?: PresetPose;
+}
+
+const ENTRY_END = 0x02;
+
+export const decodePresetEntry = (block: Buffer): PresetEntry => {
+  if (block[0] === ENTRY_END) return { end: true };
+  const slot = (block[1] + 1) as 1 | 2 | 3;
+  const pitch = block.readInt16LE(4) / 100;
+  const yaw = block.readInt16LE(6) / 100;
+  const zoom = block[8] / 100;
+  const nul = block.indexOf(0, 10);
+  const b64 = block.subarray(10, nul === -1 ? block.length : nul).toString("ascii");
+  const name = Buffer.from(b64, "base64").toString("ascii");
+  return { end: false, slot, name, pose: { pan: yaw, tilt: pitch, roll: 0, zoom } };
+};
 
 export interface PresetSlot {
   slot: 1 | 2 | 3; occupied: boolean; name: string | null; pose: PresetPose | null;

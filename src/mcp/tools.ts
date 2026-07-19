@@ -37,6 +37,8 @@ import {
 import type { AiTrackSpeed, AiFramingMode, AiSceneMode, AiModeStatus, FovType, ImageControl } from "../codec/commands.js";
 import { verifyFraming } from "./framing.js";
 import { parseFrame } from "../codec/frame.js";
+import { decodePresetList, decodePresetEntry, assemblePresetSlots } from "../codec/preset.js";
+import type { PresetSlot, PresetPose } from "../codec/preset.js";
 import { ObsbotTransport, CameraBusyError } from "../transport/transport.js";
 import { DeviceManager } from "../device/manager.js";
 import { DeviceSession } from "../device/session.js";
@@ -136,6 +138,7 @@ const exposureSchema = z.object({
   priority: z.enum(["global", "face"]).optional(),
 });
 const gimbalPositionSchema = z.object({});
+const presetListSchema = z.object({});
 const snapshotSchema = z.object({
   maxDim: num().pipe(z.number().min(256).max(1920)).default(1024),
   quality: num().pipe(z.number().min(1).max(100)).default(80),
@@ -156,6 +159,27 @@ const captureListSchema = z.object({});
 
 const sleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
+
+// Preset read path: flat XU selectors 12 (list) + 13 (entry cursor). Hardware-verified
+// 2026-07-19 — NOT the framed-reply model (recvVendor + parseFrame); reads on the
+// vendor reply path just return the flat status block for this device. Three steps:
+//   1. GET selector 12 -> <count:u8> <slotIdx:u8> x count
+//   2. echo-write the just-read bytes back to selector 12 -> resets the entry cursor
+//      (echo is provably non-destructive; do NOT write zeros/synthesized bytes)
+//   3. GET selector 13, `count` times -> each read returns the next preset entry and
+//      advances the cursor, until the exhausted marker (status 0x02)
+async function getPresetSlots(t: ObsbotTransport): Promise<PresetSlot[]> {
+  const block = await t.xuGetRaw(12, 60);
+  const { count } = decodePresetList(block);
+  await t.xuRaw(12, block); // echo-write resets the cursor — load-bearing, see above
+  const per: { slot: 1 | 2 | 3; name: string; pose: PresetPose }[] = [];
+  for (let i = 0; i < count; i++) {
+    const e = decodePresetEntry(await t.xuGetRaw(13, 60));
+    if (e.end) break;
+    per.push({ slot: e.slot!, name: e.name!, pose: e.pose! });
+  }
+  return assemblePresetSlots(count, per);
+}
 
 export function createTools(
   getTransport: () => Promise<ObsbotTransport>,
@@ -485,6 +509,23 @@ export function createTools(
         // UVC pan value is degrees, same sign as our yaw (+ = camera-left). UVC tilt
         // is degrees but positive = up, so negate to match our +pitch = down convention.
         return { yaw: pan.value, pitch: -tilt.value };
+      },
+    },
+    {
+      name: "obsbot_preset_list",
+      description:
+        "Read the three gimbal preset slots (occupied/empty, name, pose in degrees). " +
+        "Reads flat XU selectors 12 (list) and 13 (entry cursor), NOT the vendor V3 " +
+        "framed-reply path (which is non-functional for preset data on this device).",
+      schema: presetListSchema,
+      handler: async (args: unknown) => {
+        presetListSchema.parse(args);
+        try {
+          const t = await getTransport();
+          return { ok: true, slots: await getPresetSlots(t) };
+        } catch (e) {
+          return { ok: false, error: (e as Error).message };
+        }
       },
     },
     {

@@ -669,6 +669,55 @@ test("obsbot_probe query frames an opcode and reads the reply via recvVendor", a
   expect(result).toMatchObject({ ok: true, opcode: "AI_GET_QUICK_STATUS" });
 });
 
+// --- Preset read path: flat XU selectors 12 (list) + 13 (entry cursor). ---
+// Real captured fixtures from hardware (2026-07-19 session) — see preset.test.ts
+// for the byte-layout tests these mirror.
+const PRESET_LIST_BLOCK = Buffer.from("030001020000", "hex");
+const PRESET_ENTRY_1 = Buffer.from("0000000018fcfce5640055484a6c633256304d513d3d00", "hex");
+const PRESET_ENTRY_2 = Buffer.from("0001000046004808640055484a6c633256304d673d3d00", "hex");
+const PRESET_ENTRY_3 = Buffer.from("000200003c004808640055484a6c633256304d773d3d00", "hex");
+const PRESET_ENTRY_END = Buffer.from("02000000", "hex");
+
+function makePresetTransport() {
+  const transport = makeFakeTransport();
+  const calls: string[] = [];
+  let entryCall = 0;
+  const entries = [PRESET_ENTRY_1, PRESET_ENTRY_2, PRESET_ENTRY_3, PRESET_ENTRY_END];
+  transport.xuGetRaw = vi.fn(async (selector: number, _length: number) => {
+    if (selector === 12) {
+      calls.push("get12");
+      return PRESET_LIST_BLOCK;
+    }
+    calls.push("get13");
+    return entries[entryCall++];
+  });
+  transport.xuRaw = vi.fn(async (selector: number, _data: Buffer) => {
+    if (selector === 12) calls.push("reset12");
+  });
+  return { transport, calls };
+}
+
+test("obsbot_preset_list reads list block, echo-resets the cursor, then walks entries", async () => {
+  const { transport, calls } = makePresetTransport();
+  const tools = createTools(async () => transport, makeFakeMgr());
+  const tool = findTool(tools, "obsbot_preset_list");
+
+  const result = await tool.handler({});
+
+  expect(result).toMatchObject({ ok: true });
+  const slots = (result as { slots: Array<Record<string, unknown>> }).slots;
+  expect(slots).toHaveLength(3);
+  expect(slots.every((s) => s.occupied)).toBe(true);
+  expect(slots.map((s) => s.name)).toEqual(["Preset1", "Preset2", "Preset3"]);
+  expect(slots[0].pose).toEqual({ pan: -66.6, tilt: -10, roll: 0, zoom: 1 });
+
+  // The echo-write reset is load-bearing: without it the cursor stays exhausted
+  // and enumeration returns nothing. Must happen after the list read and before
+  // any selector-13 reads.
+  expect(calls).toEqual(["get12", "reset12", "get13", "get13", "get13"]);
+  expect(transport.xuRaw).toHaveBeenCalledWith(12, PRESET_LIST_BLOCK);
+});
+
 test("obsbot_gimbal_position maps UVC pan->yaw and negates tilt->pitch", async () => {
   const transport = makeFakeTransport();
   // pan (prop 0) = 30 -> yaw 30; tilt (prop 1) = -19 -> pitch +19 (negated)
