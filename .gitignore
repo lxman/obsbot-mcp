@@ -31,3 +31,6 @@ tools/
 
 # Logs
 logs/
+
+# Integration-test run reports (timestamped run output, not source)
+artifacts/
