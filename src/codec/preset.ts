@@ -5,7 +5,6 @@ export interface PresetPose { pan: number; tilt: number; roll: number; zoom: num
 
 const CMD = { ADD: 0x3944, UPDATE: 0x3e04, RECALL: 0x39c4, DELETE: 0x3984,
   SET_NAME: 0x3a84, BOOT_POSE: 0x3ec4, BOOT_FLAGS: 0x3e44 } as const;
-const CMD_GET = { LIST: 0x3b44, VALUE: 0x3a44, NAME: 0x3b04 } as const;
 const RECEIVER = 0x04;
 const idx = (slot: number) => u32le(slot - 1);
 const poseBytes = (p: PresetPose) =>
@@ -28,14 +27,11 @@ export const encodePresetSetName = (seq: number, slot: number, name: string): Bu
   buildFrame({ seq, cmd: CMD.SET_NAME, receiver: RECEIVER,
     payload: concat(idx(slot), Buffer.from(name, "ascii")) });
 
-export const encodePresetListGet = (seq: number): Buffer =>
-  buildFrame({ seq, cmd: CMD_GET.LIST, receiver: RECEIVER, payload: Buffer.alloc(0) });
-
-export const encodePresetValueGet = (seq: number, slot: number): Buffer =>
-  buildFrame({ seq, cmd: CMD_GET.VALUE, receiver: RECEIVER, payload: idx(slot) });
-
-export const encodePresetNameGet = (seq: number, slot: number): Buffer =>
-  buildFrame({ seq, cmd: CMD_GET.NAME, receiver: RECEIVER, payload: idx(slot) });
+// NOTE: the vendor GET encoders (LIST 0x3b44 / VALUE 0x3a44 / NAME 0x3b04) were
+// deleted 2026-07-19. They built valid frames, but the device answers them on a
+// reply path we cannot read: after sending one, the reply selector returns the
+// flat status block, never a V3 frame. Preset reads use the flat selectors below
+// instead. Do not reintroduce them expecting readable replies.
 
 // Flat XU selector 12 (list): <count:u8> <slotIdx:u8> x count. Hardware-verified
 // 2026-07-19 — the framed-reply model (recvVendor + parseFrame) does NOT carry

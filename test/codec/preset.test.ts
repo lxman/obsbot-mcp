@@ -2,7 +2,6 @@ import { expect, test } from "vitest";
 import { bufToHex, hexToBuf } from "../../src/codec/encoding.js";
 import {
   encodePresetAdd, encodePresetRecall, encodePresetDelete, encodePresetSetName,
-  encodePresetListGet, encodePresetValueGet, encodePresetNameGet,
   decodePresetList, decodePresetEntry, assemblePresetSlots,
 } from "../../src/codec/preset.js";
 
@@ -68,25 +67,8 @@ test("decodePresetEntry flags the exhausted marker", () => {
   expect(decodePresetEntry(hexToBuf("02000000")).end).toBe(true);
 });
 
-test("encodePresetListGet: cmd 0x3b44, empty payload", () => {
-  const f = bufToHex(encodePresetListGet(1));
-  expect(cmdOf(f)).toBe("443b");
-  expect(len2Of(f)).toBe(0);
-});
 
-test("encodePresetValueGet: cmd 0x3a44, 4-byte slot-index payload", () => {
-  const f = bufToHex(encodePresetValueGet(1, 2));
-  expect(cmdOf(f)).toBe("443a");
-  expect(len2Of(f)).toBe(4);
-  expect(payloadOf(f, 4)).toBe("01000000");  // slot 2 -> index 1
-});
 
-test("encodePresetNameGet: cmd 0x3b04, 4-byte slot-index payload", () => {
-  const f = bufToHex(encodePresetNameGet(1, 3));
-  expect(cmdOf(f)).toBe("043b");
-  expect(len2Of(f)).toBe(4);
-  expect(payloadOf(f, 4)).toBe("02000000");  // slot 3 -> index 2
-});
 
 test("assemblePresetSlots returns 3 slots, empties marked", () => {
   const slots = assemblePresetSlots(1, [
