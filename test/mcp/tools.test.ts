@@ -6,12 +6,24 @@ import type { DeviceManager } from "../../src/device/manager.js";
 import type { CaptureManager } from "../../src/capture/manager.js";
 import { CaptureError, FfmpegMissingError } from "../../src/capture/manager.js";
 
+// Real awake status block captured from the device (starts 0x25, byte[2]=0 → awake).
+const HEALTHY_STATUS_AWAKE = Buffer.from(
+  "2501000200000001010158020001013200000000017f2100000143000000553c00031000000000000000000000000000000000000000000000000000",
+  "hex",
+);
+// Same block with the sleep flag set (byte[2]=1), as observed on a sleeping camera.
+const HEALTHY_STATUS_ASLEEP = (() => {
+  const b = Buffer.from(HEALTHY_STATUS_AWAKE);
+  b[0x02] = 1;
+  return b;
+})();
+
 function makeFakeTransport() {
   let seq = 0;
   return {
     sendVendor: vi.fn(async (_frame: Buffer) => {}),
     recvVendor: vi.fn(async (_frame: Buffer, _length?: number) => Buffer.alloc(60)),
-    recvStatus: vi.fn(async (_length?: number) => Buffer.alloc(60)),
+    recvStatus: vi.fn(async (_length?: number) => HEALTHY_STATUS_AWAKE),
     xuRaw: vi.fn(async (_selector: number, _data: Buffer) => {}),
     xuGetRaw: vi.fn(async (_selector: number, _length: number) => Buffer.alloc(60)),
     zoomRange: vi.fn(async () => ({ min: 0, max: 100 })),
@@ -678,10 +690,15 @@ test("obsbot_probe query frames an opcode and reads the reply via recvVendor", a
 // distinguishable from the "totally zeroed" hostile-input fixture that
 // implausiblePresetListReason must reject (see preset.ts's C1 design note — an
 // all-zero response is treated as a failed read, not as "genuinely zero presets").
+// A genuinely empty device returns a BIT-FOR-BIT ALL-ZERO selector-12 block
+// (hardware-established 2026-07-19, OBSBOT Center closed, camera measured awake,
+// stable across repeated reads). This fixture previously set b[40] = 0xaa — a byte
+// invented so the C1 plausibility check would pass. That fiction is exactly what let
+// the empty-state dead-end ship: it asserted an empty device is distinguishable from
+// a failed read by the block alone, which the hardware disproves. Emptiness is now
+// established by corroborating with the status block instead.
 function emptyPresetListBlock(): Buffer {
-  const b = Buffer.alloc(60);
-  b[40] = 0xaa;
-  return b;
+  return Buffer.alloc(60);
 }
 
 const PRESET_LIST_BLOCK = Buffer.from("030001020000", "hex");
@@ -733,10 +750,15 @@ test("obsbot_preset_list reads list block, echo-resets the cursor, then walks en
 // --- C1: never echo an implausible selector-12 read back to the device ---
 
 test("C1: an all-zero selector-12 block is rejected before the echo-write, not trusted as 'empty'", async () => {
+  // An all-zero block alone proves nothing — a genuinely empty device returns the
+  // same bytes. What marks THIS as a dead read is that the status block is zeroed
+  // too: a dead link / stale handle zeroes both, so there is no corroboration and
+  // the block must never be trusted or echoed.
   const transport = makeFakeTransport();
   transport.xuGetRaw = vi.fn(async (selector: number) =>
     selector === 12 ? Buffer.alloc(60) : Buffer.alloc(60),
   );
+  transport.recvStatus = vi.fn(async () => Buffer.alloc(60));
   const tools = createTools(async () => transport, makeFakeMgr());
   const tool = findTool(tools, "obsbot_preset_list");
 
@@ -777,7 +799,10 @@ test("C1: a short (truncated) selector-12 read is rejected before the echo-write
   expect(transport.xuRaw).not.toHaveBeenCalled();
 });
 
-test("C1: a plausible empty (count=0, non-all-zero) selector-12 block IS trusted and echoed", async () => {
+test("a corroborated empty device reports three empty slots and is NOT echoed back", async () => {
+  // Supersedes the old "count=0 but non-all-zero block IS echoed" case: hardware has
+  // no such block. A real empty device returns all zeros, is accepted only because
+  // the status block corroborates, and needs no cursor reset — so no echo-write.
   const transport = makeFakeTransport();
   transport.xuGetRaw = vi.fn(async () => emptyPresetListBlock());
   const tools = createTools(async () => transport, makeFakeMgr());
@@ -787,7 +812,7 @@ test("C1: a plausible empty (count=0, non-all-zero) selector-12 block IS trusted
 
   expect(result).toMatchObject({ ok: true });
   expect((result as { slots: Array<{ occupied: boolean }> }).slots.every((s) => !s.occupied)).toBe(true);
-  expect(transport.xuRaw).toHaveBeenCalledWith(12, expect.any(Buffer));
+  expect(transport.xuRaw).not.toHaveBeenCalled();
 });
 
 // --- I1: cross-check the entry-cursor walk against selector 12's own slot list ---
@@ -1283,4 +1308,100 @@ test("M2: obsbot_preset_list surfaces a readable error even when a non-Error is 
   const error = (result as { error: string }).error;
   expect(error).not.toBe("undefined");
   expect(error).toContain("camera unplugged");
+});
+
+// --- Empty-state: a genuinely empty device returns an ALL-ZERO selector-12 block ---
+// Hardware-established 2026-07-19 under controlled conditions (OBSBOT Center closed so
+// nothing could re-assert presets, camera MEASURED awake before and at the moment of
+// failure, stable across repeated reads). Deleting the last preset yields a bit-for-bit
+// all-zero block, so "all-zero" is genuinely ambiguous between EMPTY and NOT-SERVING.
+//
+// The discriminator is the STATUS BLOCK on the same XU surface and handle: at the exact
+// instant selector 12 read zeros, the status block returned real non-zero data. A dead
+// link / stale handle would zero BOTH. Note UVC liveness is NOT valid corroboration —
+// obsbot_gimbal_position returns a correct pose even when presets aren't serving.
+//
+// Corroboration is deliberately TWO-part (non-zero AND awake): decodeStatus reports
+// awake for an ALL-ZERO block (awake === block[2] === 0), so "awake" alone would let a
+// dead link masquerade as an empty device — the exact false-EMPTY that gates the
+// irreversible create-once ADD.
+
+test("empty device: save can bootstrap the FIRST preset when all slots are empty", async () => {
+  // Regression for the dead-end: every preset tool routes through getPresetSlots, so
+  // an all-zero read blocked save too — leaving our toolset with no path OUT of a
+  // legitimate device state (fatal where OBSBOT Center doesn't exist to create one).
+  const transport = makeFakeTransport();
+  let listCall = 0;
+  transport.xuGetRaw = vi.fn(async (selector: number) => {
+    if (selector === 12) return ++listCall === 1 ? Buffer.alloc(60) : Buffer.from("0100", "hex");
+    return PRESET_ENTRY_1;
+  });
+  transport.recvStatus = vi.fn(async () => HEALTHY_STATUS_AWAKE);
+  transport.camCtrlGet = vi.fn(async (p: number) =>
+    p === 0 ? { value: 21, flags: 2 } : { value: 0, flags: 2 },
+  );
+  const tools = createTools(async () => transport, makeFakeMgr());
+  const tool = findTool(tools, "obsbot_preset_save");
+
+  const result = await tool.handler({ slot: 1 });
+
+  expect(result).toMatchObject({ ok: true });
+  expect(transport.sendVendor).toHaveBeenCalled();
+});
+
+test("all-zero selector 12 while the camera reports asleep is refused, not read as empty", async () => {
+  const transport = makeFakeTransport();
+  transport.xuGetRaw = vi.fn(async () => Buffer.alloc(60));
+  transport.recvStatus = vi.fn(async () => HEALTHY_STATUS_ASLEEP);
+  const tools = createTools(async () => transport, makeFakeMgr());
+  const tool = findTool(tools, "obsbot_preset_list");
+
+  const result = await tool.handler({});
+
+  expect(result).toMatchObject({ ok: false });
+  expect(transport.xuRaw).not.toHaveBeenCalled();
+});
+
+test("delete of the LAST preset reports success once the device reads back empty", async () => {
+  // Observed on hardware: delete committed but reported {ok:false} because the
+  // post-write verify read hit the all-zero (now-empty) block and threw.
+  const transport = makeFakeTransport();
+  let listCall = 0;
+  transport.xuGetRaw = vi.fn(async (selector: number) => {
+    if (selector === 12) {
+      // before: one preset in slot 2; after: genuinely empty (all zero)
+      return ++listCall === 1 ? Buffer.from("0101", "hex") : Buffer.alloc(60);
+    }
+    return PRESET_ENTRY_2;
+  });
+  transport.recvStatus = vi.fn(async () => HEALTHY_STATUS_AWAKE);
+  const tools = createTools(async () => transport, makeFakeMgr());
+  const tool = findTool(tools, "obsbot_preset_delete");
+
+  const result = await tool.handler({ slot: 2 });
+
+  expect(result).toMatchObject({ ok: true });
+});
+
+test("a write that commits but fails verification says so, instead of implying nothing happened", async () => {
+  const transport = makeFakeTransport();
+  let listCall = 0;
+  transport.xuGetRaw = vi.fn(async (selector: number) => {
+    if (selector === 12) {
+      if (++listCall === 1) return Buffer.from("0101", "hex");
+      throw new Error("camera unplugged");
+    }
+    return PRESET_ENTRY_2;
+  });
+  transport.recvStatus = vi.fn(async () => HEALTHY_STATUS_AWAKE);
+  const tools = createTools(async () => transport, makeFakeMgr());
+  const tool = findTool(tools, "obsbot_preset_delete");
+
+  const result = await tool.handler({ slot: 2 });
+
+  expect(result).toMatchObject({ ok: false });
+  // The destructive write already landed — the caller must not read this as a no-op
+  // and retry blindly.
+  expect((result as { error: string }).error).toMatch(/verif/i);
+  expect((result as { error: string }).error).toMatch(/sent|committed|applied/i);
 });

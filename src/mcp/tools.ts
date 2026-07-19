@@ -206,8 +206,46 @@ const sleep = (ms: number): Promise<void> =>
 // requires OCCUPIED), so a falsely-"empty" read here drives an irreversible write.
 // C1/I1/I3 below are all facets of the same unifying fix: never trust device bytes
 // enough to act on them (or echo them back) without a plausibility/consistency check.
+const isAllZero = (b: Buffer): boolean => b.equals(Buffer.alloc(b.length));
+
+// A genuinely EMPTY device and a not-serving read BOTH return an all-zero selector-12
+// block (hardware-established 2026-07-19 under controlled conditions: OBSBOT Center
+// closed so nothing could re-assert presets, camera measured awake at the moment of
+// the read, stable across repeated reads). So the block alone cannot tell them apart.
+//
+// Corroborate on the SAME XU surface and handle: the status block. When selector 12
+// read zeros on a genuinely empty device, the status block still returned real
+// non-zero data — a dead link or stale handle would zero BOTH.
+//
+// The check is deliberately TWO-part. decodeStatus reports awake for an ALL-ZERO block
+// (awake === block[0x02] === 0), so testing `awake` alone would let a dead link
+// masquerade as an empty device — manufacturing the exact false-EMPTY that gates the
+// irreversible create-once ADD. Requiring the status block to be non-zero AND awake
+// makes emptiness something we accept only on positive evidence.
+//
+// NOTE: UVC liveness is NOT valid corroboration here — obsbot_gimbal_position returns
+// a correct live pose even while the preset selectors aren't serving.
+async function presetSubsystemServing(t: ObsbotTransport): Promise<boolean> {
+  try {
+    const status = await t.recvStatus(60);
+    if (isAllZero(status)) return false;
+    return decodeStatus(status).awake;
+  } catch {
+    return false;
+  }
+}
+
 async function getPresetSlots(t: ObsbotTransport): Promise<PresetSlot[]> {
   const block = await t.xuGetRaw(12, 60);
+  // Zero presets is a legitimate device state, and every preset tool routes through
+  // here — so refusing it outright left our toolset with no path OUT of it (save was
+  // gated behind the read that fails, making the first preset uncreatable where
+  // OBSBOT Center doesn't exist). Accept it only with positive corroboration, and
+  // skip the echo-write: with no entries there is no cursor to reset, which removes
+  // the C1 hazard at its root on this path rather than bypassing the check.
+  if (isAllZero(block) && (await presetSubsystemServing(t))) {
+    return assemblePresetSlots([]);
+  }
   // C1: validate BEFORE the echo-write — see implausiblePresetListReason. A
   // failed/short/garbage read must never be echoed back to a selector whose
   // write semantics for anything but a genuine echo are undecoded.
@@ -778,18 +816,30 @@ export function createTools(
         const ready = await gate();
         if (!ready.ok) return ready;
         const t = ready.transport;
+        // Tracks whether the destructive write already left the host. If the
+        // post-write verify read throws, a bare error reads as "nothing happened"
+        // and invites a blind retry of an operation that already committed.
+        let sent = false;
         try {
           const before = await getPresetSlots(t);
           if (!before[slot - 1].occupied) {
             return { ok: false, error: `slot ${slot} is already empty` };
           }
           await t.sendVendor(encodePresetDelete(t.nextSeq(), slot));
+          sent = true;
           const after = await getPresetSlots(t);
           if (after[slot - 1].occupied) {
             return { ok: false, error: "verification failed", expected: "empty", actual: "occupied" };
           }
           return { ok: true, ...(ready.reconnected && { reconnected: true }) };
         } catch (e) {
+          if (sent) {
+            return {
+              ok: false,
+              error: `delete was sent and may have been applied, but verification failed: ${msg(e)}`,
+              committed: "unknown",
+            };
+          }
           return { ok: false, error: msg(e) };
         }
       },
