@@ -31,6 +31,8 @@ export const deviceChecks = [
 
   defineCheck({
     id: "device.run-status.wake",
+    // Observes sleep deliberately: the runner must not keep this one awake.
+    managesSleep: true,
     tool: "obsbot_set_run_status",
     profile: "quick",
     tier: TIERS.VERIFIED,

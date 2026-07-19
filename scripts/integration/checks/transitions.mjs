@@ -52,6 +52,8 @@ export const transitionChecks = [
 
   defineCheck({
     id: "transitions.T4.transitional-read-safety",
+    // Observes sleep deliberately: the runner must not keep this one awake.
+    managesSleep: true,
     tool: "obsbot_preset_list",
     profile: "quick",
     tier: TIERS.VERIFIED,
@@ -82,6 +84,8 @@ export const transitionChecks = [
 
   defineCheck({
     id: "transitions.T5.gate-behaviour",
+    // Observes sleep deliberately: the runner must not keep this one awake.
+    managesSleep: true,
     tool: "obsbot_set_run_status",
     profile: "quick",
     tier: TIERS.VERIFIED,
@@ -170,6 +174,8 @@ export const transitionChecks = [
 
   defineCheck({
     id: "transitions.T3.wake-self-centering-window",
+    // Observes sleep deliberately: the runner must not keep this one awake.
+    managesSleep: true,
     tool: "obsbot_ptz_move_angle",
     profile: "deep",
     tier: TIERS.VERIFIED,

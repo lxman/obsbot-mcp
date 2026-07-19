@@ -48,6 +48,17 @@ const ALL_TOOLS = [
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// Hard ceiling on the whole run. Per-check timeouts do not cover a hang in
+// teardown or a USB call that never returns, and a hung script means a human
+// has to notice and kill it. Fail loudly on our own terms instead.
+const WATCHDOG_MS = process.argv.includes("--deep") ? 15 * 60_000 : 10 * 60_000;
+const watchdog = setTimeout(() => {
+  console.error(`
+WATCHDOG: run exceeded ${WATCHDOG_MS / 60000} minutes — forcing exit.`);
+  console.error("The camera may be left awake; run obsbot_set_run_status sleep if so.");
+  process.exit(2);
+}, WATCHDOG_MS);
+
 async function main() {
   const deep = process.argv.includes("--deep");
   const profile = deep ? "deep" : "quick";
@@ -74,6 +85,22 @@ async function main() {
       return tool.handler(args);
     };
 
+    // The camera sleeps after roughly a minute of idle, and obsbot_gimbal_position
+    // does NOT go through the readiness gate — it reads the UVC controls directly.
+    // So a polling loop made of position reads will happily poll a sleeping camera
+    // until it times out. Everything that waits therefore heartbeats a wake, and
+    // the runner wakes before each check, except for the checks whose whole point
+    // is to observe sleep (they set managesSleep).
+    let keepAwake = true;
+    let lastWake = 0;
+    const HEARTBEAT_MS = 20000;
+    const heartbeat = async () => {
+      if (!keepAwake) return;
+      if (Date.now() - lastWake < HEARTBEAT_MS) return;
+      lastWake = Date.now();
+      await call("obsbot_set_run_status", { state: "run" });
+    };
+
     const ctx = {
       call,
       sleep,
@@ -98,6 +125,7 @@ async function main() {
           const v = await fn();
           if (v) return v;
           if (Date.now() > deadline) throw new Error(`condition not met within ${timeoutMs}ms`);
+          await heartbeat();
           await sleep(everyMs);
         }
       },
@@ -111,6 +139,14 @@ async function main() {
     const results = [];
     for (const check of checks) {
       console.log(`→ ${check.id}`);
+      keepAwake = !check.managesSleep;
+      if (keepAwake) {
+        // Start every check from a known-awake camera. Without this a check that
+        // follows a long one inherits a sleeping device and fails for reasons
+        // that have nothing to do with what it is testing.
+        await call("obsbot_set_run_status", { state: "run" });
+        lastWake = Date.now();
+      }
       const r = await runCheck(check, ctx);
       console.log(`   ${r.tier} / ${r.status}${r.error ? ` — ${r.error}` : ""}`);
       results.push(r);
@@ -135,11 +171,21 @@ async function main() {
     } catch {
       /* teardown is best-effort; never mask the original failure */
     }
-    await helper.stop();
+    // close(), not stop(): the child process keeps Node's event loop alive, so a
+    // wrong method name here makes the script hang after its work is done. This
+    // is the same rough edge documented for scripts/e2e.mjs.
+    await helper.close();
   }
 }
 
-main().catch((e) => {
-  console.error(e);
-  process.exitCode = 1;
-});
+main()
+  .catch((e) => {
+    console.error(e);
+    process.exitCode = 1;
+  })
+  .finally(() => {
+    clearTimeout(watchdog);
+    // Explicit exit: any lingering child handle would otherwise keep the loop
+    // alive and turn a finished run into a hang.
+    process.exit(process.exitCode ?? 0);
+  });
