@@ -43,16 +43,36 @@ export const aiChecks = [
     id: "ai.face-focus",
     tool: "obsbot_face_focus",
     profile: "quick",
+    // ACCEPTED, not VERIFIED: obsbot_face_focus is face-priority AUTOFOCUS and has
+    // no readback on this transport. An earlier draft asserted it against the
+    // status block's faceAe field — but faceAe is face-priority auto-EXPOSURE, a
+    // different feature (see the note above encodeFaceAe in codec/commands.ts).
+    // Toggling one was never going to move the other.
+    tier: TIERS.ACCEPTED,
+    run: async (ctx) => {
+      const r = await ctx.call("obsbot_face_focus", { enabled: true });
+      if (r.ok === false) throw new Error(r.error);
+      await ctx.call("obsbot_face_focus", { enabled: false });
+      return {};
+    },
+  }),
+
+  defineCheck({
+    id: "ai.exposure-face-priority",
+    tool: "obsbot_exposure",
+    profile: "quick",
+    // This is what the status block's faceAe field actually tracks, so unlike
+    // face_focus it can be genuinely verified.
     tier: TIERS.VERIFIED,
     timeoutMs: 30000,
     run: async (ctx) => {
       const before = (await ctx.status()).faceAe;
-      await ctx.call("obsbot_face_focus", { enabled: !before });
+      await ctx.call("obsbot_exposure", { mode: "auto", priority: before ? "global" : "face" });
       const flipped = await ctx.until(async () => {
         const s = await ctx.status();
         return s.faceAe === !before ? s.faceAe : null;
       });
-      await ctx.call("obsbot_face_focus", { enabled: before });
+      await ctx.call("obsbot_exposure", { mode: "auto", priority: before ? "face" : "global" });
       return { evidence: { before, flipped } };
     },
   }),

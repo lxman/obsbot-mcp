@@ -23,6 +23,7 @@ import { buildReport, renderMarkdown } from "./report.mjs";
 import { HelperProcess } from "../../dist/transport/helper-process.js";
 import { DeviceManager } from "../../dist/device/manager.js";
 import { createTools } from "../../dist/mcp/tools.js";
+import { CaptureManager } from "../../dist/capture/manager.js";
 
 import { deviceChecks } from "./checks/device.mjs";
 import { gimbalChecks } from "./checks/gimbal.mjs";
@@ -76,7 +77,9 @@ async function main() {
   try {
     const mgr = new DeviceManager(helper);
     const transport = await mgr.openFirstObsbot();
-    const tools = createTools(async () => transport, mgr);
+    // debug=true exposes obsbot_probe (RE/diagnostics, filtered out otherwise), and a
+    // CaptureManager is required or every capture tool returns 'not configured'.
+    const tools = createTools(async () => transport, mgr, new CaptureManager(), undefined, true);
     byName = new Map(tools.map((t) => [t.name, t]));
 
     const call = async (name, args = {}) => {
@@ -94,6 +97,8 @@ async function main() {
     let keepAwake = true;
     let lastWake = 0;
     const HEARTBEAT_MS = 20000;
+    // Post-wake self-centering window; commands issued inside it are overridden.
+    const WAKE_SETTLE_MS = 2000;
     const heartbeat = async () => {
       if (!keepAwake) return;
       if (Date.now() - lastWake < HEARTBEAT_MS) return;
@@ -141,10 +146,15 @@ async function main() {
       console.log(`→ ${check.id}`);
       keepAwake = !check.managesSleep;
       if (keepAwake) {
-        // Start every check from a known-awake camera. Without this a check that
-        // follows a long one inherits a sleeping device and fails for reasons
-        // that have nothing to do with what it is testing.
-        await call("obsbot_set_run_status", { state: "run" });
+        // Start every check from a known-awake camera, but only wake when it is
+        // actually asleep: the gimbal self-centers for ~1-2s after a wake and
+        // overrides commands issued inside that window, so an unconditional wake
+        // before every check makes the next move silently fail.
+        const st = await call("obsbot_get_status");
+        if (st.awake === false) {
+          await call("obsbot_set_run_status", { state: "run" });
+          await sleep(WAKE_SETTLE_MS);
+        }
         lastWake = Date.now();
       }
       const r = await runCheck(check, ctx);

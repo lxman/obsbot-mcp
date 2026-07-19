@@ -57,9 +57,10 @@ export const deviceChecks = [
       // XU read path is alive; the status block starts 0x25 on this device.
       const r = await ctx.call("obsbot_probe", { mode: "get", selector: 6, length: 60 });
       if (r.ok === false) throw new Error(r.error);
-      const hex = r.hex ?? r.data ?? "";
-      if (!/^25/.test(hex)) throw new Error(`unexpected status block prefix: ${hex.slice(0, 8)}`);
-      return { evidence: { prefix: hex.slice(0, 8) } };
+      // mode 'get' returns { selector, len, raw } — the field is `raw`, not `hex`.
+      const raw = r.raw ?? "";
+      if (!/^25/.test(raw)) throw new Error(`unexpected status block prefix: ${raw.slice(0, 8)}`);
+      return { evidence: { prefix: raw.slice(0, 8), len: r.len } };
     },
   }),
 ];

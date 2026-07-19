@@ -15,10 +15,16 @@ export const captureChecks = [
       const r = await ctx.call("obsbot_snapshot", { maxDim: 640, quality: 70 });
       if (ffmpegMissing(r)) return { skip: "ffmpeg absent" };
       if (r.ok === false) throw new Error(r.error);
-      if (!r.base64 || r.base64.length < 100) throw new Error("snapshot returned no image data");
+      // obsbot_snapshot returns MCP content blocks, not a flat {base64}.
+      const image = (r.content ?? []).find((b) => b.type === "image");
+      if (!image) {
+        const text = (r.content ?? []).find((b) => b.type === "text")?.text ?? "no content";
+        return { skip: `no image returned: ${text}` };
+      }
+      if (!image.data || image.data.length < 100) throw new Error("snapshot image block was empty");
       return {
-        evidence: { bytes: r.base64.length, width: r.width, height: r.height },
-        measurements: [measurement("imageBytes", r.base64.length, "b64chars")],
+        evidence: { bytes: image.data.length, mime: image.mimeType },
+        measurements: [measurement("imageBytes", image.data.length, "b64chars")],
       };
     },
   }),

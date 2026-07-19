@@ -36,7 +36,7 @@ export const imagingChecks = [
     },
   }),
 
-  acceptedWrite("imaging.fov", "obsbot_fov", { fov: "78" }, { fov: "86" }),
+  acceptedWrite("imaging.fov", "obsbot_fov", { fov: "medium" }, { fov: "wide" }),
   acceptedWrite("imaging.focus", "obsbot_focus", { mode: "manual", position: 60 }, { mode: "auto" }),
   acceptedWrite(
     "imaging.white-balance",

@@ -91,8 +91,11 @@ export const transitionChecks = [
     tier: TIERS.VERIFIED,
     timeoutMs: 40000,
     run: async (ctx) => {
+      // The preceding check leaves the camera freshly woken, and a sleep issued
+      // inside the post-wake settling window is ignored. Let it settle first.
+      await ctx.sleep(2500);
       await ctx.call("obsbot_set_run_status", { state: "sleep" });
-      await ctx.until(async () => (await ctx.status()).awake === false);
+      await ctx.until(async () => (await ctx.status()).awake === false, { timeoutMs: 15000 });
       // get_status must NOT gate — reading state should not change it.
       const stillAsleep = (await ctx.status()).awake;
       if (stillAsleep !== false) throw new Error("obsbot_get_status woke the camera");
