@@ -196,22 +196,30 @@ static int base64_encode(const uint8_t *data, size_t len,
     out[n] = '\0';
     return (int)n;
 }
+// ---- V4L2 helpers ----
 
-// ---- global session state ----
-static int      g_fd = -1;
-static int      g_xu_unit = -1;
-static char     g_open_path[256];
-static bool     g_have_zoom = false;
+static int g_fd = -1;
+static int g_xu_unit = -1;
+static char g_open_path[PATH_MAX] = "";
+static bool g_have_zoom = false;
+// Last successfully V4L2-set pan_absolute/tilt_absolute values for repair.
+// After certain XU operations (UVCIOC_CTRL_QUERY), VIDIOC_G_CTRL for pan/tilt
+// fails. A VIDIOC_S_CTRL with any value restores the state, so we cache the
+// last-known-good value here to repair without a physical jolt.
+static int g_last_pan = 0;
+static int g_last_tilt = 0;
 
 // ---- V4L2 helpers ----
 
-static int v4l2_get_ctrl(int fd, int cid)
+// Returns 0 on success (value stored in *out), -1 on failure.
+static int v4l2_get_ctrl_ex(int fd, int cid, int *out)
 {
     struct v4l2_control c;
     memset(&c, 0, sizeof(c));
     c.id = cid;
     if (ioctl(fd, VIDIOC_G_CTRL, &c) < 0) return -1;
-    return c.value;
+    if (out) *out = c.value;
+    return 0;
 }
 
 static int v4l2_set_ctrl(int fd, int cid, int value)
@@ -565,6 +573,9 @@ static void do_camctrl_set(const char *prop_str, const char *val_str,
         error_response("camctrl_set: set failed");
         return;
     }
+    /* Cache pan/tilt values for repair after XU corruption */
+    if (cid == V4L2_CID_PAN_ABSOLUTE) g_last_pan = value;
+    if (cid == V4L2_CID_TILT_ABSOLUTE) g_last_tilt = value;
     ok_response("");
 }
 
@@ -606,16 +617,39 @@ static void do_camctrl_get(const char *prop_str)
     /* Check auto first */
     auto_cid = auto_ctrl_for(cid);
     if (auto_cid >= 0) {
-        int auto_val = v4l2_get_ctrl(g_fd, auto_cid);
-        if (auto_val == 1) {
+        int auto_val;
+        if (v4l2_get_ctrl_ex(g_fd, auto_cid, &auto_val) == 0 && auto_val == 1) {
             printf("{\"ok\":true,\"value\":0,\"flags\":1}\n");
             fflush(stdout);
             return;
         }
     }
 
-    value = v4l2_get_ctrl(g_fd, cid);
-    if (value < 0) {
+    if (v4l2_get_ctrl_ex(g_fd, cid, &value) < 0) {
+        /* After certain XU operations (preset read/write, status reads), the
+           V4L2 pan_absolute/tilt_absolute controls enter a state where
+           VIDIOC_G_CTRL fails. A VIDIOC_S_CTRL with the last-known-good value
+           restores the state — proven by hardware probing 2026-07-19. */
+        if (cid == V4L2_CID_PAN_ABSOLUTE || cid == V4L2_CID_TILT_ABSOLUTE) {
+            int repair_val = (cid == V4L2_CID_PAN_ABSOLUTE) ? g_last_pan : g_last_tilt;
+            int set_ret, retry_get_val;
+            /* First try immediate set + get. If that fails, try with a delta
+               (set to a different value, then back) to force the control to
+               cycle in hardware. */
+            for (int attempt = 0; attempt < 2; attempt++) {
+                int try_val = (attempt == 0) ? repair_val : ((repair_val == 0) ? 3600 : 0);
+                fprintf(stderr, "obsbot-helper: camctrl_get pan/tilt failed, repair attempt %d with %d\n",
+                        attempt, try_val);
+                set_ret = v4l2_set_ctrl(g_fd, cid, try_val);
+                fprintf(stderr, "obsbot-helper: repair set returned %d\n", set_ret);
+                if (set_ret < 0) continue;
+                if (v4l2_get_ctrl_ex(g_fd, cid, &retry_get_val) == 0) {
+                    printf("{\"ok\":true,\"value\":%d,\"flags\":2}\n", retry_get_val);
+                    fflush(stdout);
+                    return;
+                }
+            }
+        }
         error_response("camctrl_get: failed");
         return;
     }

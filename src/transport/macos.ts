@@ -1,5 +1,6 @@
 import { HelperProcess } from "./helper-process.js";
 import { ObsbotTransport, Snapshot, SnapshotOpts } from "./transport.js";
+import { encodeRecenter, encodePtzMoveAngle, encodePtzMoveSpeed } from "../codec/commands.js";
 
 // Same XU selector constants as WindowsTransport — they're defined by the
 // OBSBOT protocol, not the OS:
@@ -68,6 +69,22 @@ export class MacosTransport implements ObsbotTransport {
 
   async procAmpRange(property: number): Promise<{ min: number; max: number }> {
     return this.helper.procAmpRange(property);
+  }
+
+  async gimbalSet(yawDeg: number, pitchDeg: number, rollDeg = 0): Promise<void> {
+    await this.sendVendor(encodePtzMoveAngle(yawDeg, pitchDeg, rollDeg).buildFrame(this.nextSeq()));
+  }
+
+  async gimbalSpeed(yaw: number, pitch: number, roll: number, autoStopMs: number): Promise<void> {
+    await this.sendVendor(encodePtzMoveSpeed(-yaw, pitch, roll).buildFrame(this.nextSeq()));
+    if (autoStopMs > 0) {
+      await new Promise((r) => setTimeout(r, autoStopMs));
+      await this.sendVendor(encodePtzMoveSpeed(0, 0, 0).buildFrame(this.nextSeq()));
+    }
+  }
+
+  async gimbalRecenter(): Promise<void> {
+    await this.sendVendor(encodeRecenter().buildFrame(this.nextSeq()));
   }
 
   nextSeq(): number {

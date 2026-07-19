@@ -1,5 +1,6 @@
 import { HelperProcess } from "./helper-process.js";
 import { ObsbotTransport, Snapshot, SnapshotOpts } from "./transport.js";
+import { encodeRecenter, encodePtzMoveAngle, encodePtzMoveSpeed } from "../codec/commands.js";
 
 const VENDOR_XU_SELECTOR = 0x02;
 // Intended read-back selector for the (future) per-command V3-frame Get path
@@ -78,6 +79,24 @@ export class WindowsTransport implements ObsbotTransport {
 
   async procAmpRange(property: number): Promise<{ min: number; max: number }> {
     return this.helper.procAmpRange(property);
+  }
+
+  async gimbalSet(yawDeg: number, pitchDeg: number, rollDeg = 0): Promise<void> {
+    await this.sendVendor(encodePtzMoveAngle(yawDeg, pitchDeg, rollDeg).buildFrame(this.nextSeq()));
+  }
+
+  async gimbalSpeed(yaw: number, pitch: number, roll: number, autoStopMs: number): Promise<void> {
+    // Firmware velocity-yaw is inverted relative to position-yaw — negate yaw so
+    // the contract is consistent: +yaw pans to camera's left.
+    await this.sendVendor(encodePtzMoveSpeed(-yaw, pitch, roll).buildFrame(this.nextSeq()));
+    if (autoStopMs > 0) {
+      await new Promise((r) => setTimeout(r, autoStopMs));
+      await this.sendVendor(encodePtzMoveSpeed(0, 0, 0).buildFrame(this.nextSeq()));
+    }
+  }
+
+  async gimbalRecenter(): Promise<void> {
+    await this.sendVendor(encodeRecenter().buildFrame(this.nextSeq()));
   }
 
   nextSeq(): number {

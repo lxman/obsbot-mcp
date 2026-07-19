@@ -51,6 +51,24 @@ export interface ObsbotTransport {
   procAmpSet(property: number, value: number, flags: number): Promise<void>;
   /** IAMVideoProcAmp::GetRange(property) → device-unit min/max. */
   procAmpRange(property: number): Promise<{ min: number; max: number }>;
+  /**
+   * Move the gimbal to an absolute yaw/pitch angle in degrees. Positive yaw =
+   * camera's left; positive pitch = tilt down.
+   * Platform note: Linux uses V4L2 pan_absolute/tilt_absolute (proven to move
+   * the physical gimbal and keep V4L2 readback working). Windows/macOS use
+   * vendor V3 frames (AI_SET_GIM_MOTOR_DEG).
+   */
+  gimbalSet(yawDeg: number, pitchDeg: number, rollDeg?: number): Promise<void>;
+  /**
+   * Drive the gimbal at a yaw/pitch speed (platform-specific units), then
+   * automatically stop after autoStopMs. Positive yaw = camera's left.
+   * Platform note: Linux approximates by converting speed × duration to an
+   * absolute V4L2 pan_absolute/tilt_absolute move. Windows/macOS use vendor
+   * V3 frames (AI_SET_GIM_SPEED).
+   */
+  gimbalSpeed(yaw: number, pitch: number, roll: number, autoStopMs: number): Promise<void>;
+  /** Recenter the gimbal to yaw=0, pitch=0. */
+  gimbalRecenter(): Promise<void>;
   nextSeq(): number;
   close(): Promise<void>;
 }

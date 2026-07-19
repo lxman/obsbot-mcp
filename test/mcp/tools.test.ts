@@ -39,6 +39,9 @@ function makeFakeTransport() {
       height: 720,
       base64: "QUJD",
     })),
+    gimbalSet: vi.fn(async (_yaw: number, _pitch: number, _roll?: number) => {}),
+    gimbalSpeed: vi.fn(async (_yaw: number, _pitch: number, _roll: number, _autoStopMs: number) => {}),
+    gimbalRecenter: vi.fn(async () => {}),
     nextSeq: vi.fn(() => ++seq),
     close: vi.fn(async () => {}),
   } satisfies ObsbotTransport;
@@ -107,7 +110,8 @@ test("obsbot_ptz_move_speed sends move then auto-stop", async () => {
 
   const result = await tool.handler({ yaw: 10, pitch: 5, roll: 0, autoStopMs: 1 });
 
-  expect(transport.sendVendor).toHaveBeenCalledTimes(2);
+  expect(transport.gimbalSpeed).toHaveBeenCalledTimes(1);
+  expect(transport.gimbalSpeed).toHaveBeenCalledWith(10, 5, 0, 1);
   expect(result).toEqual({ ok: true, stopped: true });
 });
 
@@ -121,9 +125,9 @@ test("obsbot_ptz_move_speed negates yaw so +yaw pans camera-left (matches ptz_mo
 
   await tool.handler({ yaw: 40, pitch: 0, roll: 0, autoStopMs: 0 });
 
-  // Wire payload is [roll, pitch, yaw] at frame offsets 16/20/24; yaw slot must be negated.
-  const frame = transport.sendVendor.mock.calls[0][0] as Buffer;
-  expect(frame.readFloatLE(24)).toBeCloseTo(-40);
+  // The yaw inversion is handled by gimbalSpeed on the transport; gimbalSpeed was
+  // called with the raw (non-negated) yaw values as the tool receives them.
+  expect(transport.gimbalSpeed).toHaveBeenCalledWith(40, 0, 0, 0);
 });
 
 test("obsbot_gimbal_recenter sends a single vendor frame", async () => {
@@ -134,7 +138,7 @@ test("obsbot_gimbal_recenter sends a single vendor frame", async () => {
 
   const result = await tool.handler({});
 
-  expect(transport.sendVendor).toHaveBeenCalledTimes(1);
+  expect(transport.gimbalRecenter).toHaveBeenCalledTimes(1);
   expect(result).toEqual({ ok: true });
 });
 
@@ -276,7 +280,8 @@ test("obsbot_ptz_move_angle clamps yaw/pitch to conservative limits", async () =
 
   const result = await tool.handler({ yaw: 999, pitch: -999, roll: 0 });
 
-  expect(transport.sendVendor).toHaveBeenCalledTimes(1);
+  expect(transport.gimbalSet).toHaveBeenCalledTimes(1);
+  expect(transport.gimbalSet).toHaveBeenCalledWith(150, -90, 0);
   expect(result).toEqual({ yaw: 150, pitch: -90, roll: 0 });
 });
 
@@ -455,7 +460,8 @@ test("obsbot_ptz_move_angle accepts string-encoded numbers", async () => {
   const result = await tools
     .find((t) => t.name === "obsbot_ptz_move_angle")!
     .handler({ yaw: "30", pitch: "-20", roll: "0" });
-  expect(transport.sendVendor).toHaveBeenCalledTimes(1);
+  expect(transport.gimbalSet).toHaveBeenCalledTimes(1);
+  expect(transport.gimbalSet).toHaveBeenCalledWith(30, -20, 0);
   expect(result).toEqual({ yaw: 30, pitch: -20, roll: 0 });
 });
 

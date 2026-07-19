@@ -1,9 +1,6 @@
 import { z } from "zod";
 import {
   encodeSetRunStatus,
-  encodePtzMoveAngle,
-  encodePtzMoveSpeed,
-  encodeRecenter,
   zoomRatioToUnits,
   encodeAiTrackSpeed,
   encodeAiTracking,
@@ -186,9 +183,6 @@ const recordStartSchema = z.object({
 const previewStartSchema = z.object({ source: captureSourceEnum.default("device") });
 const captureStopSchema = z.object({ sessionId: z.string() });
 const captureListSchema = z.object({});
-
-const sleep = (ms: number): Promise<void> =>
-  new Promise((resolve) => setTimeout(resolve, ms));
 
 // Preset read path: flat XU selectors 12 (list) + 13 (entry cursor). Hardware-verified
 // 2026-07-19 — NOT the framed-reply model (recvVendor + parseFrame); reads on the
@@ -406,11 +400,7 @@ export function createTools(
         const ready = await gate();
         if (!ready.ok) return ready;
         const t = ready.transport;
-        // Vendor gimbal frame AI_SET_GIM_MOTOR_DEG. The wire payload order is [roll, pitch,
-        // yaw] — see encodePtzMoveAngle / gimbal3. Absolute, 1:1 degrees, HW-confirmed. (The
-        // earlier UVC pan/tilt/roll experiment was abandoned: it's flaky on the OBSBOT
-        // DirectShow driver, so PTZ rides the vendor frame instead.)
-        await t.sendVendor(encodePtzMoveAngle(yaw, pitch, roll).buildFrame(t.nextSeq()));
+        await t.gimbalSet(yaw, pitch, roll);
         return ready.reconnected ? { yaw, pitch, roll, reconnected: true } : { yaw, pitch, roll };
       },
     },
@@ -425,14 +415,10 @@ export function createTools(
         const ready = await gate();
         if (!ready.ok) return ready;
         const t = ready.transport;
-        // Firmware velocity-yaw is inverted relative to position-yaw (AI_SET_GIM_SPEED +yaw
-        // drives right, AI_SET_GIM_MOTOR_DEG +yaw drives left — HW-observed). Negate so the
-        // tool contract is consistent: +yaw pans to the camera's left on both PTZ tools.
-        await t.sendVendor(encodePtzMoveSpeed(-yaw, pitch, roll).buildFrame(t.nextSeq()));
-        if (autoStopMs > 0) {
-          await sleep(autoStopMs);
-          await t.sendVendor(encodePtzMoveSpeed(0, 0, 0).buildFrame(t.nextSeq()));
-        }
+        // Firmware velocity-yaw is inverted relative to position-yaw: the vendor
+        // AI_SET_GIM_SPEED +yaw drives right (opposite of obsbot_ptz_move_angle).
+        // The transport's gimbalSpeed handles this per-platform as needed.
+        await t.gimbalSpeed(yaw, pitch, roll, autoStopMs);
         return { ok: true, stopped: autoStopMs > 0, ...(ready.reconnected && { reconnected: true }) };
       },
     },
@@ -445,9 +431,7 @@ export function createTools(
         const ready = await gate();
         if (!ready.ok) return ready;
         const t = ready.transport;
-        // Vendor recenter GIM_SET_MOTOR (0x00C3 + 6 zero bytes). HW-confirmed to recenter
-        // the gimbal.
-        await t.sendVendor(encodeRecenter().buildFrame(t.nextSeq()));
+        await t.gimbalRecenter();
         return { ok: true, ...(ready.reconnected && { reconnected: true }) };
       },
     },
@@ -765,6 +749,14 @@ export function createTools(
             return { ok: false, error: `slot ${slot} is empty; save first` };
           }
           await t.sendVendor(encodePresetRecall(t.nextSeq(), slot));
+          // Sync V4L2 pan/tilt register to the preset's saved pose. The vendor-frame
+          // recall physically moves the gimbal but corrupts V4L2 pan_absolute/tilt_absolute
+          // on Linux. Issuing gimbalSet (which uses V4L2 on Linux) to the known target
+          // both moves the gimbal there and restores the V4L2 register.
+          const recallPose = before[slot - 1].pose;
+          if (recallPose) {
+            await t.gimbalSet(recallPose.pan, recallPose.tilt);
+          }
           const after = await readPresetSlots(t, gate, presetRead);
           if (!after[slot - 1].occupied) {
             return { ok: false, error: "verification failed", expected: "occupied", actual: "empty" };
