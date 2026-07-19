@@ -2,6 +2,7 @@ import { expect, test } from "vitest";
 import { bufToHex, hexToBuf } from "../../src/codec/encoding.js";
 import {
   encodePresetAdd, encodePresetRecall, encodePresetDelete, encodePresetSetName,
+  encodeBootPose, encodeBootFlags,
   decodePresetList, decodePresetEntry, assemblePresetSlots,
 } from "../../src/codec/preset.js";
 
@@ -40,6 +41,20 @@ test("encodePresetSetName: cmd 0x3a84, slot index + ASCII", () => {
   expect(cmdOf(f)).toBe("843a");
   expect(len2Of(f)).toBe(4 + 7);
   expect(payloadOf(f, 11)).toBe("00000000" + Buffer.from("Preset1").toString("hex"));
+});
+
+test("encodeBootPose: cmd 0x3ec4, slot index + pose + -1000 sentinel", () => {
+  const f = bufToHex(encodeBootPose(1, 1, { pan: 21, tilt: 0, roll: 0, zoom: 1 }));
+  expect(cmdOf(f)).toBe("c43e");            // 0x3ec4 LE
+  expect(len2Of(f)).toBe(24);
+  expect(payloadOf(f, 4)).toBe("00000000"); // slot 1 -> index 0
+});
+
+test("encodeBootFlags: cmd 0x3e44, 4-byte slot-index payload", () => {
+  const f = bufToHex(encodeBootFlags(1, 2));
+  expect(cmdOf(f)).toBe("443e");            // 0x3e44 LE
+  expect(len2Of(f)).toBe(4);
+  expect(payloadOf(f, 4)).toBe("01000000"); // slot 2 -> index 1
 });
 
 // Flat XU selector 12: <count:u8> <slotIdx:u8> x count. Hardware-observed 2026-07-19.

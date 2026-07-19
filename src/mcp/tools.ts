@@ -37,7 +37,14 @@ import {
 import type { AiTrackSpeed, AiFramingMode, AiSceneMode, AiModeStatus, FovType, ImageControl } from "../codec/commands.js";
 import { verifyFraming } from "./framing.js";
 import { parseFrame } from "../codec/frame.js";
-import { decodePresetList, decodePresetEntry, assemblePresetSlots } from "../codec/preset.js";
+import {
+  decodePresetList,
+  decodePresetEntry,
+  assemblePresetSlots,
+  encodePresetAdd,
+  encodeBootPose,
+  encodeBootFlags,
+} from "../codec/preset.js";
 import type { PresetSlot, PresetPose } from "../codec/preset.js";
 import { ObsbotTransport, CameraBusyError } from "../transport/transport.js";
 import { DeviceManager } from "../device/manager.js";
@@ -139,6 +146,10 @@ const exposureSchema = z.object({
 });
 const gimbalPositionSchema = z.object({});
 const presetListSchema = z.object({});
+const presetSaveSchema = z.object({
+  slot: num().pipe(z.union([z.literal(1), z.literal(2), z.literal(3)])),
+  asInitialState: bool().default(false),
+});
 const snapshotSchema = z.object({
   maxDim: num().pipe(z.number().min(256).max(1920)).default(1024),
   quality: num().pipe(z.number().min(1).max(100)).default(80),
@@ -523,6 +534,44 @@ export function createTools(
         try {
           const t = await getTransport();
           return { ok: true, slots: await getPresetSlots(t) };
+        } catch (e) {
+          return { ok: false, error: (e as Error).message };
+        }
+      },
+    },
+    {
+      name: "obsbot_preset_save",
+      description:
+        "Save the gimbal's current live pose (yaw/pitch, via the standard UVC Pan/Tilt " +
+        "controls) into preset slot 1|2|3. Slots are create-once on this device — there is " +
+        "no overwrite, so an occupied slot is rejected (delete it first). With " +
+        "asInitialState:true, also marks this slot's pose as the pose the gimbal strikes " +
+        "on power-up. Verifies by re-reading the slot list after writing.",
+      schema: presetSaveSchema,
+      handler: async (args: unknown) => {
+        const { slot, asInitialState } = presetSaveSchema.parse(args);
+        try {
+          const t = await getTransport();
+          const before = await getPresetSlots(t);
+          if (before[slot - 1].occupied) {
+            return { ok: false, error: `slot ${slot} is occupied; update or delete first` };
+          }
+          // Mirror obsbot_gimbal_position's read path exactly: UVC pan is degrees, same
+          // sign as our yaw; UVC tilt is degrees but positive = up, so negate to match
+          // our +pitch = down convention.
+          const yaw = (await t.camCtrlGet(CAMERA_CONTROL_PAN)).value;
+          const pitch = -(await t.camCtrlGet(CAMERA_CONTROL_TILT)).value;
+          const pose: PresetPose = { pan: yaw, tilt: pitch, roll: 0, zoom: 1 };
+          await t.sendVendor(encodePresetAdd(t.nextSeq(), slot, pose));
+          if (asInitialState) {
+            await t.sendVendor(encodeBootPose(t.nextSeq(), slot, pose));
+            await t.sendVendor(encodeBootFlags(t.nextSeq(), slot));
+          }
+          const after = await getPresetSlots(t);
+          if (!after[slot - 1].occupied) {
+            return { ok: false, error: "verification failed", expected: "occupied", actual: "empty" };
+          }
+          return { ok: true, slot: after[slot - 1] };
         } catch (e) {
           return { ok: false, error: (e as Error).message };
         }

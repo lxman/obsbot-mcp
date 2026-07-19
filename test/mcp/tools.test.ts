@@ -733,3 +733,77 @@ test("obsbot_gimbal_position maps UVC pan->yaw and negates tilt->pitch", async (
   expect(transport.camCtrlGet).toHaveBeenCalledWith(1);
   expect(result).toEqual({ yaw: 30, pitch: 19 });
 });
+
+// --- obsbot_preset_save ---
+
+test("obsbot_preset_save rejects an occupied slot", async () => {
+  // makePresetTransport's fixture has all three slots occupied.
+  const { transport } = makePresetTransport();
+  const tools = createTools(async () => transport, makeFakeMgr());
+  const tool = findTool(tools, "obsbot_preset_save");
+
+  const result = await tool.handler({ slot: 1 });
+
+  expect(result).toEqual({ ok: false, error: "slot 1 is occupied; update or delete first" });
+  expect(transport.sendVendor).not.toHaveBeenCalled();
+});
+
+test("obsbot_preset_save on an empty slot sends the ADD frame with the live pose then verifies", async () => {
+  const transport = makeFakeTransport();
+  let listCall = 0;
+  transport.xuGetRaw = vi.fn(async (selector: number, _length: number) => {
+    if (selector === 12) {
+      listCall++;
+      // 1st read (guard): slot list empty. 2nd read (verify): slot 1 now occupied.
+      return listCall === 1 ? Buffer.from("00", "hex") : Buffer.from("0100", "hex");
+    }
+    return PRESET_ENTRY_1; // decodes to slot 1, name "Preset1"
+  });
+  transport.xuRaw = vi.fn(async (_selector: number, _data: Buffer) => {});
+  // pan (prop 0) = 21 -> yaw 21; tilt (prop 1) = 0 -> pitch -0 (negated)
+  transport.camCtrlGet = vi.fn(async (p: number) =>
+    p === 0 ? { value: 21, flags: 2 } : { value: 0, flags: 2 },
+  );
+  const tools = createTools(async () => transport, makeFakeMgr());
+  const tool = findTool(tools, "obsbot_preset_save");
+
+  const result = await tool.handler({ slot: 1 });
+
+  expect(transport.sendVendor).toHaveBeenCalledTimes(1);
+  const addFrame = transport.sendVendor.mock.calls[0][0] as Buffer;
+  expect(addFrame.subarray(10, 12).toString("hex")).toBe("4439"); // cmd 0x3944 LE
+  expect(addFrame.readFloatLE(20)).toBeCloseTo(21); // pan slotted after idx(4) + pan f32
+
+  expect(result).toMatchObject({ ok: true });
+  const slot = (result as { slot: Record<string, unknown> }).slot;
+  expect(slot).toMatchObject({ slot: 1, occupied: true, name: "Preset1" });
+});
+
+test("obsbot_preset_save with asInitialState also sends boot-pose and boot-flags frames", async () => {
+  const transport = makeFakeTransport();
+  let listCall = 0;
+  transport.xuGetRaw = vi.fn(async (selector: number, _length: number) => {
+    if (selector === 12) {
+      listCall++;
+      return listCall === 1 ? Buffer.from("00", "hex") : Buffer.from("0100", "hex");
+    }
+    return PRESET_ENTRY_1;
+  });
+  transport.xuRaw = vi.fn(async (_selector: number, _data: Buffer) => {});
+  transport.camCtrlGet = vi.fn(async (p: number) =>
+    p === 0 ? { value: 21, flags: 2 } : { value: 0, flags: 2 },
+  );
+  const tools = createTools(async () => transport, makeFakeMgr());
+  const tool = findTool(tools, "obsbot_preset_save");
+
+  const result = await tool.handler({ slot: 1, asInitialState: true });
+
+  expect(transport.sendVendor).toHaveBeenCalledTimes(3);
+  const [addFrame, bootPoseFrame, bootFlagsFrame] = transport.sendVendor.mock.calls.map(
+    (c) => c[0] as Buffer,
+  );
+  expect(addFrame.subarray(10, 12).toString("hex")).toBe("4439"); // 0x3944
+  expect(bootPoseFrame.subarray(10, 12).toString("hex")).toBe("c43e"); // 0x3ec4
+  expect(bootFlagsFrame.subarray(10, 12).toString("hex")).toBe("443e"); // 0x3e44
+  expect(result).toMatchObject({ ok: true });
+});

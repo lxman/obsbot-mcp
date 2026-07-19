@@ -27,6 +27,15 @@ export const encodePresetSetName = (seq: number, slot: number, name: string): Bu
   buildFrame({ seq, cmd: CMD.SET_NAME, receiver: RECEIVER,
     payload: concat(idx(slot), Buffer.from(name, "ascii")) });
 
+// Boot-pose sequence: mirrors ADD's slot-index + pose payload shape, but tells the
+// device which slot's pose to strike on power-up.
+export const encodeBootPose = (seq: number, slot: number, pose: PresetPose): Buffer =>
+  buildFrame({ seq, cmd: CMD.BOOT_POSE, receiver: RECEIVER, payload: concat(idx(slot), poseBytes(pose)) });
+
+// Marks `slot` as the initial-state slot (sent after encodeBootPose to flip the flag).
+export const encodeBootFlags = (seq: number, slot: number): Buffer =>
+  buildFrame({ seq, cmd: CMD.BOOT_FLAGS, receiver: RECEIVER, payload: idx(slot) });
+
 // NOTE: the vendor GET encoders (LIST 0x3b44 / VALUE 0x3a44 / NAME 0x3b04) were
 // deleted 2026-07-19. They built valid frames, but the device answers them on a
 // reply path we cannot read: after sending one, the reply selector returns the
