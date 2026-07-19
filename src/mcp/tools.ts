@@ -47,9 +47,6 @@ import {
   encodePresetRecall,
   encodePresetDelete,
   encodePresetSetName,
-  encodeGimBootPosSet,
-  encodeGimBootPosReset,
-  encodeGimBootPosTrigger,
 } from "../codec/preset.js";
 import type { PresetSlot, PresetPose } from "../codec/preset.js";
 import { ObsbotTransport, CameraBusyError } from "../transport/transport.js";
@@ -168,7 +165,6 @@ const presetRenameSchema = z.object({
   name: z.string(),
 });
 const presetDeleteSchema = presetSlotSchema;
-const bootPoseSchema = z.object({ action: z.enum(["set", "clear", "goto"]) });
 // Rename frame payload is u32le(slot-1) [4 bytes] + ASCII name, inside a fixed 60-byte
 // frame whose payload region starts at offset 16 (see buildFrame). Max payload is
 // 60-16=44 bytes, so the name must fit in 44-4=40 bytes.
@@ -710,7 +706,7 @@ export function createTools(
         "Save the gimbal's current live pose (yaw/pitch, via the standard UVC Pan/Tilt " +
         "controls) into preset slot 1|2|3. Slots are create-once on this device — there is " +
         "no overwrite, so an occupied slot is rejected (delete it first). Verifies by " +
-        "re-reading the slot list after writing. For the power-up pose see obsbot_boot_pose.",
+        "re-reading the slot list after writing.",
       schema: presetSaveSchema,
       handler: async (args: unknown) => {
         const { slot } = presetSaveSchema.parse(args);
@@ -784,8 +780,7 @@ export function createTools(
       description:
         "Overwrite preset slot 1|2|3 with the gimbal's current live pose (yaw/pitch via the " +
         "standard UVC Pan/Tilt controls). The slot must already be occupied (save first to " +
-        "create it). Verifies by re-reading the slot list after writing. For the power-up " +
-        "pose see obsbot_boot_pose.",
+        "create it). Verifies by re-reading the slot list after writing.",
       schema: presetUpdateSchema,
       handler: async (args: unknown) => {
         const { slot } = presetUpdateSchema.parse(args);
@@ -866,51 +861,6 @@ export function createTools(
           return { ok: true, slot: after[slot - 1], ...(ready.reconnected && { reconnected: true }) };
         } catch (e) {
           return { ok: false, error: msg(e) };
-        }
-      },
-    },
-    {
-      name: "obsbot_boot_pose",
-      description:
-        "Boot pose — the position the gimbal strikes on power-up. action 'set' stores the " +
-        "gimbal's current live pose; 'clear' restores the factory default; 'goto' drives the " +
-        "gimbal to the stored boot pose right now. NOT VERIFIED: this device answers reads on " +
-        "a reply path this transport cannot read, so 'set' cannot be confirmed by readback — " +
-        "use 'goto' and watch where the gimbal actually lands. 'clear' undoes 'set'.",
-      schema: bootPoseSchema,
-      handler: async (args: unknown) => {
-        const { action } = bootPoseSchema.parse(args);
-        const ready = await gate();
-        if (!ready.ok) return ready;
-        const t = ready.transport;
-        try {
-          if (action === "clear") {
-            await t.sendVendor(encodeGimBootPosReset(t.nextSeq()));
-            return { ok: true, action, ...(ready.reconnected && { reconnected: true }) };
-          }
-          if (action === "goto") {
-            await t.sendVendor(encodeGimBootPosTrigger(t.nextSeq()));
-            return { ok: true, action, ...(ready.reconnected && { reconnected: true }) };
-          }
-          // Same live-pose read as obsbot_preset_save: UVC pan is degrees with our
-          // yaw's sign; UVC tilt is positive = up, so negate for our +pitch = down.
-          const yaw = (await t.camCtrlGet(CAMERA_CONTROL_PAN)).value;
-          const pitch = -(await t.camCtrlGet(CAMERA_CONTROL_TILT)).value;
-          // Zoom is hardcoded to 1: ObsbotTransport exposes no zoom getter, so the
-          // live ratio cannot be read back here rather than guessed.
-          const bootPose: PresetPose = { pan: yaw, tilt: pitch, roll: 0, zoom: 1 };
-          await t.sendVendor(encodeGimBootPosSet(t.nextSeq(), bootPose));
-          return {
-            ok: true,
-            action,
-            bootPose,
-            // Stated explicitly so the caller never reads success as confirmation:
-            // the write left the host, nothing read it back. Verify with 'goto'.
-            verified: false,
-            ...(ready.reconnected && { reconnected: true }),
-          };
-        } catch (e) {
-          return { ok: false, error: `boot pose ${action} failed: ${msg(e)}` };
         }
       },
     },
