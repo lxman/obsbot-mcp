@@ -4,6 +4,9 @@ import { ObsbotTransport, Snapshot, SnapshotOpts } from "./transport.js";
 // Same XU selector constants as WindowsTransport — they're defined by the
 // OBSBOT protocol, not the OS:
 const VENDOR_XU_SELECTOR = 0x02;
+// Unproven per-command reply path — reads back zeros. See the WindowsTransport
+// comment for the 2026-07-19 hardware sweep: sel 6 returns the status block (not
+// a reply), and preset read-back lives on flat selectors 12/13 instead.
 const RESPONSE_SELECTOR = 0x02;
 const DEFAULT_REPLY_LEN = 60;
 const STATUS_SELECTOR = 0x06;

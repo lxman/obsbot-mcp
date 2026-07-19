@@ -77,6 +77,22 @@ With the installed binary, use `"command": "obsbot-mcp"` and `"args": ["--debug"
 | `obsbot_gimbal_recenter` | — | Recenter the gimbal (return to home position). |
 | `obsbot_gimbal_position` | — | Read the gimbal's current absolute `{ yaw, pitch }` in degrees via standard UVC Pan/Tilt. May lag a move still in progress. |
 
+### Gimbal presets
+
+Three on-device preset slots (1–3). Slots are **create-once**: `obsbot_preset_save` requires an
+empty slot (delete first to reuse one); every other preset tool requires the slot to already be
+occupied. Each tool re-reads the slot list after writing and returns a structured `{ ok:false }`
+failure if the device didn't land the change.
+
+| Tool | Parameters | Description |
+|------|------------|-------------|
+| `obsbot_preset_list` | — | Read the three preset slots: occupied/empty, name, and pose in degrees. |
+| `obsbot_preset_save` | `slot` (`1`\|`2`\|`3`), `asInitialState` (default `false`) | Save the gimbal's current live pose into an **empty** slot. With `asInitialState:true`, also marks it as the pose the gimbal strikes on power-up. |
+| `obsbot_preset_recall` | `slot` (`1`\|`2`\|`3`) | Recall an **occupied** slot, driving the gimbal to its saved pose. |
+| `obsbot_preset_update` | `slot` (`1`\|`2`\|`3`), `asInitialState` (default `false`) | Overwrite an **occupied** slot with the gimbal's current live pose. With `asInitialState:true`, also marks it as the power-up pose. |
+| `obsbot_preset_rename` | `slot` (`1`\|`2`\|`3`), `name` | Rename an **occupied** slot (names over 40 bytes are truncated). |
+| `obsbot_preset_delete` | `slot` (`1`\|`2`\|`3`) | Delete an **occupied** slot, freeing it for `obsbot_preset_save`. |
+
 ### Zoom
 
 | Tool | Parameters | Description |

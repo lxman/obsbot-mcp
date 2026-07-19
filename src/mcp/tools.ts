@@ -37,10 +37,25 @@ import {
 import type { AiTrackSpeed, AiFramingMode, AiSceneMode, AiModeStatus, FovType, ImageControl } from "../codec/commands.js";
 import { verifyFraming } from "./framing.js";
 import { parseFrame } from "../codec/frame.js";
+import {
+  decodePresetList,
+  decodePresetEntry,
+  assemblePresetSlots,
+  implausiblePresetListReason,
+  encodePresetAdd,
+  encodePresetUpdate,
+  encodePresetRecall,
+  encodePresetDelete,
+  encodePresetSetName,
+  encodeBootPose,
+  encodeBootFlags,
+} from "../codec/preset.js";
+import type { PresetSlot, PresetPose } from "../codec/preset.js";
 import { ObsbotTransport, CameraBusyError } from "../transport/transport.js";
 import { DeviceManager } from "../device/manager.js";
 import { DeviceSession } from "../device/session.js";
-import { ensureReady } from "./ready.js";
+import { ensureReady, msg } from "./ready.js";
+import type { ReadyResult } from "./ready.js";
 import type { CaptureManager } from "../capture/manager.js";
 import { CaptureError } from "../capture/manager.js";
 
@@ -136,6 +151,28 @@ const exposureSchema = z.object({
   priority: z.enum(["global", "face"]).optional(),
 });
 const gimbalPositionSchema = z.object({});
+const presetListSchema = z.object({});
+const presetSaveSchema = z.object({
+  slot: num().pipe(z.union([z.literal(1), z.literal(2), z.literal(3)])),
+  asInitialState: bool().default(false),
+});
+const presetSlotSchema = z.object({
+  slot: num().pipe(z.union([z.literal(1), z.literal(2), z.literal(3)])),
+});
+const presetRecallSchema = presetSlotSchema;
+const presetUpdateSchema = z.object({
+  slot: num().pipe(z.union([z.literal(1), z.literal(2), z.literal(3)])),
+  asInitialState: bool().default(false),
+});
+const presetRenameSchema = z.object({
+  slot: num().pipe(z.union([z.literal(1), z.literal(2), z.literal(3)])),
+  name: z.string(),
+});
+const presetDeleteSchema = presetSlotSchema;
+// Rename frame payload is u32le(slot-1) [4 bytes] + ASCII name, inside a fixed 60-byte
+// frame whose payload region starts at offset 16 (see buildFrame). Max payload is
+// 60-16=44 bytes, so the name must fit in 44-4=40 bytes.
+const PRESET_NAME_MAX = 40;
 const snapshotSchema = z.object({
   maxDim: num().pipe(z.number().min(256).max(1920)).default(1024),
   quality: num().pipe(z.number().min(1).max(100)).default(80),
@@ -157,12 +194,172 @@ const captureListSchema = z.object({});
 const sleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
 
+// Preset read path: flat XU selectors 12 (list) + 13 (entry cursor). Hardware-verified
+// 2026-07-19 — NOT the framed-reply model (recvVendor + parseFrame); reads on the
+// vendor reply path just return the flat status block for this device. Three steps:
+//   1. GET selector 12 -> <count:u8> <slotIdx:u8> x count
+//   2. echo-write the just-read bytes back to selector 12 -> resets the entry cursor
+//      (echo is provably non-destructive; do NOT write zeros/synthesized bytes)
+//   3. GET selector 13, `count` times -> each read returns the next preset entry and
+//      advances the cursor, until the exhausted marker (status 0x02)
+//
+// Occupancy gates a create-once resource (save requires EMPTY, everything else
+// requires OCCUPIED), so a falsely-"empty" read here drives an irreversible write.
+// C1/I1/I3 below are all facets of the same unifying fix: never trust device bytes
+// enough to act on them (or echo them back) without a plausibility/consistency check.
+const isAllZero = (b: Buffer): boolean => b.equals(Buffer.alloc(b.length));
+
+// A genuinely EMPTY device and a not-serving read BOTH return an all-zero selector-12
+// block (hardware-established 2026-07-19 under controlled conditions: OBSBOT Center
+// closed so nothing could re-assert presets, camera measured awake at the moment of
+// the read, stable across repeated reads). So the block alone cannot tell them apart.
+//
+// Corroborate on the SAME XU surface and handle: the status block. When selector 12
+// read zeros on a genuinely empty device, the status block still returned real
+// non-zero data — a dead link or stale handle would zero BOTH.
+//
+// The check is deliberately TWO-part. decodeStatus reports awake for an ALL-ZERO block
+// (awake === block[0x02] === 0), so testing `awake` alone would let a dead link
+// masquerade as an empty device — manufacturing the exact false-EMPTY that gates the
+// irreversible create-once ADD. Requiring the status block to be non-zero AND awake
+// makes emptiness something we accept only on positive evidence.
+//
+// NOTE: UVC liveness is NOT valid corroboration here — obsbot_gimbal_position returns
+// a correct live pose even while the preset selectors aren't serving.
+async function presetSubsystemServing(t: ObsbotTransport): Promise<boolean> {
+  try {
+    const status = await t.recvStatus(60);
+    if (isAllZero(status)) return false;
+    return decodeStatus(status).awake;
+  } catch {
+    return false;
+  }
+}
+
+async function getPresetSlots(t: ObsbotTransport): Promise<PresetSlot[]> {
+  const block = await t.xuGetRaw(12, 60);
+  // Zero presets is a legitimate device state, and every preset tool routes through
+  // here — so refusing it outright left our toolset with no path OUT of it (save was
+  // gated behind the read that fails, making the first preset uncreatable where
+  // OBSBOT Center doesn't exist). Accept it only with positive corroboration, and
+  // skip the echo-write: with no entries there is no cursor to reset, which removes
+  // the C1 hazard at its root on this path rather than bypassing the check.
+  if (isAllZero(block) && (await presetSubsystemServing(t))) {
+    return assemblePresetSlots([]);
+  }
+  // C1: validate BEFORE the echo-write — see implausiblePresetListReason. A
+  // failed/short/garbage read must never be echoed back to a selector whose
+  // write semantics for anything but a genuine echo are undecoded.
+  const reason = implausiblePresetListReason(block);
+  if (reason) {
+    throw new Error(`preset list read implausible, refusing to reset the cursor: ${reason}`);
+  }
+  const list = decodePresetList(block);
+  await t.xuRaw(12, block); // echo-write resets the cursor — load-bearing, see above
+
+  // I3: never walk more entries than the device physically has, no matter what
+  // `count` claimed. C1 already rejects count>3 above, but this clamp is a
+  // second, independent guard against turning a garbage count into up to 255
+  // USB control transfers.
+  const walkCount = Math.min(list.count, 3);
+  const per: { slot: 1 | 2 | 3; name: string; pose: PresetPose }[] = [];
+  for (let i = 0; i < walkCount; i++) {
+    const e = decodePresetEntry(await t.xuGetRaw(13, 60));
+    if (e.end) break;
+    per.push({ slot: e.slot!, name: e.name!, pose: e.pose! });
+  }
+
+  // I1: list.slots (from selector 12) is the device's own statement of WHICH
+  // slots are occupied. If the entry-cursor walk (selector 13) disagrees — it
+  // exhausted early, hit an implausible/all-zero entry, or decoded a different
+  // slot set — don't silently trust whichever answer under-reports. A false
+  // EMPTY is the dangerous direction for a create-once resource, so fail loudly
+  // instead of returning a confident wrong answer.
+  const walked = [...new Set(per.map((e) => e.slot - 1))].sort((a, b) => a - b);
+  const claimed = [...list.slots].sort((a, b) => a - b);
+  const agree = walked.length === claimed.length && walked.every((s, i) => s === claimed[i]);
+  if (!agree) {
+    throw new Error(
+      `preset list mismatch: selector 12 claims occupied slots [${claimed.join(",")}] but the ` +
+        `entry-cursor walk (selector 13) found [${walked.join(",")}]`,
+    );
+  }
+
+  return assemblePresetSlots(per);
+}
+
+export interface PresetReadOpts {
+  attempts?: number;
+  backoffMs?: number[];
+}
+
+// This is a mechanical system: the gimbal does not switch between awake and asleep,
+// it travels through them (rising, settling, stowing), and subsystems come back
+// online in some order. A single sample of a system in motion describes one instant,
+// not the state the next call lands in — so a lone implausible read is expected
+// occasionally and is not, by itself, news.
+//
+// Backoff spans ~1.7s, chosen against the observed ~1-2s post-wake self-centering
+// window. Latency is the cheapest thing we can spend here.
+const PRESET_READ_DEFAULTS: Required<PresetReadOpts> = { attempts: 3, backoffMs: [200, 500, 1000] };
+
+const napMs = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+const allEmpty = (slots: PresetSlot[]): boolean => slots.every((s) => !s.occupied);
+
+/**
+ * Read the preset slots with bounded retry, and confirm the one verdict whose error
+ * destroys data.
+ *
+ * Reads can neither damage the camera nor delete anything, so retrying and
+ * re-reading is free in the only currencies that matter. Writes are never retried
+ * here — the caller's write sits outside this function by construction.
+ *
+ * EMPTY is confirmed by a second read because it is the sole verdict that authorizes
+ * an irreversible create-once ADD: a slot wrongly believed empty gets a customer's
+ * preset written over (firmware behaviour there is undecoded). The inverse error is
+ * benign — a slot wrongly believed occupied only makes delete a no-op and update
+ * fail. Disagreement between the two reads means the device is mid-transition, so we
+ * refuse rather than pick a side.
+ */
+async function readPresetSlots(
+  t: ObsbotTransport,
+  gate: () => Promise<ReadyResult>,
+  opts: PresetReadOpts = {},
+): Promise<PresetSlot[]> {
+  const { attempts, backoffMs } = { ...PRESET_READ_DEFAULTS, ...opts };
+  let lastErr: unknown;
+  for (let i = 0; i < attempts; i++) {
+    if (i > 0) {
+      await napMs(backoffMs[Math.min(i - 1, backoffMs.length - 1)]);
+      // Re-probe readiness between attempts: the failure mode we chase is the device
+      // being partway through a transition, and the wake it may send is a decoded,
+      // documented command — not an undecoded write.
+      await gate();
+    }
+    try {
+      const slots = await getPresetSlots(t);
+      if (allEmpty(slots) && !allEmpty(await getPresetSlots(t))) {
+        throw new Error(
+          "preset list unstable: one read reported every slot empty, an immediate " +
+            "re-read disagreed — refusing to treat this as empty",
+        );
+      }
+      return slots;
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr;
+}
+
 export function createTools(
   getTransport: () => Promise<ObsbotTransport>,
   mgr: DeviceManager,
   capture?: CaptureManager,
   session?: DeviceSession,
   debug = false,
+  presetRead: PresetReadOpts = {},
 ): ToolDef[] {
   // Readiness gate for gimbal/AI commands: probe presence + auto-wake if asleep,
   // self-heal (invalidate + re-open) on a mid-session disconnect. Returns the
@@ -485,6 +682,247 @@ export function createTools(
         // UVC pan value is degrees, same sign as our yaw (+ = camera-left). UVC tilt
         // is degrees but positive = up, so negate to match our +pitch = down convention.
         return { yaw: pan.value, pitch: -tilt.value };
+      },
+    },
+    {
+      name: "obsbot_preset_list",
+      description:
+        "Read the three gimbal preset slots (occupied/empty, name, pose in degrees). " +
+        "Reads flat XU selectors 12 (list) and 13 (entry cursor), NOT the vendor V3 " +
+        "framed-reply path (which is non-functional for preset data on this device).",
+      schema: presetListSchema,
+      handler: async (args: unknown) => {
+        presetListSchema.parse(args);
+        const ready = await gate();
+        if (!ready.ok) return ready;
+        const t = ready.transport;
+        try {
+          const slots = await readPresetSlots(t, gate, presetRead);
+          return { ok: true, slots, ...(ready.reconnected && { reconnected: true }) };
+        } catch (e) {
+          return { ok: false, error: msg(e) };
+        }
+      },
+    },
+    {
+      name: "obsbot_preset_save",
+      description:
+        "Save the gimbal's current live pose (yaw/pitch, via the standard UVC Pan/Tilt " +
+        "controls) into preset slot 1|2|3. Slots are create-once on this device — there is " +
+        "no overwrite, so an occupied slot is rejected (delete it first). With " +
+        "asInitialState:true, also marks this slot's pose as the pose the gimbal strikes " +
+        "on power-up. Verifies by re-reading the slot list after writing.",
+      schema: presetSaveSchema,
+      handler: async (args: unknown) => {
+        const { slot, asInitialState } = presetSaveSchema.parse(args);
+        const ready = await gate();
+        if (!ready.ok) return ready;
+        const t = ready.transport;
+        let pose: PresetPose;
+        try {
+          const before = await readPresetSlots(t, gate, presetRead);
+          if (before[slot - 1].occupied) {
+            return { ok: false, error: `slot ${slot} is occupied; update or delete first` };
+          }
+          // Mirror obsbot_gimbal_position's read path exactly: UVC pan is degrees, same
+          // sign as our yaw; UVC tilt is degrees but positive = up, so negate to match
+          // our +pitch = down convention.
+          const yaw = (await t.camCtrlGet(CAMERA_CONTROL_PAN)).value;
+          const pitch = -(await t.camCtrlGet(CAMERA_CONTROL_TILT)).value;
+          // T6: ObsbotTransport exposes no zoom getter, so the live zoom ratio can't be
+          // read back here — zoom is hardcoded to 1 rather than guessed. Not an oversight.
+          pose = { pan: yaw, tilt: pitch, roll: 0, zoom: 1 };
+          await t.sendVendor(encodePresetAdd(t.nextSeq(), slot, pose));
+        } catch (e) {
+          return { ok: false, error: `preset save failed: ${msg(e)}` };
+        }
+        // M1: the ADD above has committed. From here on, a thrown error must say so —
+        // otherwise a retry hits "slot occupied" with no clue the save actually landed.
+        try {
+          if (asInitialState) {
+            await t.sendVendor(encodeBootPose(t.nextSeq(), slot, pose));
+            await t.sendVendor(encodeBootFlags(t.nextSeq()));
+          }
+          const after = await readPresetSlots(t, gate, presetRead);
+          if (!after[slot - 1].occupied) {
+            return { ok: false, error: "verification failed", expected: "occupied", actual: "empty" };
+          }
+          return { ok: true, slot: after[slot - 1], ...(ready.reconnected && { reconnected: true }) };
+        } catch (e) {
+          return {
+            ok: false,
+            error: asInitialState
+              ? `preset saved to slot ${slot} but boot-pose write failed: ${msg(e)}`
+              : `preset saved to slot ${slot} but verification failed: ${msg(e)}`,
+          };
+        }
+      },
+    },
+    {
+      name: "obsbot_preset_recall",
+      description:
+        "Recall preset slot 1|2|3, driving the gimbal to that slot's saved pose. The slot " +
+        "must be occupied. The gimbal may still be moving when this returns — verification " +
+        "only confirms the slot is still occupied, not that the pose has arrived.",
+      schema: presetRecallSchema,
+      handler: async (args: unknown) => {
+        const { slot } = presetRecallSchema.parse(args);
+        const ready = await gate();
+        if (!ready.ok) return ready;
+        const t = ready.transport;
+        try {
+          const before = await readPresetSlots(t, gate, presetRead);
+          if (!before[slot - 1].occupied) {
+            return { ok: false, error: `slot ${slot} is empty; save first` };
+          }
+          await t.sendVendor(encodePresetRecall(t.nextSeq(), slot));
+          const after = await readPresetSlots(t, gate, presetRead);
+          if (!after[slot - 1].occupied) {
+            return { ok: false, error: "verification failed", expected: "occupied", actual: "empty" };
+          }
+          return { ok: true, slot: after[slot - 1], ...(ready.reconnected && { reconnected: true }) };
+        } catch (e) {
+          return { ok: false, error: msg(e) };
+        }
+      },
+    },
+    {
+      name: "obsbot_preset_update",
+      description:
+        "Overwrite preset slot 1|2|3 with the gimbal's current live pose (yaw/pitch via the " +
+        "standard UVC Pan/Tilt controls). The slot must already be occupied (save first to " +
+        "create it). With asInitialState:true, also marks this slot's pose as the pose the " +
+        "gimbal strikes on power-up. Verifies by re-reading the slot list after writing.",
+      schema: presetUpdateSchema,
+      handler: async (args: unknown) => {
+        const { slot, asInitialState } = presetUpdateSchema.parse(args);
+        const ready = await gate();
+        if (!ready.ok) return ready;
+        const t = ready.transport;
+        let pose: PresetPose;
+        let previous: PresetPose | null = null;
+        try {
+          const before = await readPresetSlots(t, gate, presetRead);
+          if (!before[slot - 1].occupied) {
+            return { ok: false, error: `slot ${slot} is empty; save first` };
+          }
+          // The pose we are about to destroy. Already in hand from the guard read, so
+          // handing it back costs nothing and is the only restore path the caller has:
+          // the device keeps no history and UPDATE is not reversible.
+          previous = before[slot - 1].pose;
+          // Mirror obsbot_preset_save's read path exactly: UVC pan is degrees, same sign as
+          // our yaw; UVC tilt is degrees but positive = up, so negate to match our +pitch =
+          // down convention.
+          const yaw = (await t.camCtrlGet(CAMERA_CONTROL_PAN)).value;
+          const pitch = -(await t.camCtrlGet(CAMERA_CONTROL_TILT)).value;
+          // T6: ObsbotTransport exposes no zoom getter, so the live zoom ratio can't be
+          // read back here — zoom is hardcoded to 1 rather than guessed. Not an oversight.
+          pose = { pan: yaw, tilt: pitch, roll: 0, zoom: 1 };
+          await t.sendVendor(encodePresetUpdate(t.nextSeq(), slot, pose));
+        } catch (e) {
+          return { ok: false, error: `preset update failed: ${msg(e)}` };
+        }
+        // M1: the UPDATE above has committed. From here on, a thrown error must say so.
+        try {
+          if (asInitialState) {
+            await t.sendVendor(encodeBootPose(t.nextSeq(), slot, pose));
+            await t.sendVendor(encodeBootFlags(t.nextSeq()));
+          }
+          const after = await readPresetSlots(t, gate, presetRead);
+          if (!after[slot - 1].occupied) {
+            return { ok: false, error: "verification failed", expected: "occupied", actual: "empty" };
+          }
+          return {
+            ok: true,
+            slot: after[slot - 1],
+            ...(previous && { previous }),
+            ...(ready.reconnected && { reconnected: true }),
+          };
+        } catch (e) {
+          return {
+            ok: false,
+            error: asInitialState
+              ? `preset updated in slot ${slot} but boot-pose write failed: ${msg(e)}`
+              : `preset updated in slot ${slot} but verification failed: ${msg(e)}`,
+          };
+        }
+      },
+    },
+    {
+      name: "obsbot_preset_rename",
+      description:
+        `Rename preset slot 1|2|3. The slot must already be occupied. Names longer than ` +
+        `${PRESET_NAME_MAX} bytes are truncated to fit the wire frame. Verifies by re-reading ` +
+        "the slot list after writing.",
+      schema: presetRenameSchema,
+      handler: async (args: unknown) => {
+        const { slot, name } = presetRenameSchema.parse(args);
+        const ready = await gate();
+        if (!ready.ok) return ready;
+        const t = ready.transport;
+        try {
+          const before = await readPresetSlots(t, gate, presetRead);
+          if (!before[slot - 1].occupied) {
+            return { ok: false, error: `slot ${slot} is empty; save first` };
+          }
+          const clean = name.slice(0, PRESET_NAME_MAX);
+          // The read path (decodePresetEntry) base64-decodes the stored name, but the
+          // captured OBSBOT Center rename frame carried raw ASCII ("Preset1", "3reset2A"),
+          // so the write side sends raw ASCII here too — per the capture. Whether the
+          // device actually expects ASCII or base64 on the WRITE side is NOT yet
+          // hardware-confirmed; flagged for the hardware verification task.
+          await t.sendVendor(encodePresetSetName(t.nextSeq(), slot, clean));
+          const after = await readPresetSlots(t, gate, presetRead);
+          if (after[slot - 1].name !== clean) {
+            return { ok: false, error: "verification failed", expected: clean, actual: after[slot - 1].name };
+          }
+          return { ok: true, slot: after[slot - 1], ...(ready.reconnected && { reconnected: true }) };
+        } catch (e) {
+          return { ok: false, error: msg(e) };
+        }
+      },
+    },
+    {
+      name: "obsbot_preset_delete",
+      description:
+        "Delete preset slot 1|2|3. The slot must be occupied. Verifies by re-reading the " +
+        "slot list after writing.",
+      schema: presetDeleteSchema,
+      handler: async (args: unknown) => {
+        const { slot } = presetDeleteSchema.parse(args);
+        const ready = await gate();
+        if (!ready.ok) return ready;
+        const t = ready.transport;
+        // Tracks whether the destructive write already left the host. If the
+        // post-write verify read throws, a bare error reads as "nothing happened"
+        // and invites a blind retry of an operation that already committed.
+        let sent = false;
+        try {
+          const before = await readPresetSlots(t, gate, presetRead);
+          if (!before[slot - 1].occupied) {
+            return { ok: false, error: `slot ${slot} is already empty` };
+          }
+          // Everything the delete is about to destroy, captured from the guard read.
+          // Slots are create-once with no device-side history, so this response is the
+          // caller's ONLY route back if the wrong slot was named.
+          const destroyed = { name: before[slot - 1].name, pose: before[slot - 1].pose };
+          await t.sendVendor(encodePresetDelete(t.nextSeq(), slot));
+          sent = true;
+          const after = await readPresetSlots(t, gate, presetRead);
+          if (after[slot - 1].occupied) {
+            return { ok: false, error: "verification failed", expected: "empty", actual: "occupied" };
+          }
+          return { ok: true, deleted: destroyed, ...(ready.reconnected && { reconnected: true }) };
+        } catch (e) {
+          if (sent) {
+            return {
+              ok: false,
+              error: `delete was sent and may have been applied, but verification failed: ${msg(e)}`,
+              committed: "unknown",
+            };
+          }
+          return { ok: false, error: msg(e) };
+        }
       },
     },
     {
