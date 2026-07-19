@@ -821,10 +821,12 @@ test("I1: cursor-exhausts-early vs list disagreement fails loudly instead of und
   const transport = makeFakeTransport();
   // selector 12 claims 3 occupied slots, but the entry cursor (selector 13) hits the
   // exhausted marker after only 1 — a real device inconsistency, not a decode bug.
+  // Cycle the entries so the SAME inconsistency is presented on every retry attempt -
+  // a persistent device inconsistency, not a one-off that a re-read would clear.
   let entryCall = 0;
   const entries = [PRESET_ENTRY_1, PRESET_ENTRY_END];
   transport.xuGetRaw = vi.fn(async (selector: number) =>
-    selector === 12 ? PRESET_LIST_BLOCK : entries[entryCall++],
+    selector === 12 ? PRESET_LIST_BLOCK : entries[entryCall++ % entries.length],
   );
   const tools = createTools(async () => transport, makeFakeMgr());
   const tool = findTool(tools, "obsbot_preset_list");
@@ -846,10 +848,13 @@ test("I3: a garbage oversized count doesn't turn into an unbounded read loop", a
   const tools = createTools(async () => transport, makeFakeMgr());
   const tool = findTool(tools, "obsbot_preset_list");
 
-  // C1 already rejects this before the walk even starts — confirms the garbage
-  // count never reaches the entry loop, let alone drives 255 USB transfers.
+  // C1 already rejects this before the walk even starts - confirms the garbage
+  // count never reaches the entry loop, let alone drives 255 USB transfers. Asserted
+  // as "no selector-13 read ever happens", which is the actual invariant; a raw call
+  // count would just be measuring how many times the retry policy re-reads.
   await tool.handler({});
-  expect(transport.xuGetRaw).toHaveBeenCalledTimes(1); // just the sel-12 read
+  const entryReads = transport.xuGetRaw.mock.calls.filter((c) => c[0] === 13);
+  expect(entryReads).toHaveLength(0);
 });
 
 test("I3: an all-zero selector-13 entry does not collapse into a false-occupied slot", async () => {
@@ -900,18 +905,29 @@ test("obsbot_preset_save rejects an occupied slot", async () => {
   expect(transport.sendVendor).not.toHaveBeenCalled();
 });
 
-test("obsbot_preset_save on an empty slot sends the ADD frame with the live pose then verifies", async () => {
+
+// Models the device as STATE rather than call ordinal: reads reflect whatever the
+// writes have done so far. Call-ordinal fakes ("1st read empty, 2nd read occupied")
+// silently encode HOW MANY times production code reads, so they break the moment a
+// read is added for safety - and worse, they cannot distinguish "we read twice" from
+// "the device changed". State-driven fakes survive both.
+function statefulPresetTransport(before: Buffer, after: Buffer, entry = PRESET_ENTRY_1) {
   const transport = makeFakeTransport();
-  let listCall = 0;
-  transport.xuGetRaw = vi.fn(async (selector: number, _length: number) => {
-    if (selector === 12) {
-      listCall++;
-      // 1st read (guard): slot list empty. 2nd read (verify): slot 1 now occupied.
-      return listCall === 1 ? emptyPresetListBlock() : Buffer.from("0100", "hex");
-    }
-    return PRESET_ENTRY_1; // decodes to slot 1, name "Preset1"
+  let written = false;
+  const realSend = transport.sendVendor;
+  transport.sendVendor = vi.fn(async (frame: Buffer) => {
+    written = true;
+    return realSend(frame);
   });
-  transport.xuRaw = vi.fn(async (_selector: number, _data: Buffer) => {});
+  transport.xuGetRaw = vi.fn(async (selector: number) =>
+    selector === 12 ? (written ? after : before) : entry,
+  );
+  transport.xuRaw = vi.fn(async () => {});
+  return transport;
+}
+
+test("obsbot_preset_save on an empty slot sends the ADD frame with the live pose then verifies", async () => {
+  const transport = statefulPresetTransport(emptyPresetListBlock(), Buffer.from("0100", "hex"));
   // pan (prop 0) = 21 -> yaw 21; tilt (prop 1) = 0 -> pitch -0 (negated)
   transport.camCtrlGet = vi.fn(async (p: number) =>
     p === 0 ? { value: 21, flags: 2 } : { value: 0, flags: 2 },
@@ -932,16 +948,7 @@ test("obsbot_preset_save on an empty slot sends the ADD frame with the live pose
 });
 
 test("obsbot_preset_save with asInitialState also sends boot-pose and boot-flags frames", async () => {
-  const transport = makeFakeTransport();
-  let listCall = 0;
-  transport.xuGetRaw = vi.fn(async (selector: number, _length: number) => {
-    if (selector === 12) {
-      listCall++;
-      return listCall === 1 ? emptyPresetListBlock() : Buffer.from("0100", "hex");
-    }
-    return PRESET_ENTRY_1;
-  });
-  transport.xuRaw = vi.fn(async (_selector: number, _data: Buffer) => {});
+  const transport = statefulPresetTransport(emptyPresetListBlock(), Buffer.from("0100", "hex"));
   transport.camCtrlGet = vi.fn(async (p: number) =>
     p === 0 ? { value: 21, flags: 2 } : { value: 0, flags: 2 },
   );
@@ -1158,18 +1165,9 @@ test("obsbot_preset_delete rejects an already-empty slot", async () => {
 });
 
 test("obsbot_preset_delete sends the DELETE frame for an occupied slot then verifies it's empty", async () => {
-  const transport = makeFakeTransport();
-  let listCall = 0;
-  // Guard read: slot 1 occupied. Verify read: slot list now empty — the fake's state
-  // DIFFERS between the two reads, so the tool must re-read rather than assume success.
-  transport.xuGetRaw = vi.fn(async (selector: number, _length: number) => {
-    if (selector === 12) {
-      listCall++;
-      return listCall === 1 ? Buffer.from("0100", "hex") : emptyPresetListBlock();
-    }
-    return PRESET_ENTRY_1;
-  });
-  transport.xuRaw = vi.fn(async (_selector: number, _data: Buffer) => {});
+  // State-driven: occupied until the DELETE frame is sent, empty after - so the tool
+  // must actually re-read to observe the change.
+  const transport = statefulPresetTransport(Buffer.from("0100", "hex"), emptyPresetListBlock());
   const tools = createTools(async () => transport, makeFakeMgr());
   const tool = findTool(tools, "obsbot_preset_delete");
 
@@ -1178,7 +1176,7 @@ test("obsbot_preset_delete sends the DELETE frame for an occupied slot then veri
   expect(transport.sendVendor).toHaveBeenCalledTimes(1);
   const frame = transport.sendVendor.mock.calls[0][0] as Buffer;
   expect(frame.subarray(10, 12).toString("hex")).toBe("8439"); // cmd 0x3984 LE
-  expect(result).toEqual({ ok: true });
+  expect(result).toMatchObject({ ok: true, deleted: { name: "Preset1" } });
 });
 
 test("obsbot_preset_delete returns a structured failure if the slot is still occupied after delete", async () => {
@@ -1227,17 +1225,14 @@ for (const name of Object.keys(PRESET_TOOL_ARGS)) {
 // --- M1: a failure after the ADD/UPDATE write has already committed must say so ---
 
 test("M1: obsbot_preset_save reports a distinguishing error when boot-pose fails after ADD already committed", async () => {
-  const transport = makeFakeTransport();
-  let listCall = 0;
-  transport.xuGetRaw = vi.fn(async (selector: number) => {
-    if (selector === 12) {
-      listCall++;
-      return listCall === 1 ? emptyPresetListBlock() : Buffer.from("0100", "hex");
-    }
-    return PRESET_ENTRY_1;
-  });
-  // ADD succeeds; the boot-pose send throws.
+  const transport = statefulPresetTransport(emptyPresetListBlock(), Buffer.from("0100", "hex"));
+  // ADD succeeds (and moves the device to occupied); the boot-pose send throws.
+  // Wraps rather than replaces sendVendor, so the ADD still transitions the fake's
+  // state — replacing it outright would leave the device permanently "empty" and the
+  // failure under test could never be reached.
+  const commit = transport.sendVendor;
   transport.sendVendor = vi.fn(async (frame: Buffer) => {
+    await commit(frame);
     const cmd = frame.subarray(10, 12).toString("hex");
     if (cmd === "c43e") throw new Error("boot-pose write timed out"); // 0x3ec4
   });
@@ -1330,12 +1325,7 @@ test("empty device: save can bootstrap the FIRST preset when all slots are empty
   // Regression for the dead-end: every preset tool routes through getPresetSlots, so
   // an all-zero read blocked save too — leaving our toolset with no path OUT of a
   // legitimate device state (fatal where OBSBOT Center doesn't exist to create one).
-  const transport = makeFakeTransport();
-  let listCall = 0;
-  transport.xuGetRaw = vi.fn(async (selector: number) => {
-    if (selector === 12) return ++listCall === 1 ? Buffer.alloc(60) : Buffer.from("0100", "hex");
-    return PRESET_ENTRY_1;
-  });
+  const transport = statefulPresetTransport(Buffer.alloc(60), Buffer.from("0100", "hex"));
   transport.recvStatus = vi.fn(async () => HEALTHY_STATUS_AWAKE);
   transport.camCtrlGet = vi.fn(async (p: number) =>
     p === 0 ? { value: 21, flags: 2 } : { value: 0, flags: 2 },
@@ -1365,15 +1355,7 @@ test("all-zero selector 12 while the camera reports asleep is refused, not read 
 test("delete of the LAST preset reports success once the device reads back empty", async () => {
   // Observed on hardware: delete committed but reported {ok:false} because the
   // post-write verify read hit the all-zero (now-empty) block and threw.
-  const transport = makeFakeTransport();
-  let listCall = 0;
-  transport.xuGetRaw = vi.fn(async (selector: number) => {
-    if (selector === 12) {
-      // before: one preset in slot 2; after: genuinely empty (all zero)
-      return ++listCall === 1 ? Buffer.from("0101", "hex") : Buffer.alloc(60);
-    }
-    return PRESET_ENTRY_2;
-  });
+  const transport = statefulPresetTransport(Buffer.from("0101", "hex"), Buffer.alloc(60), PRESET_ENTRY_2);
   transport.recvStatus = vi.fn(async () => HEALTHY_STATUS_AWAKE);
   const tools = createTools(async () => transport, makeFakeMgr());
   const tool = findTool(tools, "obsbot_preset_delete");
@@ -1404,4 +1386,134 @@ test("a write that commits but fails verification says so, instead of implying n
   // and retry blindly.
   expect((result as { error: string }).error).toMatch(/verif/i);
   expect((result as { error: string }).error).toMatch(/sent|committed|applied/i);
+});
+
+// --- Due diligence around destructive writes ---------------------------------
+// Risk order (user-stated): (1) never damage the camera, (2) never lose the
+// customer's data, (3) everything else — latency included — is negotiable below
+// those. Reads cannot do either kind of harm, so they are retried and
+// double-checked freely; writes are NEVER retried.
+//
+// Only ONE wrong read destroys data: believing a slot is EMPTY when it is
+// occupied, which fires a create-once ADD at a customer's preset (the firmware's
+// behaviour there is undecoded — it may overwrite). The reverse error is benign:
+// a slot wrongly believed occupied makes delete a no-op and update fail. So the
+// EMPTY verdict — and only the EMPTY verdict — is confirmed by a second read.
+
+// Retry timings are injected so the suite never actually sleeps.
+const FAST_READ = { attempts: 3, backoffMs: [1, 1, 1] };
+
+test("an EMPTY verdict is confirmed by a second read before it is trusted", async () => {
+  const transport = makeFakeTransport();
+  let listReads = 0;
+  transport.xuGetRaw = vi.fn(async (selector: number) => {
+    if (selector === 12) listReads++;
+    return Buffer.alloc(60);
+  });
+  const tools = createTools(async () => transport, makeFakeMgr(), undefined, undefined, false, FAST_READ);
+  const tool = findTool(tools, "obsbot_preset_list");
+
+  const result = await tool.handler({});
+
+  expect(result).toMatchObject({ ok: true });
+  expect(listReads).toBe(2); // the verdict that can destroy data is never single-sampled
+});
+
+test("an unstable EMPTY (second read disagrees) never authorizes a create-once write", async () => {
+  const transport = makeFakeTransport();
+  let listReads = 0;
+  transport.xuGetRaw = vi.fn(async (selector: number) => {
+    if (selector === 12) {
+      // reads alternate empty / occupied — a device caught mid-transition
+      return ++listReads % 2 === 1 ? Buffer.alloc(60) : Buffer.from("0100", "hex");
+    }
+    return PRESET_ENTRY_1;
+  });
+  transport.camCtrlGet = vi.fn(async () => ({ value: 0, flags: 2 }));
+  const tools = createTools(async () => transport, makeFakeMgr(), undefined, undefined, false, FAST_READ);
+  const tool = findTool(tools, "obsbot_preset_save");
+
+  const result = await tool.handler({ slot: 1 });
+
+  expect(result).toMatchObject({ ok: false });
+  // The whole point: an unconfirmed EMPTY must not become an ADD.
+  expect(transport.sendVendor).not.toHaveBeenCalled();
+});
+
+test("delete hands back the preset it destroyed, so it can be restored", async () => {
+  const transport = makeFakeTransport();
+  let listCall = 0;
+  transport.xuGetRaw = vi.fn(async (selector: number) => {
+    if (selector === 12) return ++listCall === 1 ? Buffer.from("0101", "hex") : Buffer.alloc(60);
+    return PRESET_ENTRY_2; // slot 2, "Preset2", pan 21.2 tilt 0.7
+  });
+  const tools = createTools(async () => transport, makeFakeMgr(), undefined, undefined, false, FAST_READ);
+  const tool = findTool(tools, "obsbot_preset_delete");
+
+  const result = await tool.handler({ slot: 2 });
+
+  expect(result).toMatchObject({
+    ok: true,
+    deleted: { name: "Preset2", pose: { pan: 21.2, tilt: 0.7, roll: 0, zoom: 1 } },
+  });
+});
+
+test("update hands back the pose it overwrote, so it can be restored", async () => {
+  const transport = makeFakeTransport();
+  transport.xuGetRaw = vi.fn(async (selector: number) =>
+    selector === 12 ? Buffer.from("0101", "hex") : PRESET_ENTRY_2,
+  );
+  transport.camCtrlGet = vi.fn(async (p: number) =>
+    p === 0 ? { value: 40, flags: 2 } : { value: -14, flags: 2 },
+  );
+  const tools = createTools(async () => transport, makeFakeMgr(), undefined, undefined, false, FAST_READ);
+  const tool = findTool(tools, "obsbot_preset_update");
+
+  const result = await tool.handler({ slot: 2 });
+
+  expect(result).toMatchObject({
+    ok: true,
+    previous: { pan: 21.2, tilt: 0.7, roll: 0, zoom: 1 },
+  });
+});
+
+test("a transient read failure is retried rather than surfaced to the caller", async () => {
+  const transport = makeFakeTransport();
+  let listCall = 0;
+  let entryCall = 0;
+  const entries = [PRESET_ENTRY_1, PRESET_ENTRY_2, PRESET_ENTRY_3];
+  transport.xuGetRaw = vi.fn(async (selector: number) => {
+    if (selector === 12) {
+      // first attempt lands mid-transition (all zeros, no corroboration), then recovers
+      if (++listCall === 1) return Buffer.alloc(60);
+      return PRESET_LIST_BLOCK;
+    }
+    return entries[entryCall++ % entries.length];
+  });
+  transport.recvStatus = vi.fn(async () => Buffer.alloc(60)); // uncorroborated => not "empty"
+  const tools = createTools(async () => transport, makeFakeMgr(), undefined, undefined, false, FAST_READ);
+  const tool = findTool(tools, "obsbot_preset_list");
+
+  const result = await tool.handler({});
+
+  expect(result).toMatchObject({ ok: true });
+  expect(listCall).toBeGreaterThan(1); // it really did re-read
+});
+
+test("retries are bounded — a persistently bad read fails loudly instead of spinning", async () => {
+  const transport = makeFakeTransport();
+  let listReads = 0;
+  transport.xuGetRaw = vi.fn(async (selector: number) => {
+    if (selector === 12) listReads++;
+    return Buffer.alloc(60);
+  });
+  transport.recvStatus = vi.fn(async () => Buffer.alloc(60)); // dead link: both zeroed
+  const tools = createTools(async () => transport, makeFakeMgr(), undefined, undefined, false, FAST_READ);
+  const tool = findTool(tools, "obsbot_preset_list");
+
+  const result = await tool.handler({});
+
+  expect(result).toMatchObject({ ok: false });
+  expect(listReads).toBe(3); // exactly `attempts`, no runaway
+  expect(transport.xuRaw).not.toHaveBeenCalled();
 });

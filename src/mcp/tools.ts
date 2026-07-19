@@ -55,6 +55,7 @@ import { ObsbotTransport, CameraBusyError } from "../transport/transport.js";
 import { DeviceManager } from "../device/manager.js";
 import { DeviceSession } from "../device/session.js";
 import { ensureReady, msg } from "./ready.js";
+import type { ReadyResult } from "./ready.js";
 import type { CaptureManager } from "../capture/manager.js";
 import { CaptureError } from "../capture/manager.js";
 
@@ -287,12 +288,78 @@ async function getPresetSlots(t: ObsbotTransport): Promise<PresetSlot[]> {
   return assemblePresetSlots(per);
 }
 
+export interface PresetReadOpts {
+  attempts?: number;
+  backoffMs?: number[];
+}
+
+// This is a mechanical system: the gimbal does not switch between awake and asleep,
+// it travels through them (rising, settling, stowing), and subsystems come back
+// online in some order. A single sample of a system in motion describes one instant,
+// not the state the next call lands in — so a lone implausible read is expected
+// occasionally and is not, by itself, news.
+//
+// Backoff spans ~1.7s, chosen against the observed ~1-2s post-wake self-centering
+// window. Latency is the cheapest thing we can spend here.
+const PRESET_READ_DEFAULTS: Required<PresetReadOpts> = { attempts: 3, backoffMs: [200, 500, 1000] };
+
+const napMs = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+const allEmpty = (slots: PresetSlot[]): boolean => slots.every((s) => !s.occupied);
+
+/**
+ * Read the preset slots with bounded retry, and confirm the one verdict whose error
+ * destroys data.
+ *
+ * Reads can neither damage the camera nor delete anything, so retrying and
+ * re-reading is free in the only currencies that matter. Writes are never retried
+ * here — the caller's write sits outside this function by construction.
+ *
+ * EMPTY is confirmed by a second read because it is the sole verdict that authorizes
+ * an irreversible create-once ADD: a slot wrongly believed empty gets a customer's
+ * preset written over (firmware behaviour there is undecoded). The inverse error is
+ * benign — a slot wrongly believed occupied only makes delete a no-op and update
+ * fail. Disagreement between the two reads means the device is mid-transition, so we
+ * refuse rather than pick a side.
+ */
+async function readPresetSlots(
+  t: ObsbotTransport,
+  gate: () => Promise<ReadyResult>,
+  opts: PresetReadOpts = {},
+): Promise<PresetSlot[]> {
+  const { attempts, backoffMs } = { ...PRESET_READ_DEFAULTS, ...opts };
+  let lastErr: unknown;
+  for (let i = 0; i < attempts; i++) {
+    if (i > 0) {
+      await napMs(backoffMs[Math.min(i - 1, backoffMs.length - 1)]);
+      // Re-probe readiness between attempts: the failure mode we chase is the device
+      // being partway through a transition, and the wake it may send is a decoded,
+      // documented command — not an undecoded write.
+      await gate();
+    }
+    try {
+      const slots = await getPresetSlots(t);
+      if (allEmpty(slots) && !allEmpty(await getPresetSlots(t))) {
+        throw new Error(
+          "preset list unstable: one read reported every slot empty, an immediate " +
+            "re-read disagreed — refusing to treat this as empty",
+        );
+      }
+      return slots;
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr;
+}
+
 export function createTools(
   getTransport: () => Promise<ObsbotTransport>,
   mgr: DeviceManager,
   capture?: CaptureManager,
   session?: DeviceSession,
   debug = false,
+  presetRead: PresetReadOpts = {},
 ): ToolDef[] {
   // Readiness gate for gimbal/AI commands: probe presence + auto-wake if asleep,
   // self-heal (invalidate + re-open) on a mid-session disconnect. Returns the
@@ -630,7 +697,7 @@ export function createTools(
         if (!ready.ok) return ready;
         const t = ready.transport;
         try {
-          const slots = await getPresetSlots(t);
+          const slots = await readPresetSlots(t, gate, presetRead);
           return { ok: true, slots, ...(ready.reconnected && { reconnected: true }) };
         } catch (e) {
           return { ok: false, error: msg(e) };
@@ -653,7 +720,7 @@ export function createTools(
         const t = ready.transport;
         let pose: PresetPose;
         try {
-          const before = await getPresetSlots(t);
+          const before = await readPresetSlots(t, gate, presetRead);
           if (before[slot - 1].occupied) {
             return { ok: false, error: `slot ${slot} is occupied; update or delete first` };
           }
@@ -676,7 +743,7 @@ export function createTools(
             await t.sendVendor(encodeBootPose(t.nextSeq(), slot, pose));
             await t.sendVendor(encodeBootFlags(t.nextSeq()));
           }
-          const after = await getPresetSlots(t);
+          const after = await readPresetSlots(t, gate, presetRead);
           if (!after[slot - 1].occupied) {
             return { ok: false, error: "verification failed", expected: "occupied", actual: "empty" };
           }
@@ -704,12 +771,12 @@ export function createTools(
         if (!ready.ok) return ready;
         const t = ready.transport;
         try {
-          const before = await getPresetSlots(t);
+          const before = await readPresetSlots(t, gate, presetRead);
           if (!before[slot - 1].occupied) {
             return { ok: false, error: `slot ${slot} is empty; save first` };
           }
           await t.sendVendor(encodePresetRecall(t.nextSeq(), slot));
-          const after = await getPresetSlots(t);
+          const after = await readPresetSlots(t, gate, presetRead);
           if (!after[slot - 1].occupied) {
             return { ok: false, error: "verification failed", expected: "occupied", actual: "empty" };
           }
@@ -733,11 +800,16 @@ export function createTools(
         if (!ready.ok) return ready;
         const t = ready.transport;
         let pose: PresetPose;
+        let previous: PresetPose | null = null;
         try {
-          const before = await getPresetSlots(t);
+          const before = await readPresetSlots(t, gate, presetRead);
           if (!before[slot - 1].occupied) {
             return { ok: false, error: `slot ${slot} is empty; save first` };
           }
+          // The pose we are about to destroy. Already in hand from the guard read, so
+          // handing it back costs nothing and is the only restore path the caller has:
+          // the device keeps no history and UPDATE is not reversible.
+          previous = before[slot - 1].pose;
           // Mirror obsbot_preset_save's read path exactly: UVC pan is degrees, same sign as
           // our yaw; UVC tilt is degrees but positive = up, so negate to match our +pitch =
           // down convention.
@@ -756,11 +828,16 @@ export function createTools(
             await t.sendVendor(encodeBootPose(t.nextSeq(), slot, pose));
             await t.sendVendor(encodeBootFlags(t.nextSeq()));
           }
-          const after = await getPresetSlots(t);
+          const after = await readPresetSlots(t, gate, presetRead);
           if (!after[slot - 1].occupied) {
             return { ok: false, error: "verification failed", expected: "occupied", actual: "empty" };
           }
-          return { ok: true, slot: after[slot - 1], ...(ready.reconnected && { reconnected: true }) };
+          return {
+            ok: true,
+            slot: after[slot - 1],
+            ...(previous && { previous }),
+            ...(ready.reconnected && { reconnected: true }),
+          };
         } catch (e) {
           return {
             ok: false,
@@ -784,7 +861,7 @@ export function createTools(
         if (!ready.ok) return ready;
         const t = ready.transport;
         try {
-          const before = await getPresetSlots(t);
+          const before = await readPresetSlots(t, gate, presetRead);
           if (!before[slot - 1].occupied) {
             return { ok: false, error: `slot ${slot} is empty; save first` };
           }
@@ -795,7 +872,7 @@ export function createTools(
           // device actually expects ASCII or base64 on the WRITE side is NOT yet
           // hardware-confirmed; flagged for the hardware verification task.
           await t.sendVendor(encodePresetSetName(t.nextSeq(), slot, clean));
-          const after = await getPresetSlots(t);
+          const after = await readPresetSlots(t, gate, presetRead);
           if (after[slot - 1].name !== clean) {
             return { ok: false, error: "verification failed", expected: clean, actual: after[slot - 1].name };
           }
@@ -821,17 +898,21 @@ export function createTools(
         // and invites a blind retry of an operation that already committed.
         let sent = false;
         try {
-          const before = await getPresetSlots(t);
+          const before = await readPresetSlots(t, gate, presetRead);
           if (!before[slot - 1].occupied) {
             return { ok: false, error: `slot ${slot} is already empty` };
           }
+          // Everything the delete is about to destroy, captured from the guard read.
+          // Slots are create-once with no device-side history, so this response is the
+          // caller's ONLY route back if the wrong slot was named.
+          const destroyed = { name: before[slot - 1].name, pose: before[slot - 1].pose };
           await t.sendVendor(encodePresetDelete(t.nextSeq(), slot));
           sent = true;
-          const after = await getPresetSlots(t);
+          const after = await readPresetSlots(t, gate, presetRead);
           if (after[slot - 1].occupied) {
             return { ok: false, error: "verification failed", expected: "empty", actual: "occupied" };
           }
-          return { ok: true, ...(ready.reconnected && { reconnected: true }) };
+          return { ok: true, deleted: destroyed, ...(ready.reconnected && { reconnected: true }) };
         } catch (e) {
           if (sent) {
             return {
