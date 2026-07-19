@@ -1,7 +1,8 @@
 import { expect, test } from "vitest";
-import { bufToHex } from "../../src/codec/encoding.js";
+import { bufToHex, hexToBuf } from "../../src/codec/encoding.js";
 import {
   encodePresetAdd, encodePresetRecall, encodePresetDelete, encodePresetSetName,
+  decodePresetName, decodePresetCount,
 } from "../../src/codec/preset.js";
 
 const cmdOf = (h: string) => h.slice(20, 24);        // bytes 10-11
@@ -39,4 +40,16 @@ test("encodePresetSetName: cmd 0x3a84, slot index + ASCII", () => {
   expect(cmdOf(f)).toBe("843a");
   expect(len2Of(f)).toBe(4 + 7);
   expect(payloadOf(f, 11)).toBe("00000000" + Buffer.from("Preset1").toString("hex"));
+});
+
+// Captured 0x3B04 name reply payload (after parseFrame): u16 len=7, "Default", pose block.
+test("decodePresetName parses length-prefixed ASCII", () => {
+  const payload = hexToBuf("0700" + Buffer.from("Default").toString("hex") + "14000000000000000000000000803f");
+  expect(decodePresetName(payload)).toBe("Default");
+});
+
+// Captured 0x3B44 list reply payload: u16 count.
+test("decodePresetCount reads the leading u16 count", () => {
+  expect(decodePresetCount(hexToBuf("0100e63f000d0006000000"))).toBe(1);
+  expect(decodePresetCount(hexToBuf("0300"))).toBe(3);
 });
