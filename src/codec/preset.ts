@@ -48,3 +48,19 @@ export const decodePresetPose = (payload: Buffer): PresetPose => ({
   pan: payload.readFloatLE(0), tilt: payload.readFloatLE(4),
   roll: payload.readFloatLE(8), zoom: payload.readFloatLE(12),
 });
+
+export interface PresetSlot {
+  slot: 1 | 2 | 3; occupied: boolean; name: string | null; pose: PresetPose | null;
+}
+export const assemblePresetSlots = (
+  _count: number,
+  perSlot: { slot: 1 | 2 | 3; name: string; pose: PresetPose }[],
+): PresetSlot[] => {
+  const byslot = new Map(perSlot.map((e) => [e.slot, e]));
+  return ([1, 2, 3] as const).map((slot) => {
+    const e = byslot.get(slot);
+    return e
+      ? { slot, occupied: true, name: e.name, pose: e.pose }
+      : { slot, occupied: false, name: null, pose: null };
+  });
+};

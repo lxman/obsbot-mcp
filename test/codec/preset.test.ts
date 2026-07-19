@@ -3,7 +3,7 @@ import { bufToHex, hexToBuf } from "../../src/codec/encoding.js";
 import {
   encodePresetAdd, encodePresetRecall, encodePresetDelete, encodePresetSetName,
   encodePresetListGet, encodePresetValueGet, encodePresetNameGet,
-  decodePresetName, decodePresetCount,
+  decodePresetName, decodePresetCount, assemblePresetSlots,
 } from "../../src/codec/preset.js";
 
 const cmdOf = (h: string) => h.slice(20, 24);        // bytes 10-11
@@ -73,4 +73,14 @@ test("encodePresetNameGet: cmd 0x3b04, 4-byte slot-index payload", () => {
   expect(cmdOf(f)).toBe("043b");
   expect(len2Of(f)).toBe(4);
   expect(payloadOf(f, 4)).toBe("02000000");  // slot 3 -> index 2
+});
+
+test("assemblePresetSlots returns 3 slots, empties marked", () => {
+  const slots = assemblePresetSlots(1, [
+    { slot: 1, name: "Preset1", pose: { pan: 5, tilt: 0, roll: 0, zoom: 1 } },
+  ]);
+  expect(slots).toHaveLength(3);
+  expect(slots[0]).toMatchObject({ slot: 1, occupied: true, name: "Preset1" });
+  expect(slots[1]).toMatchObject({ slot: 2, occupied: false, name: null, pose: null });
+  expect(slots[2]).toMatchObject({ slot: 3, occupied: false });
 });
