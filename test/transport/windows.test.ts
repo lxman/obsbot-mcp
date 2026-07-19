@@ -9,7 +9,7 @@ function makeFakeHelper() {
   } as unknown as HelperProcess;
 }
 
-test("recvVendor sends the request via xuSet on selector 2 then reads via xuGet", async () => {
+test("recvVendor sends the request via xuSet on selector 2 then reads via xuGet on selector 6", async () => {
   const helper = makeFakeHelper();
   const t = new WindowsTransport(helper);
   const req = Buffer.from([0xaa, 0x25, 0x01]);
@@ -18,8 +18,8 @@ test("recvVendor sends the request via xuSet on selector 2 then reads via xuGet"
 
   expect(helper.xuSet).toHaveBeenCalledWith(2, req);
   expect(helper.xuGet).toHaveBeenCalledTimes(1);
-  // Read happens on the response selector (default 2) with the default length.
-  expect((helper.xuGet as ReturnType<typeof vi.fn>).mock.calls[0][0]).toBe(2);
+  // Read happens on the response selector (6) with the default length.
+  expect((helper.xuGet as ReturnType<typeof vi.fn>).mock.calls[0][0]).toBe(6);
   expect(reply[0]).toBe(0xaa);
   // Enforce send-then-read order: xuSet must be called before xuGet.
   expect((helper.xuSet as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0])

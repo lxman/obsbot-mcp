@@ -2,7 +2,13 @@ import { HelperProcess } from "./helper-process.js";
 import { ObsbotTransport, Snapshot, SnapshotOpts } from "./transport.js";
 
 const VENDOR_XU_SELECTOR = 0x02;
-const RESPONSE_SELECTOR = 0x02;
+// Read-back selector for the per-command V3-frame Get path used by
+// recvVendor. Reverse-engineering-derived value: vendor GET_CUR replies come
+// back on the same XU selector as the status block (selector 6), not on the
+// vendor SET selector (0x02), which was found to return all-zero replies.
+// This is pending confirmation against physical hardware — treat as
+// RE-derived, not hardware-verified, until that check lands.
+const RESPONSE_SELECTOR = 0x06;
 const DEFAULT_REPLY_LEN = 60;
 const STATUS_SELECTOR = 0x06;
 const STATUS_BLOCK_LEN = 60;

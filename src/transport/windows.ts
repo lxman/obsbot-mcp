@@ -2,12 +2,13 @@ import { HelperProcess } from "./helper-process.js";
 import { ObsbotTransport, Snapshot, SnapshotOpts } from "./transport.js";
 
 const VENDOR_XU_SELECTOR = 0x02;
-// Intended read-back selector for the (future) per-command V3-frame Get path
-// used by recvVendor. NOT YET verified on hardware — the per-command reply path
-// is unproven scaffolding; Slice 1 shipped the status-block read instead. A
-// separate constant from VENDOR_XU_SELECTOR because it may need to diverge once
-// that path is validated. Change here only.
-const RESPONSE_SELECTOR = 0x02;
+// Read-back selector for the per-command V3-frame Get path used by
+// recvVendor. Reverse-engineering-derived value: vendor GET_CUR replies come
+// back on the same XU selector as the status block (selector 6), not on the
+// vendor SET selector (0x02), which was found to return all-zero replies.
+// This is pending confirmation against physical hardware — treat as
+// RE-derived, not hardware-verified, until that check lands.
+const RESPONSE_SELECTOR = 0x06;
 const DEFAULT_REPLY_LEN = 60;
 // The camera exposes a flat status block on this XU selector; GET_CUR reads it
 // whole (see decodeStatus). Confirmed on the physical Tiny 2 (2026-07-13):
