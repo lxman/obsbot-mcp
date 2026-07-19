@@ -47,8 +47,6 @@ import {
   encodePresetRecall,
   encodePresetDelete,
   encodePresetSetName,
-  encodeBootPose,
-  encodeBootFlags,
 } from "../codec/preset.js";
 import type { PresetSlot, PresetPose } from "../codec/preset.js";
 import { ObsbotTransport, CameraBusyError } from "../transport/transport.js";
@@ -154,7 +152,6 @@ const gimbalPositionSchema = z.object({});
 const presetListSchema = z.object({});
 const presetSaveSchema = z.object({
   slot: num().pipe(z.union([z.literal(1), z.literal(2), z.literal(3)])),
-  asInitialState: bool().default(false),
 });
 const presetSlotSchema = z.object({
   slot: num().pipe(z.union([z.literal(1), z.literal(2), z.literal(3)])),
@@ -162,7 +159,6 @@ const presetSlotSchema = z.object({
 const presetRecallSchema = presetSlotSchema;
 const presetUpdateSchema = z.object({
   slot: num().pipe(z.union([z.literal(1), z.literal(2), z.literal(3)])),
-  asInitialState: bool().default(false),
 });
 const presetRenameSchema = z.object({
   slot: num().pipe(z.union([z.literal(1), z.literal(2), z.literal(3)])),
@@ -709,12 +705,11 @@ export function createTools(
       description:
         "Save the gimbal's current live pose (yaw/pitch, via the standard UVC Pan/Tilt " +
         "controls) into preset slot 1|2|3. Slots are create-once on this device — there is " +
-        "no overwrite, so an occupied slot is rejected (delete it first). With " +
-        "asInitialState:true, also marks this slot's pose as the pose the gimbal strikes " +
-        "on power-up. Verifies by re-reading the slot list after writing.",
+        "no overwrite, so an occupied slot is rejected (delete it first). Verifies by " +
+        "re-reading the slot list after writing.",
       schema: presetSaveSchema,
       handler: async (args: unknown) => {
-        const { slot, asInitialState } = presetSaveSchema.parse(args);
+        const { slot } = presetSaveSchema.parse(args);
         const ready = await gate();
         if (!ready.ok) return ready;
         const t = ready.transport;
@@ -739,10 +734,6 @@ export function createTools(
         // M1: the ADD above has committed. From here on, a thrown error must say so —
         // otherwise a retry hits "slot occupied" with no clue the save actually landed.
         try {
-          if (asInitialState) {
-            await t.sendVendor(encodeBootPose(t.nextSeq(), slot, pose));
-            await t.sendVendor(encodeBootFlags(t.nextSeq()));
-          }
           const after = await readPresetSlots(t, gate, presetRead);
           if (!after[slot - 1].occupied) {
             return { ok: false, error: "verification failed", expected: "occupied", actual: "empty" };
@@ -751,9 +742,7 @@ export function createTools(
         } catch (e) {
           return {
             ok: false,
-            error: asInitialState
-              ? `preset saved to slot ${slot} but boot-pose write failed: ${msg(e)}`
-              : `preset saved to slot ${slot} but verification failed: ${msg(e)}`,
+            error: `preset saved to slot ${slot} but verification failed: ${msg(e)}`,
           };
         }
       },
@@ -791,11 +780,10 @@ export function createTools(
       description:
         "Overwrite preset slot 1|2|3 with the gimbal's current live pose (yaw/pitch via the " +
         "standard UVC Pan/Tilt controls). The slot must already be occupied (save first to " +
-        "create it). With asInitialState:true, also marks this slot's pose as the pose the " +
-        "gimbal strikes on power-up. Verifies by re-reading the slot list after writing.",
+        "create it). Verifies by re-reading the slot list after writing.",
       schema: presetUpdateSchema,
       handler: async (args: unknown) => {
-        const { slot, asInitialState } = presetUpdateSchema.parse(args);
+        const { slot } = presetUpdateSchema.parse(args);
         const ready = await gate();
         if (!ready.ok) return ready;
         const t = ready.transport;
@@ -824,10 +812,6 @@ export function createTools(
         }
         // M1: the UPDATE above has committed. From here on, a thrown error must say so.
         try {
-          if (asInitialState) {
-            await t.sendVendor(encodeBootPose(t.nextSeq(), slot, pose));
-            await t.sendVendor(encodeBootFlags(t.nextSeq()));
-          }
           const after = await readPresetSlots(t, gate, presetRead);
           if (!after[slot - 1].occupied) {
             return { ok: false, error: "verification failed", expected: "occupied", actual: "empty" };
@@ -841,9 +825,7 @@ export function createTools(
         } catch (e) {
           return {
             ok: false,
-            error: asInitialState
-              ? `preset updated in slot ${slot} but boot-pose write failed: ${msg(e)}`
-              : `preset updated in slot ${slot} but verification failed: ${msg(e)}`,
+            error: `preset updated in slot ${slot} but verification failed: ${msg(e)}`,
           };
         }
       },

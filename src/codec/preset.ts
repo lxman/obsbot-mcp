@@ -1,10 +1,39 @@
 import { buildFrame } from "./frame.js";
 import { f32le, u32le, concat } from "./encoding.js";
+import { OP_BY_NAME } from "./opcodes.js";
 
 export interface PresetPose { pan: number; tilt: number; roll: number; zoom: number }
 
-const CMD = { ADD: 0x3944, UPDATE: 0x3e04, RECALL: 0x39c4, DELETE: 0x3984,
-  SET_NAME: 0x3a84, BOOT_POSE: 0x3ec4, BOOT_FLAGS: 0x3e44 } as const;
+// Opcodes come from the generated table (tools/opcodes/opcodes.json, extracted from
+// libdev.dll with PDB symbols) under the firmware's OWN names. This file previously
+// kept a hand-written copy with invented names — notably `BOOT_POSE: 0x3ec4` and
+// `BOOT_FLAGS: 0x3e44`, neither of which is what those commands do:
+//   0x3ec4 = AI_SET_BOOT_PRESET_UPDATE_ONLY — BINDS AN EXISTING PRESET as the boot
+//            preset (hence OBSBOT Center's preset-identifying step before it)
+//   0x3e44 = AI_SET_BOOT_PRESETS_ACTIONS   — a "boot presets actions" record
+// Those invented names actively misled the reading of this protocol, so resolve by
+// real name and let the table be the single source of truth.
+const op = (name: string): number => {
+  const wire = OP_BY_NAME.get(name)?.wireCmd;
+  if (wire == null) throw new Error(`unknown or non-sendable opcode: ${name}`);
+  return wire;
+};
+
+const CMD = {
+  ADD: op("AI_SET_GIMBAL_PRESET_ADD"),
+  UPDATE: op("AI_SET_PRESET_UPDATE_ONLY"),
+  RECALL: op("AI_SET_GIMBAL_PRESET_TRIG"),
+  DELETE: op("AI_SET_GIMBAL_PRESET_DELETE"),
+  SET_NAME: op("AI_SET_GIMBAL_PRESET_ID_NAME"),
+  // Legacy names retained for the existing As-Initial-State replay path; see the
+  // real semantics above. Prefer the GIM_BOOT_POS family below.
+  BOOT_POSE: op("AI_SET_BOOT_PRESET_UPDATE_ONLY"),
+  BOOT_FLAGS: op("AI_SET_BOOT_PRESETS_ACTIONS"),
+  // The purpose-built boot-pose family: set / reset / trigger, all decoded.
+  GIM_BOOT_POS_SET: op("AI_SET_GIM_BOOT_POS"),
+  GIM_BOOT_POS_RESET: op("AI_RST_GIM_BOOT_POS"),
+  GIM_BOOT_POS_TRIGGER: op("AI_TRG_GIM_BOOT_POS"),
+} as const;
 const RECEIVER = 0x04;
 const idx = (slot: number) => u32le(slot - 1);
 const poseBytes = (p: PresetPose) =>
@@ -27,6 +56,15 @@ export const encodePresetSetName = (seq: number, slot: number, name: string): Bu
   buildFrame({ seq, cmd: CMD.SET_NAME, receiver: RECEIVER,
     payload: concat(idx(slot), Buffer.from(name, "ascii")) });
 
+// RETAINED AS DECODED PROTOCOL KNOWLEDGE — NOT REACHABLE FROM ANY TOOL.
+// This is the OBSBOT Center "As Initial State" replay. It was removed from the tool
+// surface once the command names were recovered: 0x3ec4 is AI_SET_BOOT_PRESET_UPDATE_ONLY
+// (binds an existing preset as the boot preset) and 0x3e44 is AI_SET_BOOT_PRESETS_ACTIONS
+// (an undecoded 40-byte "actions" record captured from one device state, carrying no slot
+// binding of its own). Neither has a decoded way to be undone. The GIM_BOOT_POS family
+// below does the same job with a real reset, so prefer it. Kept here, with its golden
+// tests, so the captured sequence is not lost.
+//
 // Boot-pose sequence: slot index + pose, but — unlike ADD/UPDATE — the trailing
 // float is a plain 0.0, not the -1000 sentinel. Confirmed against a captured
 // OBSBOT Center "As Initial State" wire frame (cmd 0x3ec4); do not fold this
@@ -165,3 +203,35 @@ export const assemblePresetSlots = (
       : { slot, occupied: false, name: null, pose: null };
   });
 };
+
+// --- Boot pose: the direct, reversible family --------------------------------
+// AI_SET_GIM_BOOT_POS / AI_RST_GIM_BOOT_POS / AI_TRG_GIM_BOOT_POS. Unlike the
+// As-Initial-State replay (which binds a preset and writes an undecoded 40-byte
+// "actions" record), every command here is decoded, and RST restores the factory
+// default — so setting a boot pose is undoable.
+//
+// PAYLOAD LAYOUT IS A HYPOTHESIS, pending hardware. Field ORDER is solid: read
+// from libdev's own movss stores in aiSetGimbalBootPosR (buf+0x05 = yaw from
+// [rbx+0xC], +0x09 = pitch from [rbx+8], +0x0D = roll from [rbx+4], +0x11 = zoom).
+// What is NOT confirmed is whether the UVC path uses the same framing as that
+// (network) path, which had an extra zero byte at +0x04 and unaligned floats. We
+// mirror our own frame convention instead: u32 id, then four aligned floats.
+//
+// The discriminator is PHYSICAL, not a readback (our transport cannot read vendor
+// GET replies): set a boot pose, fire encodeGimBootPosTrigger, and watch where the
+// gimbal actually goes. Wrong layout => it moves somewhere other than commanded,
+// and encodeGimBootPosReset puts the device back either way.
+export const encodeGimBootPosSet = (seq: number, pose: PresetPose): Buffer =>
+  buildFrame({
+    seq,
+    cmd: CMD.GIM_BOOT_POS_SET,
+    receiver: RECEIVER,
+    // id is 0: the boot pose is a single global setting, not one of the 3 slots.
+    payload: concat(u32le(0), f32le(pose.pan), f32le(pose.tilt), f32le(pose.roll), f32le(pose.zoom)),
+  });
+
+export const encodeGimBootPosReset = (seq: number): Buffer =>
+  buildFrame({ seq, cmd: CMD.GIM_BOOT_POS_RESET, receiver: RECEIVER, payload: Buffer.alloc(0) });
+
+export const encodeGimBootPosTrigger = (seq: number): Buffer =>
+  buildFrame({ seq, cmd: CMD.GIM_BOOT_POS_TRIGGER, receiver: RECEIVER, payload: Buffer.alloc(0) });
