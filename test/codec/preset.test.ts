@@ -4,6 +4,7 @@ import {
   encodePresetAdd, encodePresetRecall, encodePresetDelete, encodePresetSetName,
   encodeBootPose, encodeBootFlags,
   decodePresetList, decodePresetEntry, assemblePresetSlots,
+  implausiblePresetListReason,
 } from "../../src/codec/preset.js";
 
 const cmdOf = (h: string) => h.slice(20, 24);        // bytes 10-11
@@ -90,11 +91,68 @@ test("decodePresetEntry flags the exhausted marker", () => {
   expect(decodePresetEntry(hexToBuf("02000000")).end).toBe(true);
 });
 
+// --- I4: decodePresetEntry must not choke on, or misdecode, hostile input ---
 
+test("I4: decodePresetEntry treats a buffer too short for the fixed header as end/invalid, not a RangeError", () => {
+  // 8 bytes: block.readInt16LE(6) would need bytes 6-7 to exist, but this is only
+  // long enough to trigger readInt16LE(4)/(6) if unguarded — either way, too short
+  // for the full 10-byte header (name starts at offset 10).
+  expect(() => decodePresetEntry(hexToBuf("0000000018fcfce5"))).not.toThrow();
+  expect(decodePresetEntry(hexToBuf("0000000018fcfce5")).end).toBe(true);
+});
 
+test("I4: decodePresetEntry treats a 1-byte buffer as end/invalid, not a RangeError", () => {
+  expect(() => decodePresetEntry(hexToBuf("00"))).not.toThrow();
+  expect(decodePresetEntry(hexToBuf("00")).end).toBe(true);
+});
+
+test("I4: decodePresetEntry treats an all-zero 60-byte block as end/invalid, not a plausible occupied slot", () => {
+  const e = decodePresetEntry(Buffer.alloc(60));
+  expect(e.end).toBe(true);
+  expect(e.slot).toBeUndefined();
+});
+
+test("I4: decodePresetEntry rejects an out-of-range slot index instead of silently producing slot:8", () => {
+  // block[1] = 7 -> slotIdx 7, which (unguarded) would compute slot: 8 and then
+  // vanish from assemblePresetSlots's 1|2|3 lookup instead of surfacing as corrupt.
+  const header = Buffer.alloc(10);
+  header[0] = 0x00; // not the end marker
+  header[1] = 7; // implausible slot index
+  header.writeInt16LE(0, 4);
+  header.writeInt16LE(0, 6);
+  header[8] = 100;
+  const block = Buffer.concat([header, Buffer.from([0x41, 0x00])]); // "A" + NUL name
+  const e = decodePresetEntry(block);
+  expect(e.end).toBe(true);
+  expect(e.slot).toBeUndefined();
+});
+
+// --- C1: the raw selector-12 plausibility check, in isolation ---
+
+test("implausiblePresetListReason accepts a genuine 3-occupied-slots block", () => {
+  expect(implausiblePresetListReason(hexToBuf("030001020000"))).toBeNull();
+});
+
+test("implausiblePresetListReason rejects a count > the device's 3 slots", () => {
+  expect(implausiblePresetListReason(hexToBuf("ff"))).toMatch(/count/i);
+});
+
+test("implausiblePresetListReason rejects a block too short for its own claimed count", () => {
+  expect(implausiblePresetListReason(hexToBuf("02"))).toMatch(/short/i);
+});
+
+test("implausiblePresetListReason rejects a fully all-zero block (failed/silent read)", () => {
+  expect(implausiblePresetListReason(Buffer.alloc(60))).toMatch(/all-zero/i);
+});
+
+test("implausiblePresetListReason accepts a plausible count=0 block that isn't bit-for-bit zero", () => {
+  const b = Buffer.alloc(60);
+  b[40] = 0xaa;
+  expect(implausiblePresetListReason(b)).toBeNull();
+});
 
 test("assemblePresetSlots returns 3 slots, empties marked", () => {
-  const slots = assemblePresetSlots(1, [
+  const slots = assemblePresetSlots([
     { slot: 1, name: "Preset1", pose: { pan: 5, tilt: 0, roll: 0, zoom: 1 } },
   ]);
   expect(slots).toHaveLength(3);

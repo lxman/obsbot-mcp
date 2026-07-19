@@ -16,7 +16,10 @@ export interface ReadyOpts {
 const DEFAULTS: Required<ReadyOpts> = { pollMs: 200, wakeTimeoutMs: 2500, settleMs: 300 };
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
-const msg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+// Exported for reuse by any caller catch block that needs a safe error string —
+// `(e as Error).message` yields "undefined" on a non-Error throw (e.g. a string
+// or plain object thrown by a mock/dependency).
+export const msg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
 const readAwake = async (t: ObsbotTransport): Promise<boolean> =>
   decodeStatus(await t.recvStatus()).awake;

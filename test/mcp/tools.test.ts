@@ -672,6 +672,18 @@ test("obsbot_probe query frames an opcode and reads the reply via recvVendor", a
 // --- Preset read path: flat XU selectors 12 (list) + 13 (entry cursor). ---
 // Real captured fixtures from hardware (2026-07-19 session) — see preset.test.ts
 // for the byte-layout tests these mirror.
+// A realistic 60-byte selector-12 reply representing "zero presets saved" — count=0
+// (byte 0), but NOT bit-for-bit identical to a failed/silent read: real hardware has
+// not captured this exact state, so the nonzero sentinel byte just keeps this fixture
+// distinguishable from the "totally zeroed" hostile-input fixture that
+// implausiblePresetListReason must reject (see preset.ts's C1 design note — an
+// all-zero response is treated as a failed read, not as "genuinely zero presets").
+function emptyPresetListBlock(): Buffer {
+  const b = Buffer.alloc(60);
+  b[40] = 0xaa;
+  return b;
+}
+
 const PRESET_LIST_BLOCK = Buffer.from("030001020000", "hex");
 const PRESET_ENTRY_1 = Buffer.from("0000000018fcfce5640055484a6c633256304d513d3d00", "hex");
 const PRESET_ENTRY_2 = Buffer.from("0001000046004808640055484a6c633256304d673d3d00", "hex");
@@ -718,6 +730,121 @@ test("obsbot_preset_list reads list block, echo-resets the cursor, then walks en
   expect(transport.xuRaw).toHaveBeenCalledWith(12, PRESET_LIST_BLOCK);
 });
 
+// --- C1: never echo an implausible selector-12 read back to the device ---
+
+test("C1: an all-zero selector-12 block is rejected before the echo-write, not trusted as 'empty'", async () => {
+  const transport = makeFakeTransport();
+  transport.xuGetRaw = vi.fn(async (selector: number) =>
+    selector === 12 ? Buffer.alloc(60) : Buffer.alloc(60),
+  );
+  const tools = createTools(async () => transport, makeFakeMgr());
+  const tool = findTool(tools, "obsbot_preset_list");
+
+  const result = await tool.handler({});
+
+  expect(result).toMatchObject({ ok: false });
+  expect((result as { error: string }).error).toMatch(/implausible|all-zero/i);
+  // The load-bearing guarantee: an untrusted read must never be echoed back to
+  // selector 12 (its write semantics for anything but a genuine echo are undecoded).
+  expect(transport.xuRaw).not.toHaveBeenCalled();
+});
+
+test("C1: an oversized count (>3) on selector 12 is rejected before the echo-write", async () => {
+  const transport = makeFakeTransport();
+  const block = Buffer.alloc(60);
+  block[0] = 0xff; // garbage count
+  transport.xuGetRaw = vi.fn(async () => block);
+  const tools = createTools(async () => transport, makeFakeMgr());
+  const tool = findTool(tools, "obsbot_preset_list");
+
+  const result = await tool.handler({});
+
+  expect(result).toMatchObject({ ok: false });
+  expect((result as { error: string }).error).toMatch(/implausible|count/i);
+  expect(transport.xuRaw).not.toHaveBeenCalled();
+});
+
+test("C1: a short (truncated) selector-12 read is rejected before the echo-write", async () => {
+  const transport = makeFakeTransport();
+  // count=2 claims 2 slot-index bytes follow, but the buffer is cut short.
+  transport.xuGetRaw = vi.fn(async () => Buffer.from("02", "hex"));
+  const tools = createTools(async () => transport, makeFakeMgr());
+  const tool = findTool(tools, "obsbot_preset_list");
+
+  const result = await tool.handler({});
+
+  expect(result).toMatchObject({ ok: false });
+  expect(transport.xuRaw).not.toHaveBeenCalled();
+});
+
+test("C1: a plausible empty (count=0, non-all-zero) selector-12 block IS trusted and echoed", async () => {
+  const transport = makeFakeTransport();
+  transport.xuGetRaw = vi.fn(async () => emptyPresetListBlock());
+  const tools = createTools(async () => transport, makeFakeMgr());
+  const tool = findTool(tools, "obsbot_preset_list");
+
+  const result = await tool.handler({});
+
+  expect(result).toMatchObject({ ok: true });
+  expect((result as { slots: Array<{ occupied: boolean }> }).slots.every((s) => !s.occupied)).toBe(true);
+  expect(transport.xuRaw).toHaveBeenCalledWith(12, expect.any(Buffer));
+});
+
+// --- I1: cross-check the entry-cursor walk against selector 12's own slot list ---
+
+test("I1: cursor-exhausts-early vs list disagreement fails loudly instead of under-reporting", async () => {
+  const transport = makeFakeTransport();
+  // selector 12 claims 3 occupied slots, but the entry cursor (selector 13) hits the
+  // exhausted marker after only 1 — a real device inconsistency, not a decode bug.
+  let entryCall = 0;
+  const entries = [PRESET_ENTRY_1, PRESET_ENTRY_END];
+  transport.xuGetRaw = vi.fn(async (selector: number) =>
+    selector === 12 ? PRESET_LIST_BLOCK : entries[entryCall++],
+  );
+  const tools = createTools(async () => transport, makeFakeMgr());
+  const tool = findTool(tools, "obsbot_preset_list");
+
+  const result = await tool.handler({});
+
+  expect(result).toMatchObject({ ok: false });
+  expect((result as { error: string }).error).toMatch(/mismatch/i);
+});
+
+// --- I3: the entry walk never reads more than the device's 3 slots, and an
+// implausible/all-zero selector-13 entry does not masquerade as an occupied slot ---
+
+test("I3: a garbage oversized count doesn't turn into an unbounded read loop", async () => {
+  const transport = makeFakeTransport();
+  const block = Buffer.alloc(60);
+  block[0] = 0xff; // would mean 255 selector-13 reads if unclamped
+  transport.xuGetRaw = vi.fn(async () => block);
+  const tools = createTools(async () => transport, makeFakeMgr());
+  const tool = findTool(tools, "obsbot_preset_list");
+
+  // C1 already rejects this before the walk even starts — confirms the garbage
+  // count never reaches the entry loop, let alone drives 255 USB transfers.
+  await tool.handler({});
+  expect(transport.xuGetRaw).toHaveBeenCalledTimes(1); // just the sel-12 read
+});
+
+test("I3: an all-zero selector-13 entry does not collapse into a false-occupied slot", async () => {
+  const transport = makeFakeTransport();
+  // selector 12 plausibly claims 1 occupied slot, but the corresponding selector-13
+  // read comes back all zero (a failed/short entry read) instead of a real entry
+  // or the 0x02 exhausted marker.
+  transport.xuGetRaw = vi.fn(async (selector: number) =>
+    selector === 12 ? Buffer.from("0100", "hex") : Buffer.alloc(60),
+  );
+  const tools = createTools(async () => transport, makeFakeMgr());
+  const tool = findTool(tools, "obsbot_preset_list");
+
+  const result = await tool.handler({});
+
+  // The all-zero entry must NOT decode as a plausible occupied slot; since that
+  // disagrees with selector 12's claim, I1's cross-check fails loudly.
+  expect(result).toMatchObject({ ok: false });
+});
+
 test("obsbot_gimbal_position maps UVC pan->yaw and negates tilt->pitch", async () => {
   const transport = makeFakeTransport();
   // pan (prop 0) = 30 -> yaw 30; tilt (prop 1) = -19 -> pitch +19 (negated)
@@ -755,7 +882,7 @@ test("obsbot_preset_save on an empty slot sends the ADD frame with the live pose
     if (selector === 12) {
       listCall++;
       // 1st read (guard): slot list empty. 2nd read (verify): slot 1 now occupied.
-      return listCall === 1 ? Buffer.from("00", "hex") : Buffer.from("0100", "hex");
+      return listCall === 1 ? emptyPresetListBlock() : Buffer.from("0100", "hex");
     }
     return PRESET_ENTRY_1; // decodes to slot 1, name "Preset1"
   });
@@ -785,7 +912,7 @@ test("obsbot_preset_save with asInitialState also sends boot-pose and boot-flags
   transport.xuGetRaw = vi.fn(async (selector: number, _length: number) => {
     if (selector === 12) {
       listCall++;
-      return listCall === 1 ? Buffer.from("00", "hex") : Buffer.from("0100", "hex");
+      return listCall === 1 ? emptyPresetListBlock() : Buffer.from("0100", "hex");
     }
     return PRESET_ENTRY_1;
   });
@@ -827,7 +954,7 @@ function makePresetEntryBuffer(slotIdx: number, name: string): Buffer {
 test("obsbot_preset_recall rejects an empty slot", async () => {
   const transport = makeFakeTransport();
   transport.xuGetRaw = vi.fn(async (selector: number, _length: number) =>
-    selector === 12 ? Buffer.from("00", "hex") : Buffer.from("02000000", "hex"),
+    selector === 12 ? emptyPresetListBlock() : Buffer.from("02000000", "hex"),
   );
   const tools = createTools(async () => transport, makeFakeMgr());
   const tool = findTool(tools, "obsbot_preset_recall");
@@ -862,7 +989,7 @@ test("obsbot_preset_recall sends the RECALL frame for an occupied slot then veri
 test("obsbot_preset_update rejects an empty slot", async () => {
   const transport = makeFakeTransport();
   transport.xuGetRaw = vi.fn(async (selector: number, _length: number) =>
-    selector === 12 ? Buffer.from("00", "hex") : Buffer.from("02000000", "hex"),
+    selector === 12 ? emptyPresetListBlock() : Buffer.from("02000000", "hex"),
   );
   const tools = createTools(async () => transport, makeFakeMgr());
   const tool = findTool(tools, "obsbot_preset_update");
@@ -925,7 +1052,7 @@ test("obsbot_preset_update with asInitialState also sends boot-pose and boot-fla
 test("obsbot_preset_rename rejects an empty slot", async () => {
   const transport = makeFakeTransport();
   transport.xuGetRaw = vi.fn(async (selector: number, _length: number) =>
-    selector === 12 ? Buffer.from("00", "hex") : Buffer.from("02000000", "hex"),
+    selector === 12 ? emptyPresetListBlock() : Buffer.from("02000000", "hex"),
   );
   const tools = createTools(async () => transport, makeFakeMgr());
   const tool = findTool(tools, "obsbot_preset_rename");
@@ -994,7 +1121,7 @@ test("obsbot_preset_rename returns a structured failure when the device didn't a
 test("obsbot_preset_delete rejects an already-empty slot", async () => {
   const transport = makeFakeTransport();
   transport.xuGetRaw = vi.fn(async (selector: number, _length: number) =>
-    selector === 12 ? Buffer.from("00", "hex") : Buffer.from("02000000", "hex"),
+    selector === 12 ? emptyPresetListBlock() : Buffer.from("02000000", "hex"),
   );
   const tools = createTools(async () => transport, makeFakeMgr());
   const tool = findTool(tools, "obsbot_preset_delete");
@@ -1013,7 +1140,7 @@ test("obsbot_preset_delete sends the DELETE frame for an occupied slot then veri
   transport.xuGetRaw = vi.fn(async (selector: number, _length: number) => {
     if (selector === 12) {
       listCall++;
-      return listCall === 1 ? Buffer.from("0100", "hex") : Buffer.from("00", "hex");
+      return listCall === 1 ? Buffer.from("0100", "hex") : emptyPresetListBlock();
     }
     return PRESET_ENTRY_1;
   });
@@ -1042,4 +1169,118 @@ test("obsbot_preset_delete returns a structured failure if the slot is still occ
   const result = await tool.handler({ slot: 1 });
 
   expect(result).toEqual({ ok: false, error: "verification failed", expected: "empty", actual: "occupied" });
+});
+
+// --- I2: all six preset tools are gated (readiness-checked) like other gimbal tools ---
+
+const PRESET_TOOL_ARGS: Record<string, unknown> = {
+  obsbot_preset_list: {},
+  obsbot_preset_save: { slot: 1 },
+  obsbot_preset_recall: { slot: 1 },
+  obsbot_preset_update: { slot: 1 },
+  obsbot_preset_rename: { slot: 1, name: "Foo" },
+  obsbot_preset_delete: { slot: 1 },
+};
+
+for (const name of Object.keys(PRESET_TOOL_ARGS)) {
+  test(`I2: ${name} is gated — returns the readiness error and never touches the device when unreachable`, async () => {
+    const transport = makeFakeTransport();
+    transport.recvStatus = vi.fn(async () => {
+      throw new Error("KsProperty GET failed");
+    });
+    const tools = createTools(async () => transport, makeFakeMgr());
+    const tool = findTool(tools, name);
+
+    const result = await tool.handler(PRESET_TOOL_ARGS[name]);
+
+    expect(result).toMatchObject({ ok: false, reason: "unreachable" });
+    expect(transport.xuGetRaw).not.toHaveBeenCalled();
+    expect(transport.sendVendor).not.toHaveBeenCalled();
+  });
+}
+
+// --- M1: a failure after the ADD/UPDATE write has already committed must say so ---
+
+test("M1: obsbot_preset_save reports a distinguishing error when boot-pose fails after ADD already committed", async () => {
+  const transport = makeFakeTransport();
+  let listCall = 0;
+  transport.xuGetRaw = vi.fn(async (selector: number) => {
+    if (selector === 12) {
+      listCall++;
+      return listCall === 1 ? emptyPresetListBlock() : Buffer.from("0100", "hex");
+    }
+    return PRESET_ENTRY_1;
+  });
+  // ADD succeeds; the boot-pose send throws.
+  transport.sendVendor = vi.fn(async (frame: Buffer) => {
+    const cmd = frame.subarray(10, 12).toString("hex");
+    if (cmd === "c43e") throw new Error("boot-pose write timed out"); // 0x3ec4
+  });
+  const tools = createTools(async () => transport, makeFakeMgr());
+  const tool = findTool(tools, "obsbot_preset_save");
+
+  const result = await tool.handler({ slot: 1, asInitialState: true });
+
+  expect(result).toMatchObject({ ok: false });
+  const error = (result as { error: string }).error;
+  // Must say the save landed, not just "failed" — a bare failure would make the
+  // caller retry ADD into an now-occupied slot and get a confusing rejection.
+  expect(error).toMatch(/saved/i);
+  expect(error).toMatch(/boot-pose/i);
+});
+
+test("M1: obsbot_preset_update reports a distinguishing error when boot-pose fails after UPDATE already committed", async () => {
+  const transport = makeFakeTransport();
+  transport.xuGetRaw = vi.fn(async (selector: number) =>
+    selector === 12 ? Buffer.from("0100", "hex") : PRESET_ENTRY_1,
+  );
+  transport.sendVendor = vi.fn(async (frame: Buffer) => {
+    const cmd = frame.subarray(10, 12).toString("hex");
+    if (cmd === "c43e") throw new Error("boot-pose write timed out");
+  });
+  const tools = createTools(async () => transport, makeFakeMgr());
+  const tool = findTool(tools, "obsbot_preset_update");
+
+  const result = await tool.handler({ slot: 1, asInitialState: true });
+
+  expect(result).toMatchObject({ ok: false });
+  const error = (result as { error: string }).error;
+  expect(error).toMatch(/updated/i);
+  expect(error).toMatch(/boot-pose/i);
+});
+
+test("M1: obsbot_preset_save reports a plain save failure when the ADD write itself throws (nothing committed)", async () => {
+  const transport = makeFakeTransport();
+  transport.xuGetRaw = vi.fn(async () => emptyPresetListBlock());
+  transport.sendVendor = vi.fn(async () => {
+    throw new Error("device NAK");
+  });
+  const tools = createTools(async () => transport, makeFakeMgr());
+  const tool = findTool(tools, "obsbot_preset_save");
+
+  const result = await tool.handler({ slot: 1 });
+
+  expect(result).toMatchObject({ ok: false });
+  const error = (result as { error: string }).error;
+  // Nothing committed yet — must NOT claim the preset was saved.
+  expect(error).not.toMatch(/saved to slot/i);
+  expect(error).toMatch(/save failed/i);
+});
+
+// --- M2: catch blocks report a safe message even for a non-Error throw ---
+
+test("M2: obsbot_preset_list surfaces a readable error even when a non-Error is thrown", async () => {
+  const transport = makeFakeTransport();
+  transport.xuGetRaw = vi.fn(async () => {
+    throw "camera unplugged"; // eslint-disable-line no-throw-literal -- simulate a non-Error throw
+  });
+  const tools = createTools(async () => transport, makeFakeMgr());
+  const tool = findTool(tools, "obsbot_preset_list");
+
+  const result = await tool.handler({});
+
+  expect(result).toMatchObject({ ok: false });
+  const error = (result as { error: string }).error;
+  expect(error).not.toBe("undefined");
+  expect(error).toContain("camera unplugged");
 });

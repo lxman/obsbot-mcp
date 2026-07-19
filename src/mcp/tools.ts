@@ -41,6 +41,7 @@ import {
   decodePresetList,
   decodePresetEntry,
   assemblePresetSlots,
+  implausiblePresetListReason,
   encodePresetAdd,
   encodePresetUpdate,
   encodePresetRecall,
@@ -53,7 +54,7 @@ import type { PresetSlot, PresetPose } from "../codec/preset.js";
 import { ObsbotTransport, CameraBusyError } from "../transport/transport.js";
 import { DeviceManager } from "../device/manager.js";
 import { DeviceSession } from "../device/session.js";
-import { ensureReady } from "./ready.js";
+import { ensureReady, msg } from "./ready.js";
 import type { CaptureManager } from "../capture/manager.js";
 import { CaptureError } from "../capture/manager.js";
 
@@ -200,17 +201,52 @@ const sleep = (ms: number): Promise<void> =>
 //      (echo is provably non-destructive; do NOT write zeros/synthesized bytes)
 //   3. GET selector 13, `count` times -> each read returns the next preset entry and
 //      advances the cursor, until the exhausted marker (status 0x02)
+//
+// Occupancy gates a create-once resource (save requires EMPTY, everything else
+// requires OCCUPIED), so a falsely-"empty" read here drives an irreversible write.
+// C1/I1/I3 below are all facets of the same unifying fix: never trust device bytes
+// enough to act on them (or echo them back) without a plausibility/consistency check.
 async function getPresetSlots(t: ObsbotTransport): Promise<PresetSlot[]> {
   const block = await t.xuGetRaw(12, 60);
-  const { count } = decodePresetList(block);
+  // C1: validate BEFORE the echo-write — see implausiblePresetListReason. A
+  // failed/short/garbage read must never be echoed back to a selector whose
+  // write semantics for anything but a genuine echo are undecoded.
+  const reason = implausiblePresetListReason(block);
+  if (reason) {
+    throw new Error(`preset list read implausible, refusing to reset the cursor: ${reason}`);
+  }
+  const list = decodePresetList(block);
   await t.xuRaw(12, block); // echo-write resets the cursor — load-bearing, see above
+
+  // I3: never walk more entries than the device physically has, no matter what
+  // `count` claimed. C1 already rejects count>3 above, but this clamp is a
+  // second, independent guard against turning a garbage count into up to 255
+  // USB control transfers.
+  const walkCount = Math.min(list.count, 3);
   const per: { slot: 1 | 2 | 3; name: string; pose: PresetPose }[] = [];
-  for (let i = 0; i < count; i++) {
+  for (let i = 0; i < walkCount; i++) {
     const e = decodePresetEntry(await t.xuGetRaw(13, 60));
     if (e.end) break;
     per.push({ slot: e.slot!, name: e.name!, pose: e.pose! });
   }
-  return assemblePresetSlots(count, per);
+
+  // I1: list.slots (from selector 12) is the device's own statement of WHICH
+  // slots are occupied. If the entry-cursor walk (selector 13) disagrees — it
+  // exhausted early, hit an implausible/all-zero entry, or decoded a different
+  // slot set — don't silently trust whichever answer under-reports. A false
+  // EMPTY is the dangerous direction for a create-once resource, so fail loudly
+  // instead of returning a confident wrong answer.
+  const walked = [...new Set(per.map((e) => e.slot - 1))].sort((a, b) => a - b);
+  const claimed = [...list.slots].sort((a, b) => a - b);
+  const agree = walked.length === claimed.length && walked.every((s, i) => s === claimed[i]);
+  if (!agree) {
+    throw new Error(
+      `preset list mismatch: selector 12 claims occupied slots [${claimed.join(",")}] but the ` +
+        `entry-cursor walk (selector 13) found [${walked.join(",")}]`,
+    );
+  }
+
+  return assemblePresetSlots(per);
 }
 
 export function createTools(
@@ -552,11 +588,14 @@ export function createTools(
       schema: presetListSchema,
       handler: async (args: unknown) => {
         presetListSchema.parse(args);
+        const ready = await gate();
+        if (!ready.ok) return ready;
+        const t = ready.transport;
         try {
-          const t = await getTransport();
-          return { ok: true, slots: await getPresetSlots(t) };
+          const slots = await getPresetSlots(t);
+          return { ok: true, slots, ...(ready.reconnected && { reconnected: true }) };
         } catch (e) {
-          return { ok: false, error: (e as Error).message };
+          return { ok: false, error: msg(e) };
         }
       },
     },
@@ -571,8 +610,11 @@ export function createTools(
       schema: presetSaveSchema,
       handler: async (args: unknown) => {
         const { slot, asInitialState } = presetSaveSchema.parse(args);
+        const ready = await gate();
+        if (!ready.ok) return ready;
+        const t = ready.transport;
+        let pose: PresetPose;
         try {
-          const t = await getTransport();
           const before = await getPresetSlots(t);
           if (before[slot - 1].occupied) {
             return { ok: false, error: `slot ${slot} is occupied; update or delete first` };
@@ -582,8 +624,16 @@ export function createTools(
           // our +pitch = down convention.
           const yaw = (await t.camCtrlGet(CAMERA_CONTROL_PAN)).value;
           const pitch = -(await t.camCtrlGet(CAMERA_CONTROL_TILT)).value;
-          const pose: PresetPose = { pan: yaw, tilt: pitch, roll: 0, zoom: 1 };
+          // T6: ObsbotTransport exposes no zoom getter, so the live zoom ratio can't be
+          // read back here — zoom is hardcoded to 1 rather than guessed. Not an oversight.
+          pose = { pan: yaw, tilt: pitch, roll: 0, zoom: 1 };
           await t.sendVendor(encodePresetAdd(t.nextSeq(), slot, pose));
+        } catch (e) {
+          return { ok: false, error: `preset save failed: ${msg(e)}` };
+        }
+        // M1: the ADD above has committed. From here on, a thrown error must say so —
+        // otherwise a retry hits "slot occupied" with no clue the save actually landed.
+        try {
           if (asInitialState) {
             await t.sendVendor(encodeBootPose(t.nextSeq(), slot, pose));
             await t.sendVendor(encodeBootFlags(t.nextSeq()));
@@ -592,9 +642,14 @@ export function createTools(
           if (!after[slot - 1].occupied) {
             return { ok: false, error: "verification failed", expected: "occupied", actual: "empty" };
           }
-          return { ok: true, slot: after[slot - 1] };
+          return { ok: true, slot: after[slot - 1], ...(ready.reconnected && { reconnected: true }) };
         } catch (e) {
-          return { ok: false, error: (e as Error).message };
+          return {
+            ok: false,
+            error: asInitialState
+              ? `preset saved to slot ${slot} but boot-pose write failed: ${msg(e)}`
+              : `preset saved to slot ${slot} but verification failed: ${msg(e)}`,
+          };
         }
       },
     },
@@ -607,8 +662,10 @@ export function createTools(
       schema: presetRecallSchema,
       handler: async (args: unknown) => {
         const { slot } = presetRecallSchema.parse(args);
+        const ready = await gate();
+        if (!ready.ok) return ready;
+        const t = ready.transport;
         try {
-          const t = await getTransport();
           const before = await getPresetSlots(t);
           if (!before[slot - 1].occupied) {
             return { ok: false, error: `slot ${slot} is empty; save first` };
@@ -618,9 +675,9 @@ export function createTools(
           if (!after[slot - 1].occupied) {
             return { ok: false, error: "verification failed", expected: "occupied", actual: "empty" };
           }
-          return { ok: true, slot: after[slot - 1] };
+          return { ok: true, slot: after[slot - 1], ...(ready.reconnected && { reconnected: true }) };
         } catch (e) {
-          return { ok: false, error: (e as Error).message };
+          return { ok: false, error: msg(e) };
         }
       },
     },
@@ -634,8 +691,11 @@ export function createTools(
       schema: presetUpdateSchema,
       handler: async (args: unknown) => {
         const { slot, asInitialState } = presetUpdateSchema.parse(args);
+        const ready = await gate();
+        if (!ready.ok) return ready;
+        const t = ready.transport;
+        let pose: PresetPose;
         try {
-          const t = await getTransport();
           const before = await getPresetSlots(t);
           if (!before[slot - 1].occupied) {
             return { ok: false, error: `slot ${slot} is empty; save first` };
@@ -645,8 +705,15 @@ export function createTools(
           // down convention.
           const yaw = (await t.camCtrlGet(CAMERA_CONTROL_PAN)).value;
           const pitch = -(await t.camCtrlGet(CAMERA_CONTROL_TILT)).value;
-          const pose: PresetPose = { pan: yaw, tilt: pitch, roll: 0, zoom: 1 };
+          // T6: ObsbotTransport exposes no zoom getter, so the live zoom ratio can't be
+          // read back here — zoom is hardcoded to 1 rather than guessed. Not an oversight.
+          pose = { pan: yaw, tilt: pitch, roll: 0, zoom: 1 };
           await t.sendVendor(encodePresetUpdate(t.nextSeq(), slot, pose));
+        } catch (e) {
+          return { ok: false, error: `preset update failed: ${msg(e)}` };
+        }
+        // M1: the UPDATE above has committed. From here on, a thrown error must say so.
+        try {
           if (asInitialState) {
             await t.sendVendor(encodeBootPose(t.nextSeq(), slot, pose));
             await t.sendVendor(encodeBootFlags(t.nextSeq()));
@@ -655,9 +722,14 @@ export function createTools(
           if (!after[slot - 1].occupied) {
             return { ok: false, error: "verification failed", expected: "occupied", actual: "empty" };
           }
-          return { ok: true, slot: after[slot - 1] };
+          return { ok: true, slot: after[slot - 1], ...(ready.reconnected && { reconnected: true }) };
         } catch (e) {
-          return { ok: false, error: (e as Error).message };
+          return {
+            ok: false,
+            error: asInitialState
+              ? `preset updated in slot ${slot} but boot-pose write failed: ${msg(e)}`
+              : `preset updated in slot ${slot} but verification failed: ${msg(e)}`,
+          };
         }
       },
     },
@@ -670,8 +742,10 @@ export function createTools(
       schema: presetRenameSchema,
       handler: async (args: unknown) => {
         const { slot, name } = presetRenameSchema.parse(args);
+        const ready = await gate();
+        if (!ready.ok) return ready;
+        const t = ready.transport;
         try {
-          const t = await getTransport();
           const before = await getPresetSlots(t);
           if (!before[slot - 1].occupied) {
             return { ok: false, error: `slot ${slot} is empty; save first` };
@@ -687,9 +761,9 @@ export function createTools(
           if (after[slot - 1].name !== clean) {
             return { ok: false, error: "verification failed", expected: clean, actual: after[slot - 1].name };
           }
-          return { ok: true, slot: after[slot - 1] };
+          return { ok: true, slot: after[slot - 1], ...(ready.reconnected && { reconnected: true }) };
         } catch (e) {
-          return { ok: false, error: (e as Error).message };
+          return { ok: false, error: msg(e) };
         }
       },
     },
@@ -701,8 +775,10 @@ export function createTools(
       schema: presetDeleteSchema,
       handler: async (args: unknown) => {
         const { slot } = presetDeleteSchema.parse(args);
+        const ready = await gate();
+        if (!ready.ok) return ready;
+        const t = ready.transport;
         try {
-          const t = await getTransport();
           const before = await getPresetSlots(t);
           if (!before[slot - 1].occupied) {
             return { ok: false, error: `slot ${slot} is already empty` };
@@ -712,9 +788,9 @@ export function createTools(
           if (after[slot - 1].occupied) {
             return { ok: false, error: "verification failed", expected: "empty", actual: "occupied" };
           }
-          return { ok: true };
+          return { ok: true, ...(ready.reconnected && { reconnected: true }) };
         } catch (e) {
-          return { ok: false, error: (e as Error).message };
+          return { ok: false, error: msg(e) };
         }
       },
     },
