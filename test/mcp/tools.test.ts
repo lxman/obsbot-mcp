@@ -807,3 +807,239 @@ test("obsbot_preset_save with asInitialState also sends boot-pose and boot-flags
   expect(bootFlagsFrame.subarray(10, 12).toString("hex")).toBe("443e"); // 0x3e44
   expect(result).toMatchObject({ ok: true });
 });
+
+// Helper to build a selector-13 entry buffer matching decodePresetEntry's layout,
+// using the real base64 encoding at runtime (avoids hand-computed hex, which is
+// error-prone). slotIdx is 0-based (slot 1 -> 0).
+function makePresetEntryBuffer(slotIdx: number, name: string): Buffer {
+  const header = Buffer.alloc(10);
+  header[0] = 0x00; // not the ENTRY_END marker (0x02)
+  header[1] = slotIdx;
+  header.writeInt16LE(-1000, 4); // pitch hundredths (arbitrary, unused by these tests)
+  header.writeInt16LE(-6660, 6); // yaw hundredths (arbitrary, unused by these tests)
+  header[8] = 100; // zoom hundredths
+  const b64 = Buffer.from(name, "ascii").toString("base64");
+  return Buffer.concat([header, Buffer.from(b64, "ascii"), Buffer.from([0])]);
+}
+
+// --- obsbot_preset_recall ---
+
+test("obsbot_preset_recall rejects an empty slot", async () => {
+  const transport = makeFakeTransport();
+  transport.xuGetRaw = vi.fn(async (selector: number, _length: number) =>
+    selector === 12 ? Buffer.from("00", "hex") : Buffer.from("02000000", "hex"),
+  );
+  const tools = createTools(async () => transport, makeFakeMgr());
+  const tool = findTool(tools, "obsbot_preset_recall");
+
+  const result = await tool.handler({ slot: 1 });
+
+  expect(result).toEqual({ ok: false, error: "slot 1 is empty; save first" });
+  expect(transport.sendVendor).not.toHaveBeenCalled();
+});
+
+test("obsbot_preset_recall sends the RECALL frame for an occupied slot then verifies", async () => {
+  const transport = makeFakeTransport();
+  transport.xuGetRaw = vi.fn(async (selector: number, _length: number) =>
+    selector === 12 ? Buffer.from("0100", "hex") : PRESET_ENTRY_1,
+  );
+  transport.xuRaw = vi.fn(async (_selector: number, _data: Buffer) => {});
+  const tools = createTools(async () => transport, makeFakeMgr());
+  const tool = findTool(tools, "obsbot_preset_recall");
+
+  const result = await tool.handler({ slot: 1 });
+
+  expect(transport.sendVendor).toHaveBeenCalledTimes(1);
+  const frame = transport.sendVendor.mock.calls[0][0] as Buffer;
+  expect(frame.subarray(10, 12).toString("hex")).toBe("c439"); // cmd 0x39c4 LE
+  expect(result).toMatchObject({ ok: true });
+  const slot = (result as { slot: Record<string, unknown> }).slot;
+  expect(slot).toMatchObject({ slot: 1, occupied: true, name: "Preset1" });
+});
+
+// --- obsbot_preset_update ---
+
+test("obsbot_preset_update rejects an empty slot", async () => {
+  const transport = makeFakeTransport();
+  transport.xuGetRaw = vi.fn(async (selector: number, _length: number) =>
+    selector === 12 ? Buffer.from("00", "hex") : Buffer.from("02000000", "hex"),
+  );
+  const tools = createTools(async () => transport, makeFakeMgr());
+  const tool = findTool(tools, "obsbot_preset_update");
+
+  const result = await tool.handler({ slot: 1 });
+
+  expect(result).toEqual({ ok: false, error: "slot 1 is empty; save first" });
+  expect(transport.sendVendor).not.toHaveBeenCalled();
+});
+
+test("obsbot_preset_update sends UPDATE with the live pose for an occupied slot then verifies", async () => {
+  const transport = makeFakeTransport();
+  transport.xuGetRaw = vi.fn(async (selector: number, _length: number) =>
+    selector === 12 ? Buffer.from("0100", "hex") : PRESET_ENTRY_1,
+  );
+  transport.xuRaw = vi.fn(async (_selector: number, _data: Buffer) => {});
+  // pan (prop 0) = 33 -> yaw 33; tilt (prop 1) = 5 -> pitch -5 (negated)
+  transport.camCtrlGet = vi.fn(async (p: number) =>
+    p === 0 ? { value: 33, flags: 2 } : { value: 5, flags: 2 },
+  );
+  const tools = createTools(async () => transport, makeFakeMgr());
+  const tool = findTool(tools, "obsbot_preset_update");
+
+  const result = await tool.handler({ slot: 1 });
+
+  expect(transport.sendVendor).toHaveBeenCalledTimes(1);
+  const frame = transport.sendVendor.mock.calls[0][0] as Buffer;
+  expect(frame.subarray(10, 12).toString("hex")).toBe("043e"); // cmd 0x3e04 LE
+  expect(frame.readFloatLE(20)).toBeCloseTo(33); // pan slotted after idx(4) + pan f32
+  expect(frame.readFloatLE(24)).toBeCloseTo(-5); // pitch = -tilt
+  expect(result).toMatchObject({ ok: true });
+});
+
+test("obsbot_preset_update with asInitialState also sends boot-pose and boot-flags frames", async () => {
+  const transport = makeFakeTransport();
+  transport.xuGetRaw = vi.fn(async (selector: number, _length: number) =>
+    selector === 12 ? Buffer.from("0100", "hex") : PRESET_ENTRY_1,
+  );
+  transport.xuRaw = vi.fn(async (_selector: number, _data: Buffer) => {});
+  transport.camCtrlGet = vi.fn(async (p: number) =>
+    p === 0 ? { value: 33, flags: 2 } : { value: 5, flags: 2 },
+  );
+  const tools = createTools(async () => transport, makeFakeMgr());
+  const tool = findTool(tools, "obsbot_preset_update");
+
+  const result = await tool.handler({ slot: 1, asInitialState: true });
+
+  expect(transport.sendVendor).toHaveBeenCalledTimes(3);
+  const [updateFrame, bootPoseFrame, bootFlagsFrame] = transport.sendVendor.mock.calls.map(
+    (c) => c[0] as Buffer,
+  );
+  expect(updateFrame.subarray(10, 12).toString("hex")).toBe("043e"); // 0x3e04
+  expect(bootPoseFrame.subarray(10, 12).toString("hex")).toBe("c43e"); // 0x3ec4
+  expect(bootFlagsFrame.subarray(10, 12).toString("hex")).toBe("443e"); // 0x3e44
+  expect(result).toMatchObject({ ok: true });
+});
+
+// --- obsbot_preset_rename ---
+
+test("obsbot_preset_rename rejects an empty slot", async () => {
+  const transport = makeFakeTransport();
+  transport.xuGetRaw = vi.fn(async (selector: number, _length: number) =>
+    selector === 12 ? Buffer.from("00", "hex") : Buffer.from("02000000", "hex"),
+  );
+  const tools = createTools(async () => transport, makeFakeMgr());
+  const tool = findTool(tools, "obsbot_preset_rename");
+
+  const result = await tool.handler({ slot: 1, name: "Foo" });
+
+  expect(result).toEqual({ ok: false, error: "slot 1 is empty; save first" });
+  expect(transport.sendVendor).not.toHaveBeenCalled();
+});
+
+test("obsbot_preset_rename sends SET_NAME with the (truncated) name then verifies the new name", async () => {
+  const transport = makeFakeTransport();
+  const longName = "x".repeat(50);
+  const truncated = longName.slice(0, 40);
+  let listCall = 0;
+  // Guard read: slot occupied under old name "Preset1". Verify read: same slot, now
+  // under the new (truncated) name — the fake must reflect the rename on the SECOND
+  // read only, to prove the tool actually re-reads rather than trusting its own input.
+  transport.xuGetRaw = vi.fn(async (selector: number, _length: number) => {
+    if (selector === 12) {
+      listCall++;
+      return Buffer.from("0100", "hex");
+    }
+    return listCall <= 1 ? PRESET_ENTRY_1 : makePresetEntryBuffer(0, truncated);
+  });
+  transport.xuRaw = vi.fn(async (_selector: number, _data: Buffer) => {});
+  const tools = createTools(async () => transport, makeFakeMgr());
+  const tool = findTool(tools, "obsbot_preset_rename");
+
+  const result = await tool.handler({ slot: 1, name: longName });
+
+  expect(transport.sendVendor).toHaveBeenCalledTimes(1);
+  const frame = transport.sendVendor.mock.calls[0][0] as Buffer;
+  expect(frame.subarray(10, 12).toString("hex")).toBe("843a"); // cmd 0x3a84 LE
+  expect(frame.subarray(16, 20).toString("hex")).toBe("00000000"); // idx(slot 1) = 0
+  const sentName = frame.subarray(20, 20 + truncated.length).toString("ascii");
+  expect(sentName).toBe(truncated);
+  expect(sentName.length).toBe(40);
+  expect(result).toMatchObject({ ok: true });
+  const slot = (result as { slot: Record<string, unknown> }).slot;
+  expect(slot).toMatchObject({ slot: 1, occupied: true, name: truncated });
+});
+
+test("obsbot_preset_rename returns a structured failure when the device didn't apply the new name", async () => {
+  const transport = makeFakeTransport();
+  // List/entry reads never change -> stays "Preset1" on both the guard and verify read.
+  transport.xuGetRaw = vi.fn(async (selector: number, _length: number) =>
+    selector === 12 ? Buffer.from("0100", "hex") : PRESET_ENTRY_1,
+  );
+  transport.xuRaw = vi.fn(async (_selector: number, _data: Buffer) => {});
+  const tools = createTools(async () => transport, makeFakeMgr());
+  const tool = findTool(tools, "obsbot_preset_rename");
+
+  const result = await tool.handler({ slot: 1, name: "NewName" });
+
+  expect(result).toEqual({
+    ok: false,
+    error: "verification failed",
+    expected: "NewName",
+    actual: "Preset1",
+  });
+});
+
+// --- obsbot_preset_delete ---
+
+test("obsbot_preset_delete rejects an already-empty slot", async () => {
+  const transport = makeFakeTransport();
+  transport.xuGetRaw = vi.fn(async (selector: number, _length: number) =>
+    selector === 12 ? Buffer.from("00", "hex") : Buffer.from("02000000", "hex"),
+  );
+  const tools = createTools(async () => transport, makeFakeMgr());
+  const tool = findTool(tools, "obsbot_preset_delete");
+
+  const result = await tool.handler({ slot: 1 });
+
+  expect(result).toEqual({ ok: false, error: "slot 1 is already empty" });
+  expect(transport.sendVendor).not.toHaveBeenCalled();
+});
+
+test("obsbot_preset_delete sends the DELETE frame for an occupied slot then verifies it's empty", async () => {
+  const transport = makeFakeTransport();
+  let listCall = 0;
+  // Guard read: slot 1 occupied. Verify read: slot list now empty — the fake's state
+  // DIFFERS between the two reads, so the tool must re-read rather than assume success.
+  transport.xuGetRaw = vi.fn(async (selector: number, _length: number) => {
+    if (selector === 12) {
+      listCall++;
+      return listCall === 1 ? Buffer.from("0100", "hex") : Buffer.from("00", "hex");
+    }
+    return PRESET_ENTRY_1;
+  });
+  transport.xuRaw = vi.fn(async (_selector: number, _data: Buffer) => {});
+  const tools = createTools(async () => transport, makeFakeMgr());
+  const tool = findTool(tools, "obsbot_preset_delete");
+
+  const result = await tool.handler({ slot: 1 });
+
+  expect(transport.sendVendor).toHaveBeenCalledTimes(1);
+  const frame = transport.sendVendor.mock.calls[0][0] as Buffer;
+  expect(frame.subarray(10, 12).toString("hex")).toBe("8439"); // cmd 0x3984 LE
+  expect(result).toEqual({ ok: true });
+});
+
+test("obsbot_preset_delete returns a structured failure if the slot is still occupied after delete", async () => {
+  const transport = makeFakeTransport();
+  // List/entry reads never change -> slot stays occupied on both reads.
+  transport.xuGetRaw = vi.fn(async (selector: number, _length: number) =>
+    selector === 12 ? Buffer.from("0100", "hex") : PRESET_ENTRY_1,
+  );
+  transport.xuRaw = vi.fn(async (_selector: number, _data: Buffer) => {});
+  const tools = createTools(async () => transport, makeFakeMgr());
+  const tool = findTool(tools, "obsbot_preset_delete");
+
+  const result = await tool.handler({ slot: 1 });
+
+  expect(result).toEqual({ ok: false, error: "verification failed", expected: "empty", actual: "occupied" });
+});

@@ -42,6 +42,10 @@ import {
   decodePresetEntry,
   assemblePresetSlots,
   encodePresetAdd,
+  encodePresetUpdate,
+  encodePresetRecall,
+  encodePresetDelete,
+  encodePresetSetName,
   encodeBootPose,
   encodeBootFlags,
 } from "../codec/preset.js";
@@ -150,6 +154,23 @@ const presetSaveSchema = z.object({
   slot: num().pipe(z.union([z.literal(1), z.literal(2), z.literal(3)])),
   asInitialState: bool().default(false),
 });
+const presetSlotSchema = z.object({
+  slot: num().pipe(z.union([z.literal(1), z.literal(2), z.literal(3)])),
+});
+const presetRecallSchema = presetSlotSchema;
+const presetUpdateSchema = z.object({
+  slot: num().pipe(z.union([z.literal(1), z.literal(2), z.literal(3)])),
+  asInitialState: bool().default(false),
+});
+const presetRenameSchema = z.object({
+  slot: num().pipe(z.union([z.literal(1), z.literal(2), z.literal(3)])),
+  name: z.string(),
+});
+const presetDeleteSchema = presetSlotSchema;
+// Rename frame payload is u32le(slot-1) [4 bytes] + ASCII name, inside a fixed 60-byte
+// frame whose payload region starts at offset 16 (see buildFrame). Max payload is
+// 60-16=44 bytes, so the name must fit in 44-4=40 bytes.
+const PRESET_NAME_MAX = 40;
 const snapshotSchema = z.object({
   maxDim: num().pipe(z.number().min(256).max(1920)).default(1024),
   quality: num().pipe(z.number().min(1).max(100)).default(80),
@@ -572,6 +593,126 @@ export function createTools(
             return { ok: false, error: "verification failed", expected: "occupied", actual: "empty" };
           }
           return { ok: true, slot: after[slot - 1] };
+        } catch (e) {
+          return { ok: false, error: (e as Error).message };
+        }
+      },
+    },
+    {
+      name: "obsbot_preset_recall",
+      description:
+        "Recall preset slot 1|2|3, driving the gimbal to that slot's saved pose. The slot " +
+        "must be occupied. The gimbal may still be moving when this returns — verification " +
+        "only confirms the slot is still occupied, not that the pose has arrived.",
+      schema: presetRecallSchema,
+      handler: async (args: unknown) => {
+        const { slot } = presetRecallSchema.parse(args);
+        try {
+          const t = await getTransport();
+          const before = await getPresetSlots(t);
+          if (!before[slot - 1].occupied) {
+            return { ok: false, error: `slot ${slot} is empty; save first` };
+          }
+          await t.sendVendor(encodePresetRecall(t.nextSeq(), slot));
+          const after = await getPresetSlots(t);
+          if (!after[slot - 1].occupied) {
+            return { ok: false, error: "verification failed", expected: "occupied", actual: "empty" };
+          }
+          return { ok: true, slot: after[slot - 1] };
+        } catch (e) {
+          return { ok: false, error: (e as Error).message };
+        }
+      },
+    },
+    {
+      name: "obsbot_preset_update",
+      description:
+        "Overwrite preset slot 1|2|3 with the gimbal's current live pose (yaw/pitch via the " +
+        "standard UVC Pan/Tilt controls). The slot must already be occupied (save first to " +
+        "create it). With asInitialState:true, also marks this slot's pose as the pose the " +
+        "gimbal strikes on power-up. Verifies by re-reading the slot list after writing.",
+      schema: presetUpdateSchema,
+      handler: async (args: unknown) => {
+        const { slot, asInitialState } = presetUpdateSchema.parse(args);
+        try {
+          const t = await getTransport();
+          const before = await getPresetSlots(t);
+          if (!before[slot - 1].occupied) {
+            return { ok: false, error: `slot ${slot} is empty; save first` };
+          }
+          // Mirror obsbot_preset_save's read path exactly: UVC pan is degrees, same sign as
+          // our yaw; UVC tilt is degrees but positive = up, so negate to match our +pitch =
+          // down convention.
+          const yaw = (await t.camCtrlGet(CAMERA_CONTROL_PAN)).value;
+          const pitch = -(await t.camCtrlGet(CAMERA_CONTROL_TILT)).value;
+          const pose: PresetPose = { pan: yaw, tilt: pitch, roll: 0, zoom: 1 };
+          await t.sendVendor(encodePresetUpdate(t.nextSeq(), slot, pose));
+          if (asInitialState) {
+            await t.sendVendor(encodeBootPose(t.nextSeq(), slot, pose));
+            await t.sendVendor(encodeBootFlags(t.nextSeq()));
+          }
+          const after = await getPresetSlots(t);
+          if (!after[slot - 1].occupied) {
+            return { ok: false, error: "verification failed", expected: "occupied", actual: "empty" };
+          }
+          return { ok: true, slot: after[slot - 1] };
+        } catch (e) {
+          return { ok: false, error: (e as Error).message };
+        }
+      },
+    },
+    {
+      name: "obsbot_preset_rename",
+      description:
+        `Rename preset slot 1|2|3. The slot must already be occupied. Names longer than ` +
+        `${PRESET_NAME_MAX} bytes are truncated to fit the wire frame. Verifies by re-reading ` +
+        "the slot list after writing.",
+      schema: presetRenameSchema,
+      handler: async (args: unknown) => {
+        const { slot, name } = presetRenameSchema.parse(args);
+        try {
+          const t = await getTransport();
+          const before = await getPresetSlots(t);
+          if (!before[slot - 1].occupied) {
+            return { ok: false, error: `slot ${slot} is empty; save first` };
+          }
+          const clean = name.slice(0, PRESET_NAME_MAX);
+          // The read path (decodePresetEntry) base64-decodes the stored name, but the
+          // captured OBSBOT Center rename frame carried raw ASCII ("Preset1", "3reset2A"),
+          // so the write side sends raw ASCII here too — per the capture. Whether the
+          // device actually expects ASCII or base64 on the WRITE side is NOT yet
+          // hardware-confirmed; flagged for the hardware verification task.
+          await t.sendVendor(encodePresetSetName(t.nextSeq(), slot, clean));
+          const after = await getPresetSlots(t);
+          if (after[slot - 1].name !== clean) {
+            return { ok: false, error: "verification failed", expected: clean, actual: after[slot - 1].name };
+          }
+          return { ok: true, slot: after[slot - 1] };
+        } catch (e) {
+          return { ok: false, error: (e as Error).message };
+        }
+      },
+    },
+    {
+      name: "obsbot_preset_delete",
+      description:
+        "Delete preset slot 1|2|3. The slot must be occupied. Verifies by re-reading the " +
+        "slot list after writing.",
+      schema: presetDeleteSchema,
+      handler: async (args: unknown) => {
+        const { slot } = presetDeleteSchema.parse(args);
+        try {
+          const t = await getTransport();
+          const before = await getPresetSlots(t);
+          if (!before[slot - 1].occupied) {
+            return { ok: false, error: `slot ${slot} is already empty` };
+          }
+          await t.sendVendor(encodePresetDelete(t.nextSeq(), slot));
+          const after = await getPresetSlots(t);
+          if (after[slot - 1].occupied) {
+            return { ok: false, error: "verification failed", expected: "empty", actual: "occupied" };
+          }
+          return { ok: true };
         } catch (e) {
           return { ok: false, error: (e as Error).message };
         }
