@@ -565,7 +565,7 @@ export function createTools(
           await t.sendVendor(encodePresetAdd(t.nextSeq(), slot, pose));
           if (asInitialState) {
             await t.sendVendor(encodeBootPose(t.nextSeq(), slot, pose));
-            await t.sendVendor(encodeBootFlags(t.nextSeq(), slot));
+            await t.sendVendor(encodeBootFlags(t.nextSeq()));
           }
           const after = await getPresetSlots(t);
           if (!after[slot - 1].occupied) {

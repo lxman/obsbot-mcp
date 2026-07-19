@@ -27,14 +27,30 @@ export const encodePresetSetName = (seq: number, slot: number, name: string): Bu
   buildFrame({ seq, cmd: CMD.SET_NAME, receiver: RECEIVER,
     payload: concat(idx(slot), Buffer.from(name, "ascii")) });
 
-// Boot-pose sequence: mirrors ADD's slot-index + pose payload shape, but tells the
-// device which slot's pose to strike on power-up.
+// Boot-pose sequence: slot index + pose, but — unlike ADD/UPDATE — the trailing
+// float is a plain 0.0, not the -1000 sentinel. Confirmed against a captured
+// OBSBOT Center "As Initial State" wire frame (cmd 0x3ec4); do not fold this
+// back into poseBytes(), which ADD/UPDATE's golden tests pin to -1000.
 export const encodeBootPose = (seq: number, slot: number, pose: PresetPose): Buffer =>
-  buildFrame({ seq, cmd: CMD.BOOT_POSE, receiver: RECEIVER, payload: concat(idx(slot), poseBytes(pose)) });
+  buildFrame({
+    seq,
+    cmd: CMD.BOOT_POSE,
+    receiver: RECEIVER,
+    payload: concat(idx(slot), f32le(pose.pan), f32le(pose.tilt), f32le(pose.roll), f32le(pose.zoom), f32le(0)),
+  });
 
-// Marks `slot` as the initial-state slot (sent after encodeBootPose to flip the flag).
-export const encodeBootFlags = (seq: number, slot: number): Buffer =>
-  buildFrame({ seq, cmd: CMD.BOOT_FLAGS, receiver: RECEIVER, payload: idx(slot) });
+// Captured verbatim from the single observed As-Initial-State wire sequence (cmd
+// 0x3e44). Carries no slot index of its own — the target slot is conveyed by the
+// preceding encodeBootPose frame. Internal structure of these 40 bytes is NOT
+// decoded (no per-field meaning known) and this constant has NOT been
+// hardware-replayed independently — only observed as part of the captured sequence.
+const BOOT_FLAGS_BLOCK = Buffer.from(
+  "feffffffffffffff80ffffffffffffff00000000ffffffff00000000000000000000000000000000",
+  "hex",
+);
+
+export const encodeBootFlags = (seq: number): Buffer =>
+  buildFrame({ seq, cmd: CMD.BOOT_FLAGS, receiver: RECEIVER, payload: BOOT_FLAGS_BLOCK });
 
 // NOTE: the vendor GET encoders (LIST 0x3b44 / VALUE 0x3a44 / NAME 0x3b04) were
 // deleted 2026-07-19. They built valid frames, but the device answers them on a
