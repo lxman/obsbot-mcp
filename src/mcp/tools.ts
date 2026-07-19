@@ -47,8 +47,9 @@ import {
   encodePresetRecall,
   encodePresetDelete,
   encodePresetSetName,
-  encodeBootPose,
-  encodeBootFlags,
+  encodeGimBootPosSet,
+  encodeGimBootPosReset,
+  encodeGimBootPosTrigger,
 } from "../codec/preset.js";
 import type { PresetSlot, PresetPose } from "../codec/preset.js";
 import { ObsbotTransport, CameraBusyError } from "../transport/transport.js";
@@ -154,7 +155,6 @@ const gimbalPositionSchema = z.object({});
 const presetListSchema = z.object({});
 const presetSaveSchema = z.object({
   slot: num().pipe(z.union([z.literal(1), z.literal(2), z.literal(3)])),
-  asInitialState: bool().default(false),
 });
 const presetSlotSchema = z.object({
   slot: num().pipe(z.union([z.literal(1), z.literal(2), z.literal(3)])),
@@ -162,13 +162,13 @@ const presetSlotSchema = z.object({
 const presetRecallSchema = presetSlotSchema;
 const presetUpdateSchema = z.object({
   slot: num().pipe(z.union([z.literal(1), z.literal(2), z.literal(3)])),
-  asInitialState: bool().default(false),
 });
 const presetRenameSchema = z.object({
   slot: num().pipe(z.union([z.literal(1), z.literal(2), z.literal(3)])),
   name: z.string(),
 });
 const presetDeleteSchema = presetSlotSchema;
+const bootPoseSchema = z.object({ action: z.enum(["set", "clear", "goto"]) });
 // Rename frame payload is u32le(slot-1) [4 bytes] + ASCII name, inside a fixed 60-byte
 // frame whose payload region starts at offset 16 (see buildFrame). Max payload is
 // 60-16=44 bytes, so the name must fit in 44-4=40 bytes.
@@ -709,12 +709,11 @@ export function createTools(
       description:
         "Save the gimbal's current live pose (yaw/pitch, via the standard UVC Pan/Tilt " +
         "controls) into preset slot 1|2|3. Slots are create-once on this device — there is " +
-        "no overwrite, so an occupied slot is rejected (delete it first). With " +
-        "asInitialState:true, also marks this slot's pose as the pose the gimbal strikes " +
-        "on power-up. Verifies by re-reading the slot list after writing.",
+        "no overwrite, so an occupied slot is rejected (delete it first). Verifies by " +
+        "re-reading the slot list after writing. For the power-up pose see obsbot_boot_pose.",
       schema: presetSaveSchema,
       handler: async (args: unknown) => {
-        const { slot, asInitialState } = presetSaveSchema.parse(args);
+        const { slot } = presetSaveSchema.parse(args);
         const ready = await gate();
         if (!ready.ok) return ready;
         const t = ready.transport;
@@ -739,10 +738,6 @@ export function createTools(
         // M1: the ADD above has committed. From here on, a thrown error must say so —
         // otherwise a retry hits "slot occupied" with no clue the save actually landed.
         try {
-          if (asInitialState) {
-            await t.sendVendor(encodeBootPose(t.nextSeq(), slot, pose));
-            await t.sendVendor(encodeBootFlags(t.nextSeq()));
-          }
           const after = await readPresetSlots(t, gate, presetRead);
           if (!after[slot - 1].occupied) {
             return { ok: false, error: "verification failed", expected: "occupied", actual: "empty" };
@@ -751,9 +746,7 @@ export function createTools(
         } catch (e) {
           return {
             ok: false,
-            error: asInitialState
-              ? `preset saved to slot ${slot} but boot-pose write failed: ${msg(e)}`
-              : `preset saved to slot ${slot} but verification failed: ${msg(e)}`,
+            error: `preset saved to slot ${slot} but verification failed: ${msg(e)}`,
           };
         }
       },
@@ -791,11 +784,11 @@ export function createTools(
       description:
         "Overwrite preset slot 1|2|3 with the gimbal's current live pose (yaw/pitch via the " +
         "standard UVC Pan/Tilt controls). The slot must already be occupied (save first to " +
-        "create it). With asInitialState:true, also marks this slot's pose as the pose the " +
-        "gimbal strikes on power-up. Verifies by re-reading the slot list after writing.",
+        "create it). Verifies by re-reading the slot list after writing. For the power-up " +
+        "pose see obsbot_boot_pose.",
       schema: presetUpdateSchema,
       handler: async (args: unknown) => {
-        const { slot, asInitialState } = presetUpdateSchema.parse(args);
+        const { slot } = presetUpdateSchema.parse(args);
         const ready = await gate();
         if (!ready.ok) return ready;
         const t = ready.transport;
@@ -824,10 +817,6 @@ export function createTools(
         }
         // M1: the UPDATE above has committed. From here on, a thrown error must say so.
         try {
-          if (asInitialState) {
-            await t.sendVendor(encodeBootPose(t.nextSeq(), slot, pose));
-            await t.sendVendor(encodeBootFlags(t.nextSeq()));
-          }
           const after = await readPresetSlots(t, gate, presetRead);
           if (!after[slot - 1].occupied) {
             return { ok: false, error: "verification failed", expected: "occupied", actual: "empty" };
@@ -841,9 +830,7 @@ export function createTools(
         } catch (e) {
           return {
             ok: false,
-            error: asInitialState
-              ? `preset updated in slot ${slot} but boot-pose write failed: ${msg(e)}`
-              : `preset updated in slot ${slot} but verification failed: ${msg(e)}`,
+            error: `preset updated in slot ${slot} but verification failed: ${msg(e)}`,
           };
         }
       },
@@ -879,6 +866,51 @@ export function createTools(
           return { ok: true, slot: after[slot - 1], ...(ready.reconnected && { reconnected: true }) };
         } catch (e) {
           return { ok: false, error: msg(e) };
+        }
+      },
+    },
+    {
+      name: "obsbot_boot_pose",
+      description:
+        "Boot pose — the position the gimbal strikes on power-up. action 'set' stores the " +
+        "gimbal's current live pose; 'clear' restores the factory default; 'goto' drives the " +
+        "gimbal to the stored boot pose right now. NOT VERIFIED: this device answers reads on " +
+        "a reply path this transport cannot read, so 'set' cannot be confirmed by readback — " +
+        "use 'goto' and watch where the gimbal actually lands. 'clear' undoes 'set'.",
+      schema: bootPoseSchema,
+      handler: async (args: unknown) => {
+        const { action } = bootPoseSchema.parse(args);
+        const ready = await gate();
+        if (!ready.ok) return ready;
+        const t = ready.transport;
+        try {
+          if (action === "clear") {
+            await t.sendVendor(encodeGimBootPosReset(t.nextSeq()));
+            return { ok: true, action, ...(ready.reconnected && { reconnected: true }) };
+          }
+          if (action === "goto") {
+            await t.sendVendor(encodeGimBootPosTrigger(t.nextSeq()));
+            return { ok: true, action, ...(ready.reconnected && { reconnected: true }) };
+          }
+          // Same live-pose read as obsbot_preset_save: UVC pan is degrees with our
+          // yaw's sign; UVC tilt is positive = up, so negate for our +pitch = down.
+          const yaw = (await t.camCtrlGet(CAMERA_CONTROL_PAN)).value;
+          const pitch = -(await t.camCtrlGet(CAMERA_CONTROL_TILT)).value;
+          // Zoom is hardcoded to 1: ObsbotTransport exposes no zoom getter, so the
+          // live ratio cannot be read back here rather than guessed.
+          const bootPose: PresetPose = { pan: yaw, tilt: pitch, roll: 0, zoom: 1 };
+          await t.sendVendor(encodeGimBootPosSet(t.nextSeq(), bootPose));
+          return {
+            ok: true,
+            action,
+            bootPose,
+            // Stated explicitly so the caller never reads success as confirmation:
+            // the write left the host, nothing read it back. Verify with 'goto'.
+            verified: false,
+            ...(ready.reconnected && { reconnected: true }),
+          };
+        } catch (e) {
+          return { ok: false, error: `boot pose ${action} failed: ${msg(e)}` };
         }
       },
     },

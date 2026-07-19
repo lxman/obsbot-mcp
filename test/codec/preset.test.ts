@@ -3,9 +3,11 @@ import { bufToHex, hexToBuf } from "../../src/codec/encoding.js";
 import {
   encodePresetAdd, encodePresetRecall, encodePresetDelete, encodePresetSetName,
   encodeBootPose, encodeBootFlags,
+  encodeGimBootPosSet, encodeGimBootPosReset, encodeGimBootPosTrigger,
   decodePresetList, decodePresetEntry, assemblePresetSlots,
   implausiblePresetListReason,
 } from "../../src/codec/preset.js";
+import { OP_BY_NAME } from "../../src/codec/opcodes.js";
 
 const cmdOf = (h: string) => h.slice(20, 24);        // bytes 10-11
 const len2Of = (h: string) => parseInt(h.slice(26, 28) + h.slice(24, 26), 16); // bytes 12-13 LE
@@ -159,4 +161,59 @@ test("assemblePresetSlots returns 3 slots, empties marked", () => {
   expect(slots[0]).toMatchObject({ slot: 1, occupied: true, name: "Preset1" });
   expect(slots[1]).toMatchObject({ slot: 2, occupied: false, name: null, pose: null });
   expect(slots[2]).toMatchObject({ slot: 3, occupied: false });
+});
+
+// --- Boot pose: the purpose-built AI_SET/RST/TRG_GIM_BOOT_POS family ----------
+// Recovered from the in-repo Ghidra extraction (tools/opcodes/opcodes.json) and
+// cross-validated against libdev.dll's own marshalling:
+//   aiSetGimbalBootPosR internal cmdId 0x07 == AI_SET_GIM_BOOT_POS  (0x3844)
+//   aiRstGimbalBootPosR internal cmdId 0x09 == AI_RST_GIM_BOOT_POS  (0x38C4)
+//   presets_flag=true alt id 0x43           == AI_SET_BOOT_PRESET_UPDATE_ONLY (0x3EC4)
+// The last of those is what our old "encodeBootPose" actually sent: it BINDS AN
+// EXISTING PRESET as the boot preset, which is why OBSBOT Center's sequence needs
+// a preset-identifying step. This family is the direct, reversible alternative.
+test("encodeGimBootPosSet: cmd 0x3844 (AI_SET_GIM_BOOT_POS), yaw/pitch/roll/zoom", () => {
+  const f = bufToHex(encodeGimBootPosSet(1, { pan: 30, tilt: -12, roll: 0, zoom: 1 }));
+  expect(cmdOf(f)).toBe("4438"); // 0x3844 LE
+  // Field ORDER is yaw, pitch, roll, zoom — read directly out of libdev's movss
+  // stores (buf+0x05=yaw from [rbx+0xC], +0x09=pitch from [rbx+8], +0x0D=roll
+  // from [rbx+4]). PresetPosInfo DECLARES roll,pitch,yaw — the vendor reorders on
+  // the way out, so the struct order is host-side only.
+  const p = payloadOf(f, 20);
+  expect(p.slice(0, 8)).toBe("00000000");   // id — boot pose is global, not slotted
+  expect(p.slice(8, 16)).toBe("0000f041");  // yaw   = 30.0
+  expect(p.slice(16, 24)).toBe("000040c1"); // pitch = -12.0
+  expect(p.slice(24, 32)).toBe("00000000"); // roll  = 0.0
+  expect(p.slice(32, 40)).toBe("0000803f"); // zoom  = 1.0
+});
+
+test("encodeGimBootPosReset: cmd 0x38c4 (AI_RST_GIM_BOOT_POS), no payload", () => {
+  const f = bufToHex(encodeGimBootPosReset(1));
+  expect(cmdOf(f)).toBe("c438"); // 0x38C4 LE
+  expect(len2Of(f)).toBe(0);     // aiRstGimbalBootPosR takes no arguments
+});
+
+test("encodeGimBootPosTrigger: cmd 0x3904 (AI_TRG_GIM_BOOT_POS)", () => {
+  const f = bufToHex(encodeGimBootPosTrigger(1));
+  expect(cmdOf(f)).toBe("0439"); // 0x3904 LE
+});
+
+// The opcode numbers must come from the generated table, not a hand-kept copy.
+// preset.ts previously hardcoded `BOOT_POSE: 0x3ec4` / `BOOT_FLAGS: 0x3e44` under
+// invented names; those names hid the real semantics (a preset binding and an
+// "actions" record) and shaped a whole session's worth of wrong reasoning.
+test("preset opcodes are sourced from the generated table under their real names", () => {
+  const expected: Record<string, number> = {
+    AI_SET_GIMBAL_PRESET_ADD: 0x3944,
+    AI_SET_GIMBAL_PRESET_DELETE: 0x3984,
+    AI_SET_GIMBAL_PRESET_TRIG: 0x39c4,
+    AI_SET_GIMBAL_PRESET_ID_NAME: 0x3a84,
+    AI_SET_PRESET_UPDATE_ONLY: 0x3e04,
+    AI_SET_GIM_BOOT_POS: 0x3844,
+    AI_RST_GIM_BOOT_POS: 0x38c4,
+    AI_TRG_GIM_BOOT_POS: 0x3904,
+  };
+  for (const [name, wire] of Object.entries(expected)) {
+    expect(OP_BY_NAME.get(name)?.wireCmd, name).toBe(wire);
+  }
 });

@@ -947,26 +947,6 @@ test("obsbot_preset_save on an empty slot sends the ADD frame with the live pose
   expect(slot).toMatchObject({ slot: 1, occupied: true, name: "Preset1" });
 });
 
-test("obsbot_preset_save with asInitialState also sends boot-pose and boot-flags frames", async () => {
-  const transport = statefulPresetTransport(emptyPresetListBlock(), Buffer.from("0100", "hex"));
-  transport.camCtrlGet = vi.fn(async (p: number) =>
-    p === 0 ? { value: 21, flags: 2 } : { value: 0, flags: 2 },
-  );
-  const tools = createTools(async () => transport, makeFakeMgr());
-  const tool = findTool(tools, "obsbot_preset_save");
-
-  const result = await tool.handler({ slot: 1, asInitialState: true });
-
-  expect(transport.sendVendor).toHaveBeenCalledTimes(3);
-  const [addFrame, bootPoseFrame, bootFlagsFrame] = transport.sendVendor.mock.calls.map(
-    (c) => c[0] as Buffer,
-  );
-  expect(addFrame.subarray(10, 12).toString("hex")).toBe("4439"); // 0x3944
-  expect(bootPoseFrame.subarray(10, 12).toString("hex")).toBe("c43e"); // 0x3ec4
-  expect(bootFlagsFrame.subarray(10, 12).toString("hex")).toBe("443e"); // 0x3e44
-  expect(result).toMatchObject({ ok: true });
-});
-
 // Helper to build a selector-13 entry buffer matching decodePresetEntry's layout,
 // using the real base64 encoding at runtime (avoids hand-computed hex, which is
 // error-prone). slotIdx is 0-based (slot 1 -> 0).
@@ -1052,30 +1032,6 @@ test("obsbot_preset_update sends UPDATE with the live pose for an occupied slot 
   expect(frame.subarray(10, 12).toString("hex")).toBe("043e"); // cmd 0x3e04 LE
   expect(frame.readFloatLE(20)).toBeCloseTo(33); // pan slotted after idx(4) + pan f32
   expect(frame.readFloatLE(24)).toBeCloseTo(-5); // pitch = -tilt
-  expect(result).toMatchObject({ ok: true });
-});
-
-test("obsbot_preset_update with asInitialState also sends boot-pose and boot-flags frames", async () => {
-  const transport = makeFakeTransport();
-  transport.xuGetRaw = vi.fn(async (selector: number, _length: number) =>
-    selector === 12 ? Buffer.from("0100", "hex") : PRESET_ENTRY_1,
-  );
-  transport.xuRaw = vi.fn(async (_selector: number, _data: Buffer) => {});
-  transport.camCtrlGet = vi.fn(async (p: number) =>
-    p === 0 ? { value: 33, flags: 2 } : { value: 5, flags: 2 },
-  );
-  const tools = createTools(async () => transport, makeFakeMgr());
-  const tool = findTool(tools, "obsbot_preset_update");
-
-  const result = await tool.handler({ slot: 1, asInitialState: true });
-
-  expect(transport.sendVendor).toHaveBeenCalledTimes(3);
-  const [updateFrame, bootPoseFrame, bootFlagsFrame] = transport.sendVendor.mock.calls.map(
-    (c) => c[0] as Buffer,
-  );
-  expect(updateFrame.subarray(10, 12).toString("hex")).toBe("043e"); // 0x3e04
-  expect(bootPoseFrame.subarray(10, 12).toString("hex")).toBe("c43e"); // 0x3ec4
-  expect(bootFlagsFrame.subarray(10, 12).toString("hex")).toBe("443e"); // 0x3e44
   expect(result).toMatchObject({ ok: true });
 });
 
@@ -1223,51 +1179,6 @@ for (const name of Object.keys(PRESET_TOOL_ARGS)) {
 }
 
 // --- M1: a failure after the ADD/UPDATE write has already committed must say so ---
-
-test("M1: obsbot_preset_save reports a distinguishing error when boot-pose fails after ADD already committed", async () => {
-  const transport = statefulPresetTransport(emptyPresetListBlock(), Buffer.from("0100", "hex"));
-  // ADD succeeds (and moves the device to occupied); the boot-pose send throws.
-  // Wraps rather than replaces sendVendor, so the ADD still transitions the fake's
-  // state — replacing it outright would leave the device permanently "empty" and the
-  // failure under test could never be reached.
-  const commit = transport.sendVendor;
-  transport.sendVendor = vi.fn(async (frame: Buffer) => {
-    await commit(frame);
-    const cmd = frame.subarray(10, 12).toString("hex");
-    if (cmd === "c43e") throw new Error("boot-pose write timed out"); // 0x3ec4
-  });
-  const tools = createTools(async () => transport, makeFakeMgr());
-  const tool = findTool(tools, "obsbot_preset_save");
-
-  const result = await tool.handler({ slot: 1, asInitialState: true });
-
-  expect(result).toMatchObject({ ok: false });
-  const error = (result as { error: string }).error;
-  // Must say the save landed, not just "failed" — a bare failure would make the
-  // caller retry ADD into an now-occupied slot and get a confusing rejection.
-  expect(error).toMatch(/saved/i);
-  expect(error).toMatch(/boot-pose/i);
-});
-
-test("M1: obsbot_preset_update reports a distinguishing error when boot-pose fails after UPDATE already committed", async () => {
-  const transport = makeFakeTransport();
-  transport.xuGetRaw = vi.fn(async (selector: number) =>
-    selector === 12 ? Buffer.from("0100", "hex") : PRESET_ENTRY_1,
-  );
-  transport.sendVendor = vi.fn(async (frame: Buffer) => {
-    const cmd = frame.subarray(10, 12).toString("hex");
-    if (cmd === "c43e") throw new Error("boot-pose write timed out");
-  });
-  const tools = createTools(async () => transport, makeFakeMgr());
-  const tool = findTool(tools, "obsbot_preset_update");
-
-  const result = await tool.handler({ slot: 1, asInitialState: true });
-
-  expect(result).toMatchObject({ ok: false });
-  const error = (result as { error: string }).error;
-  expect(error).toMatch(/updated/i);
-  expect(error).toMatch(/boot-pose/i);
-});
 
 test("M1: obsbot_preset_save reports a plain save failure when the ADD write itself throws (nothing committed)", async () => {
   const transport = makeFakeTransport();
@@ -1516,4 +1427,76 @@ test("retries are bounded — a persistently bad read fails loudly instead of sp
   expect(result).toMatchObject({ ok: false });
   expect(listReads).toBe(3); // exactly `attempts`, no runaway
   expect(transport.xuRaw).not.toHaveBeenCalled();
+});
+
+// --- obsbot_boot_pose: the decoded, reversible boot-pose family ---------------
+// Replaces the As-Initial-State replay. Every command is decoded, and `clear`
+// (AI_RST_GIM_BOOT_POS) restores the factory default, so `set` is undoable.
+// Our transport cannot read vendor GET replies, so there is NO readback: the
+// tool must not claim verification it did not perform. `goto` is the physical
+// check — fire it and watch where the gimbal actually lands.
+
+test("obsbot_boot_pose set sends AI_SET_GIM_BOOT_POS with the live gimbal pose", async () => {
+  const transport = makeFakeTransport();
+  // pan (prop 0) = 30 -> yaw 30; tilt (prop 1) = 12 -> pitch -12 (negated)
+  transport.camCtrlGet = vi.fn(async (p: number) =>
+    p === 0 ? { value: 30, flags: 2 } : { value: 12, flags: 2 },
+  );
+  const tools = createTools(async () => transport, makeFakeMgr());
+  const tool = findTool(tools, "obsbot_boot_pose");
+
+  const result = await tool.handler({ action: "set" });
+
+  expect(result).toMatchObject({ ok: true, bootPose: { pan: 30, tilt: -12, roll: 0, zoom: 1 } });
+  const frame = transport.sendVendor.mock.calls[0][0] as Buffer;
+  expect(frame.subarray(10, 12).toString("hex")).toBe("4438"); // 0x3844 LE
+  expect(frame.readFloatLE(20)).toBeCloseTo(30);  // yaw after u32 id
+  expect(frame.readFloatLE(24)).toBeCloseTo(-12); // pitch
+});
+
+test("obsbot_boot_pose clear sends AI_RST_GIM_BOOT_POS", async () => {
+  const transport = makeFakeTransport();
+  const tools = createTools(async () => transport, makeFakeMgr());
+  const tool = findTool(tools, "obsbot_boot_pose");
+
+  const result = await tool.handler({ action: "clear" });
+
+  expect(result).toMatchObject({ ok: true });
+  const frame = transport.sendVendor.mock.calls[0][0] as Buffer;
+  expect(frame.subarray(10, 12).toString("hex")).toBe("c438"); // 0x38C4 LE
+});
+
+test("obsbot_boot_pose goto sends AI_TRG_GIM_BOOT_POS", async () => {
+  const transport = makeFakeTransport();
+  const tools = createTools(async () => transport, makeFakeMgr());
+  const tool = findTool(tools, "obsbot_boot_pose");
+
+  await tool.handler({ action: "goto" });
+
+  const frame = transport.sendVendor.mock.calls[0][0] as Buffer;
+  expect(frame.subarray(10, 12).toString("hex")).toBe("0439"); // 0x3904 LE
+});
+
+test("obsbot_boot_pose does not claim a verification it cannot perform", async () => {
+  const transport = makeFakeTransport();
+  const tools = createTools(async () => transport, makeFakeMgr());
+  const tool = findTool(tools, "obsbot_boot_pose");
+
+  const result = await tool.handler({ action: "set" });
+
+  // No vendor GET-reply readback exists on this transport, so the result must say
+  // so rather than implying the stored value was confirmed.
+  expect(result).toMatchObject({ verified: false });
+});
+
+test("obsbot_boot_pose refuses to act when the readiness gate fails", async () => {
+  const transport = makeFakeTransport();
+  transport.recvStatus = vi.fn(async () => { throw new Error("camera not reachable"); });
+  const tools = createTools(async () => transport, makeFakeMgr());
+  const tool = findTool(tools, "obsbot_boot_pose");
+
+  const result = await tool.handler({ action: "set" });
+
+  expect(result).toMatchObject({ ok: false });
+  expect(transport.sendVendor).not.toHaveBeenCalled();
 });
