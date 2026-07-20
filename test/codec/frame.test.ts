@@ -1,6 +1,7 @@
 import { expect, test } from "vitest";
 import { buildFrame, parseFrame, FrameParseError } from "../../src/codec/frame.js";
 import { bufToHex, hexToBuf } from "../../src/codec/encoding.js";
+import { crc16usb } from "../../src/codec/crc.js";
 
 const pad60 = (h: string) => (h + "0".repeat(120)).slice(0, 120);
 
@@ -57,4 +58,15 @@ test("parseFrame rejects a corrupted payload CRC", () => {
 
 test("parseFrame rejects a truncated buffer", () => {
   expect(() => parseFrame(Buffer.from([0xaa, 0x25, 0x00]))).toThrow(FrameParseError);
+});
+
+test("buildFrame flags defaults to 0x25", () => {
+  expect(buildFrame({ seq: 1, cmd: 0x18c8, receiver: 0x0d, payload: Buffer.alloc(0) })[1]).toBe(0x25);
+});
+test("buildFrame honours an explicit flags byte and recomputes the header CRC", () => {
+  const f = buildFrame({ seq: 1, cmd: 0x18c8, receiver: 0x0d, payload: Buffer.alloc(0), flags: 0x01 });
+  expect(f[1]).toBe(0x01);
+  // header CRC over [0,12) with bytes 6-7 zeroed must be self-consistent
+  const hdr = Buffer.from(f.subarray(0, 12)); hdr[6] = 0; hdr[7] = 0;
+  expect(f.readUInt16LE(6)).toBe(crc16usb(hdr));
 });
