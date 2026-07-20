@@ -60,23 +60,49 @@ With the installed binary, use `"command": "obsbot-mcp"` and `"args": ["--debug"
 
 ## Tools
 
+34 tools total. All names below are current as of v0.4.0 — **every tool was renamed in this
+release and there is no backward-compatible alias**; see [CHANGELOG.md](./CHANGELOG.md) for the
+full old→new mapping if you're updating a caller.
+
+### The `camera` selector
+
+Every camera-addressing tool accepts an optional `camera` parameter: the target camera's serial
+number. Omit it with a single camera attached and nothing changes — this matches the server's
+pre-v0.4.0, single-camera behaviour exactly. With more than one camera attached, a call that omits
+`camera` fails with an error naming every attached serial, so you always know what to pass next.
+
+**Exempt** (no `camera` parameter, ever): `obsbot_devices` (enumerates the whole fleet),
+`obsbot_capture_stop` / `obsbot_capture_list` (address a `sessionId`, not a device), and
+`obsbot_debug_probe` (operates on the current diagnostics transport). Two more tools honor it only
+partially — see **Capture** below.
+
+Multi-camera support is new in v0.4.0. It's exercised by the unit test suite against fakes; running
+two physical Tiny 2s at once has not yet been hardware-verified (see
+[Known limitations](#known-limitations)).
+
+**Known gap:** `obsbot_devices` lists each connected device's `name`, `path`, and — where available
+— its USB `locationId`, but as of v0.4.0 it does **not** read or report each camera's serial (doing
+so requires briefly opening the device, which `obsbot_devices` does not do). With several cameras
+attached, the practical way to learn their serials today is to call any camera-addressing tool
+without `camera`: the resulting error lists every attached serial.
+
 ### Device & power
 
 | Tool | Parameters | Description |
 |------|------------|-------------|
 | `obsbot_devices` | — | List connected OBSBOT-compatible video capture devices. |
-| `obsbot_wake` | — | Wake the camera/gimbal (sends `"run"`). |
-| `obsbot_sleep` | — | Sleep the camera/gimbal (sends `"sleep"`). |
-| `obsbot_status` | — | Read the live status block: `{ awake, hdr, aiMode, trackSpeed }`. Under `--debug`, also returns the raw 60-byte block as hex. |
+| `obsbot_wake` | `camera`? | Wake the camera/gimbal (sends `"run"`). |
+| `obsbot_sleep` | `camera`? | Sleep the camera/gimbal (sends `"sleep"`). |
+| `obsbot_status` | `camera`? | Read the live status block: `{ awake, hdr, aiMode, trackSpeed }`. Under `--debug`, also returns the raw 60-byte block as hex. |
 
 ### Gimbal (PTZ)
 
 | Tool | Parameters | Description |
 |------|------------|-------------|
-| `obsbot_gimbal_move` | `yaw`, `pitch`, `roll` (degrees, `roll` defaults `0`) | Move the gimbal to an absolute angle. Positive yaw pans to the camera's left, positive pitch tilts down. Yaw clamped to `[-150, 150]`, pitch to `[-90, 90]`. Absolute 1:1 degrees, hardware-verified. |
-| `obsbot_gimbal_move_speed` | `yaw`, `pitch`, `roll` (deg/s, `roll` defaults `0`), `autoStopMs` (default `800`) | Drive the gimbal at a speed, then auto-stop after `autoStopMs` so it can't run away. Same yaw/pitch sign convention as `gimbal_move`. |
-| `obsbot_gimbal_recenter` | — | Recenter the gimbal (return to home position). |
-| `obsbot_gimbal_position` | — | Read the gimbal's current absolute `{ yaw, pitch }` in degrees via standard UVC Pan/Tilt. May lag a move still in progress. |
+| `obsbot_gimbal_move` | `yaw`, `pitch`, `roll` (degrees, `roll` defaults `0`), `camera`? | Move the gimbal to an absolute angle. Positive yaw pans to the camera's left, positive pitch tilts down. Yaw clamped to `[-150, 150]`, pitch to `[-90, 90]`. Absolute 1:1 degrees, hardware-verified. |
+| `obsbot_gimbal_move_speed` | `yaw`, `pitch`, `roll` (deg/s, `roll` defaults `0`), `autoStopMs` (default `800`), `camera`? | Drive the gimbal at a speed, then auto-stop after `autoStopMs` so it can't run away. Same yaw/pitch sign convention as `gimbal_move`. |
+| `obsbot_gimbal_recenter` | `camera`? | Recenter the gimbal (return to home position). |
+| `obsbot_gimbal_position` | `camera`? | Read the gimbal's current absolute `{ yaw, pitch }` in degrees via standard UVC Pan/Tilt. Valid during a move as well as after one. |
 
 ### Gimbal presets
 
@@ -87,57 +113,71 @@ failure if the device didn't land the change.
 
 | Tool | Parameters | Description |
 |------|------------|-------------|
-| `obsbot_preset_list` | — | Read the three preset slots: occupied/empty, name, and pose in degrees. |
-| `obsbot_preset_save` | `slot` (`1`\|`2`\|`3`), `asInitialState` (default `false`) | Save the gimbal's current live pose into an **empty** slot. With `asInitialState:true`, also marks it as the pose the gimbal strikes on power-up. |
-| `obsbot_preset_recall` | `slot` (`1`\|`2`\|`3`) | Recall an **occupied** slot, driving the gimbal to its saved pose. |
-| `obsbot_preset_update` | `slot` (`1`\|`2`\|`3`), `asInitialState` (default `false`) | Overwrite an **occupied** slot with the gimbal's current live pose. With `asInitialState:true`, also marks it as the power-up pose. |
-| `obsbot_preset_rename` | `slot` (`1`\|`2`\|`3`), `name` | Rename an **occupied** slot (names over 40 bytes are truncated). |
-| `obsbot_preset_delete` | `slot` (`1`\|`2`\|`3`) | Delete an **occupied** slot, freeing it for `obsbot_preset_save`. |
+| `obsbot_preset_list` | `camera`? | Read the three preset slots: occupied/empty, name, and pose in degrees. |
+| `obsbot_preset_save` | `slot` (`1`\|`2`\|`3`), `camera`? | Save the gimbal's current live pose into an **empty** slot. |
+| `obsbot_preset_recall` | `slot` (`1`\|`2`\|`3`), `camera`? | Recall an **occupied** slot, driving the gimbal to its saved pose. |
+| `obsbot_preset_update` | `slot` (`1`\|`2`\|`3`), `camera`? | Overwrite an **occupied** slot with the gimbal's current live pose. |
+| `obsbot_preset_rename` | `slot` (`1`\|`2`\|`3`), `name`, `camera`? | Rename an **occupied** slot (names over 40 bytes are truncated). |
+| `obsbot_preset_delete` | `slot` (`1`\|`2`\|`3`), `camera`? | Delete an **occupied** slot, freeing it for `obsbot_preset_save`. |
 
 ### Zoom
 
+Two tools, not one — they ride different transports (standard UVC vs. the vendor command frame)
+and produce different physical zoom at the same commanded `ratio`, so merging them would silently
+change what `ratio` means. Pick by which behaviour you need.
+
 | Tool | Parameters | Description |
 |------|------------|-------------|
-| `obsbot_zoom_uvc` | `ratio` (`1.0`–`2.0`) | Standard UVC zoom: set an absolute zoom ratio, clamped to `[1.0, 2.0]`, snaps to the requested target exactly. |
-| `obsbot_zoom_vendor` | `ratio` (`1.0`–`2.0`), `speed` (default `0`) | Vendor zoom path with adjustable speed: zoom to a ratio at a chosen speed (`0` = device default, `1`–`10` slow→fast, `255` = maximum). Its ratio scale differs from `obsbot_zoom_uvc` and may not land exactly on the requested target. |
+| `obsbot_zoom_uvc` | `ratio` (`1.0`–`2.0`), `camera`? | Standard UVC zoom: set an absolute zoom ratio, clamped to `[1.0, 2.0]`. Snaps to the requested target exactly. |
+| `obsbot_zoom_vendor` | `ratio` (`1.0`–`2.0`), `speed` (default `0`), `camera`? | Vendor zoom path with adjustable speed: zoom to a ratio at a chosen speed (`0` = device default, `1`–`10` slow→fast, `255` = maximum). **Its ratio scale differs from `obsbot_zoom_uvc`'s** and may not land exactly on the requested target — see [Known limitations](#known-limitations). |
 
 ### AI tracking
 
 | Tool | Parameters | Description |
 |------|------------|-------------|
-| `obsbot_ai_track` | `enabled` (bool), `mode` (default `"normal"`) | Enable/disable AI tracking and choose the mode: a human framing (`normal \| upper-body \| close-up \| headless \| lower-body`) or a scene mode (`group \| whiteboard \| desk \| hand`). Polls status and returns `{ verified, matched }` (`matched:false` = no subject tracked yet). |
-| `obsbot_ai_track_speed` | `speed`: `"standard" \| "sport"` | Set the tracking-speed preset (Center's Standard/Sport): `standard` (slower follow) or `sport` (snappier). |
-| `obsbot_focus_face` | `enabled` (bool) | Enable or disable face-priority autofocus. |
+| `obsbot_ai_track` | `enabled` (bool), `mode` (default `"normal"`), `camera`? | Enable/disable AI tracking and choose the mode: a human framing (`normal \| upper-body \| close-up \| headless \| lower-body`) or a scene mode (`group \| whiteboard \| desk \| hand`). Polls status and returns `{ verified, matched }` (`matched:false` = no subject tracked yet). |
+| `obsbot_ai_track_speed` | `speed`: `"standard" \| "sport"`, `camera`? | Set the tracking-speed preset (Center's Standard/Sport): `standard` (slower follow) or `sport` (snappier). |
+| `obsbot_focus_face` | `enabled` (bool), `camera`? | Enable or disable face-priority autofocus. |
 
 ### Image & lens
 
+Focus, white balance, and exposure each split into a dedicated `_auto` and `_manual` tool in
+v0.4.0 (previously one tool with a mode parameter) — auto and manual take different parameters, so
+splitting them lets each schema say exactly what it needs.
+
 | Tool | Parameters | Description |
 |------|------------|-------------|
-| `obsbot_image_fov` | `fov`: `"wide" \| "medium" \| "narrow"` | Set the field of view: wide (86°), medium (78°), narrow (65°). |
-| `obsbot_image_hdr` | `enabled` (bool) | Toggle HDR/WDR imaging on or off. |
-| `obsbot_focus_auto` | — | Enable continuous autofocus. |
-| `obsbot_focus_manual` | `position` (`0`–`100`, default `50`) | Set the focus motor to `position` (near→far). |
-| `obsbot_image_exposure_auto` | `priority` (`"global" \| "face"`, optional) | Enable auto-exposure; optional `priority` selects global vs face metering. |
-| `obsbot_image_exposure_manual` | `level` (`0`–`100`, default `50`) | Set exposure `level` (0 darkest → 100 brightest). |
-| `obsbot_image_wb_auto` | — | Enable auto white balance. |
-| `obsbot_image_wb_manual` | `temperature` (Kelvin, default `5000`) | Set a colour temperature (clamped to device range). |
-| `obsbot_image_adjust` | `control`, `level` (`0`–`100`) | Adjust `brightness \| contrast \| hue \| saturation \| sharpness \| gain \| backlight-compensation`; `level` maps onto the device range. |
+| `obsbot_image_fov` | `fov`: `"wide" \| "medium" \| "narrow"`, `camera`? | Set the field of view: wide (86°), medium (78°), narrow (65°). |
+| `obsbot_image_hdr` | `enabled` (bool), `camera`? | Toggle HDR/WDR imaging on or off. |
+| `obsbot_focus_auto` | `camera`? | Enable continuous autofocus. |
+| `obsbot_focus_manual` | `position` (`0`–`100`, default `50`), `camera`? | Set the focus motor to `position` (near→far). |
+| `obsbot_image_exposure_auto` | `priority` (`"global" \| "face"`, optional), `camera`? | Enable auto-exposure; optional `priority` selects global vs face metering. |
+| `obsbot_image_exposure_manual` | `level` (`0`–`100`, default `50`), `camera`? | Set exposure `level` (0 darkest → 100 brightest). |
+| `obsbot_image_wb_auto` | `camera`? | Enable auto white balance. |
+| `obsbot_image_wb_manual` | `temperature` (Kelvin, default `5000`), `camera`? | Set a colour temperature (clamped to device range). |
+| `obsbot_image_adjust` | `control`, `level` (`0`–`100`), `camera`? | Adjust `brightness \| contrast \| hue \| saturation \| sharpness \| gain \| backlight-compensation`; `level` maps onto the device range. |
 
 ### Capture
 
+**`obsbot_capture_record` and `obsbot_capture_preview` do not take `camera`.** They select a device
+by `source` (`device`/`virtual`/`ndi`) through ffmpeg/ffplay, not by serial — there is no
+serial-to-ffmpeg-device mapping yet. **`obsbot_capture_snapshot` honors `camera` only for
+`source:"device"`**; for `source:"virtual"`/`"ndi"` the pixel source is still resolved by device
+name, independent of `camera`.
+
 | Tool | Parameters | Description |
 |------|------------|-------------|
-| `obsbot_capture_snapshot` | `maxDim` (`256`–`1920`, default `1024`), `quality` (`1`–`100`, default `80`), `settleMs` (default `600`), `source` (default `"device"`) | Grab one still frame and return it as an image (for framing/lighting/exposure checks). `source`: `device \| virtual \| ndi`. |
-| `obsbot_capture_record` | `durationSec` (optional), `audio` (default `true`), `outputPath` (optional), `source` (default `"device"`) | Start recording to MP4. Open-ended recordings auto-stop after 60 min; audio uses the OBSBOT mic; defaults under `Videos/OBSBOT`. Returns a `sessionId`. **Needs ffmpeg.**¹ |
-| `obsbot_capture_preview` | `source` (default `"device"`) | Open a live preview window. Returns a `sessionId`. **Needs ffplay.**¹ |
-| `obsbot_capture_stop` | `sessionId` | Stop a recording or preview session (recordings are finalized gracefully). |
-| `obsbot_capture_list` | — | List active recording/preview sessions. |
+| `obsbot_capture_snapshot` | `resolution` (`256`–`1920`, default `640`), `quality` (`1`–`100`, default `80`), `settleMs` (default `600`), `source` (default `"device"`), `camera`? (source:"device" only) | Grab one still frame and return it as an image (for framing/lighting/exposure checks). `resolution` is the longest edge in pixels — larger costs proportionally more tokens. `source`: `device \| virtual \| ndi`. |
+| `obsbot_capture_record` | `durationSec` (optional), `audio` (default `true`), `outputPath` (optional), `source` (default `"device"`) | Start recording to MP4. Open-ended recordings auto-stop after 60 min; audio uses the OBSBOT mic; defaults under `Videos/OBSBOT`. Returns a `sessionId`. **Needs ffmpeg.**¹ No `camera`. |
+| `obsbot_capture_preview` | `source` (default `"device"`) | Open a live preview window. Returns a `sessionId`. **Needs ffplay.**¹ No `camera`. |
+| `obsbot_capture_stop` | `sessionId` | Stop a recording or preview session (recordings are finalized gracefully). No `camera`. |
+| `obsbot_capture_list` | — | List active recording/preview sessions. No `camera`. |
 
 ### Diagnostics (`--debug` only)
 
 | Tool | Parameters | Description |
 |------|------------|-------------|
-| `obsbot_debug_probe` | `mode`: `"get" \| "set" \| "query"`, plus `selector`, `length`, `hex`, `opcode`, `payloadHex` | RE/diagnostics only — raw XU byte get/set and framed table queries. Advertised only under `--debug`. |
+| `obsbot_debug_probe` | `mode`: `"get" \| "set" \| "query"`, plus `selector`, `length`, `hex`, `opcode`, `payloadHex` | RE/diagnostics only — raw XU byte get/set and framed table queries. Advertised only under `--debug`. No `camera`. |
 
 ¹ `record`/`preview` shell out to **ffmpeg**/**ffplay** (install: `winget install Gyan.FFmpeg`
 on Windows, `brew install ffmpeg` on macOS, `apt install ffmpeg` on Linux). `snapshot` does **not**
@@ -223,6 +263,15 @@ What has actually been exercised against hardware, and what hasn't:
   (`0x3564`/`0xFEF8`), so no other model is detected at all. Windows and Linux match devices by
   name, so a different OBSBOT may be *found* — but the vendor command set is Tiny 2 specific
   either way.
+- **Two-camera operation is not yet hardware-verified.** The `camera` selector and the
+  per-camera device registry are covered by the unit test suite against fake transports; running
+  two physical Tiny 2s attached at once has not been confirmed on real hardware (a second unit
+  wasn't available). Single-camera use is unaffected either way.
+- **`obsbot_zoom_vendor`'s ratio scale doesn't match `obsbot_zoom_uvc`'s at the same `ratio`.** A
+  hardware snapshot comparison at `ratio: 2.0` showed the vendor path framed tighter than the UVC
+  path. Whether the vendor-side ratio encoding is off by a scale factor, or the two zoom controls
+  simply have different physical ranges, isn't determined yet — one comparison isn't enough to
+  tell. Tracked separately; use `obsbot_zoom_uvc` if you need the ratio to land exactly.
 
 ## No proprietary SDK
 
