@@ -377,7 +377,7 @@ export function createTools(
 
   const toolDefs: ToolDef[] = [
     {
-      name: "obsbot_list_devices",
+      name: "obsbot_devices",
       description: "List connected OBSBOT-compatible video capture devices.",
       schema: listDevicesSchema,
       handler: async (args: unknown) => {
@@ -397,7 +397,7 @@ export function createTools(
       },
     },
     {
-      name: "obsbot_ptz_move_angle",
+      name: "obsbot_gimbal_move",
       description:
         "Move the gimbal to an absolute yaw/pitch angle (degrees); positive yaw pans to the " +
         "camera's left, positive pitch tilts down. Yaw is clamped to [-150,150], pitch to " +
@@ -416,10 +416,10 @@ export function createTools(
       },
     },
     {
-      name: "obsbot_ptz_move_speed",
+      name: "obsbot_gimbal_move_speed",
       description:
         "Drive the gimbal at a yaw/pitch speed (positive yaw pans to the camera's left, matching " +
-        "obsbot_ptz_move_angle), then automatically stop after autoStopMs (default 800ms) so it can't run away.",
+        "obsbot_gimbal_move), then automatically stop after autoStopMs (default 800ms) so it can't run away.",
       schema: ptzMoveSpeedSchema,
       handler: async (args: unknown) => {
         const { yaw, pitch, roll, autoStopMs } = ptzMoveSpeedSchema.parse(args);
@@ -427,7 +427,7 @@ export function createTools(
         if (!ready.ok) return ready;
         const t = ready.transport;
         // Firmware velocity-yaw is inverted relative to position-yaw: the vendor
-        // AI_SET_GIM_SPEED +yaw drives right (opposite of obsbot_ptz_move_angle).
+        // AI_SET_GIM_SPEED +yaw drives right (opposite of obsbot_gimbal_move).
         // The transport's gimbalSpeed handles this per-platform as needed.
         await t.gimbalSpeed(yaw, pitch, roll, autoStopMs);
         return { ok: true, stopped: autoStopMs > 0, ...(ready.reconnected && { reconnected: true }) };
@@ -447,8 +447,11 @@ export function createTools(
       },
     },
     {
-      name: "obsbot_zoom_absolute",
-      description: "Set absolute zoom ratio, clamped to [1.0, 2.0].",
+      name: "obsbot_zoom_uvc",
+      description:
+        "Standard UVC zoom: set an absolute zoom ratio, clamped to [1.0, 2.0]. Snaps to the " +
+        "requested target exactly (unlike obsbot_zoom_vendor, whose ratio scale differs and " +
+        "may not land exactly where asked).",
       schema: zoomAbsoluteSchema,
       handler: async (args: unknown) => {
         const parsed = zoomAbsoluteSchema.parse(args);
@@ -460,7 +463,7 @@ export function createTools(
       },
     },
     {
-      name: "obsbot_ai_tracking",
+      name: "obsbot_ai_track",
       description:
         "Enable or disable AI tracking and choose the mode. When enabled the camera " +
         "follows the subject; disabling stops tracking. `mode` is either a human framing " +
@@ -516,10 +519,11 @@ export function createTools(
       },
     },
     {
-      name: "obsbot_zoom_speed",
+      name: "obsbot_zoom_vendor",
       description:
-        "Zoom to an absolute ratio at a chosen speed. ratio is clamped to [1.0,2.0]; " +
-        "speed 0=device default, 1-10 slow→fast, 255=maximum.",
+        "Vendor zoom path with adjustable speed: zoom to a ratio at a chosen speed. This tool's " +
+        "ratio scale differs from obsbot_zoom_uvc's and may not land exactly on the requested " +
+        "target. ratio is clamped to [1.0,2.0]; speed 0=device default, 1-10 slow→fast, 255=maximum.",
       schema: zoomSpeedSchema,
       handler: async (args: unknown) => {
         const parsed = zoomSpeedSchema.parse(args);
@@ -533,7 +537,7 @@ export function createTools(
       },
     },
     {
-      name: "obsbot_face_focus",
+      name: "obsbot_focus_face",
       description: "Enable or disable face-priority autofocus.",
       schema: faceFocusSchema,
       handler: async (args: unknown) => {
@@ -544,7 +548,7 @@ export function createTools(
       },
     },
     {
-      name: "obsbot_get_status",
+      name: "obsbot_status",
       description:
         "Read the camera's live status block. Returns { awake, hdr, aiMode, trackSpeed }: " +
         "aiMode is the current AI framing (no-tracking|normal|upper-body|close-up|headless|" +
@@ -618,7 +622,7 @@ export function createTools(
       },
     },
     {
-      name: "obsbot_fov",
+      name: "obsbot_image_fov",
       description: "Set the field of view. fov: wide (86°) | medium (78°) | narrow (65°).",
       schema: fovSchema,
       handler: async (args: unknown) => {
@@ -629,7 +633,7 @@ export function createTools(
       },
     },
     {
-      name: "obsbot_hdr",
+      name: "obsbot_image_hdr",
       description: "Toggle HDR/WDR imaging on or off.",
       schema: hdrSchema,
       handler: async (args: unknown) => {
@@ -931,7 +935,7 @@ export function createTools(
       },
     },
     {
-      name: "obsbot_image_control",
+      name: "obsbot_image_adjust",
       description:
         "Adjust a standard image control: control is brightness | contrast | hue | " +
         "saturation | sharpness | gain | backlight-compensation; level 0-100 is mapped onto " +
@@ -982,7 +986,7 @@ export function createTools(
       },
     },
     {
-      name: "obsbot_snapshot",
+      name: "obsbot_capture_snapshot",
       description:
         "Grab one still frame from the camera and return it as an image (for you to see " +
         "and for framing/lighting/exposure checks). resolution is the longest edge in pixels, " +
@@ -1043,7 +1047,7 @@ export function createTools(
       },
     },
     {
-      name: "obsbot_record_start",
+      name: "obsbot_capture_record",
       description:
         "Start recording the camera to an MP4 (for the user). durationSec optional (open-ended " +
         "recordings auto-stop after 60 min); audio defaults to on (the OBSBOT mic); outputPath " +
@@ -1066,7 +1070,7 @@ export function createTools(
       },
     },
     {
-      name: "obsbot_preview_start",
+      name: "obsbot_capture_preview",
       description:
         "Open a live preview window of the camera (for the user to watch). NOTE: before calling, " +
         "ensure the camera is focused (call obsbot_focus with mode:'auto' for autofocus) unless " +

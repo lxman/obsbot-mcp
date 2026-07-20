@@ -140,7 +140,7 @@ export class DeviceManager {
     return this.scanHelper;
   }
 
-  /** Compat: raw enumerate() pass-through (unfiltered), used by obsbot_list_devices. */
+  /** Compat: raw enumerate() pass-through (unfiltered), used by obsbot_devices. */
   async list(): Promise<DeviceInfo[]> {
     const helper = await this.getScanHelper();
     return helper.enumerate();

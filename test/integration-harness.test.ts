@@ -48,7 +48,7 @@ test("defineCheck rejects a declaration missing its tool link", () => {
 test("runCheck records duration and measurements and marks pass", async () => {
   const check = defineCheck({
     id: "demo.ok",
-    tool: "obsbot_get_status",
+    tool: "obsbot_status",
     profile: "quick",
     tier: TIERS.VERIFIED,
     run: async () => ({
@@ -65,7 +65,7 @@ test("runCheck records duration and measurements and marks pass", async () => {
 test("runCheck turns a thrown error into a fail without propagating", async () => {
   const check = defineCheck({
     id: "demo.boom",
-    tool: "obsbot_get_status",
+    tool: "obsbot_status",
     profile: "quick",
     tier: TIERS.ACCEPTED,
     run: async () => {
@@ -80,7 +80,7 @@ test("runCheck turns a thrown error into a fail without propagating", async () =
 test("runCheck enforces its own timeout so one hung call cannot stall the run", async () => {
   const check = defineCheck({
     id: "demo.hang",
-    tool: "obsbot_get_status",
+    tool: "obsbot_status",
     profile: "quick",
     tier: TIERS.ACCEPTED,
     timeoutMs: 20,

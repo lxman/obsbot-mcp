@@ -79,11 +79,35 @@ function findTool(tools: ReturnType<typeof createTools>, name: string) {
   return t;
 }
 
-test("obsbot_zoom_absolute clamps ratio above max and calls zoomSet with max-mapped units", async () => {
+// Hard break: the v0.4.0 1:1 renames (naming spec §3). Old names must not
+// resolve — there are no aliases.
+const RENAMES: [string, string][] = [
+  ["obsbot_list_devices", "obsbot_devices"],
+  ["obsbot_ptz_move_angle", "obsbot_gimbal_move"],
+  ["obsbot_ptz_move_speed", "obsbot_gimbal_move_speed"],
+  ["obsbot_zoom_absolute", "obsbot_zoom_uvc"],
+  ["obsbot_zoom_speed", "obsbot_zoom_vendor"],
+  ["obsbot_ai_tracking", "obsbot_ai_track"],
+  ["obsbot_face_focus", "obsbot_focus_face"],
+  ["obsbot_fov", "obsbot_image_fov"],
+  ["obsbot_hdr", "obsbot_image_hdr"],
+  ["obsbot_image_control", "obsbot_image_adjust"],
+  ["obsbot_get_status", "obsbot_status"],
+  ["obsbot_snapshot", "obsbot_capture_snapshot"],
+  ["obsbot_record_start", "obsbot_capture_record"],
+  ["obsbot_preview_start", "obsbot_capture_preview"],
+];
+test.each(RENAMES)("%s is renamed to %s (old name gone)", (oldName, newName) => {
+  const names = createTools(async () => makeFakeTransport(), makeFakeMgr()).map((t) => t.name);
+  expect(names).toContain(newName);
+  expect(names).not.toContain(oldName);
+});
+
+test("obsbot_zoom_uvc clamps ratio above max and calls zoomSet with max-mapped units", async () => {
   const transport = makeFakeTransport();
   const mgr = makeFakeMgr();
   const tools = createTools(async () => transport, mgr);
-  const tool = findTool(tools, "obsbot_zoom_absolute");
+  const tool = findTool(tools, "obsbot_zoom_uvc");
 
   const result = await tool.handler({ ratio: 99 });
 
@@ -103,11 +127,11 @@ test("obsbot_set_run_status rejects an invalid state via zod", async () => {
   expect(transport.sendVendor).not.toHaveBeenCalled();
 });
 
-test("obsbot_ptz_move_speed sends move then auto-stop", async () => {
+test("obsbot_gimbal_move_speed sends move then auto-stop", async () => {
   const transport = makeFakeTransport();
   const mgr = makeFakeMgr();
   const tools = createTools(async () => transport, mgr);
-  const tool = findTool(tools, "obsbot_ptz_move_speed");
+  const tool = findTool(tools, "obsbot_gimbal_move_speed");
 
   const result = await tool.handler({ yaw: 10, pitch: 5, roll: 0, autoStopMs: 1 });
 
@@ -116,13 +140,13 @@ test("obsbot_ptz_move_speed sends move then auto-stop", async () => {
   expect(result).toEqual({ ok: true, stopped: true });
 });
 
-test("obsbot_ptz_move_speed negates yaw so +yaw pans camera-left (matches ptz_move_angle)", async () => {
+test("obsbot_gimbal_move_speed negates yaw so +yaw pans camera-left (matches gimbal_move)", async () => {
   // Firmware velocity-yaw is inverted vs position-yaw: +yaw drives the gimbal RIGHT on
   // AI_SET_GIM_SPEED but LEFT on AI_SET_GIM_MOTOR_DEG (HW-observed). The tool normalizes
   // so a caller's +yaw means the same physical direction (camera-left) on both tools.
   const transport = makeFakeTransport();
   const tools = createTools(async () => transport, makeFakeMgr());
-  const tool = findTool(tools, "obsbot_ptz_move_speed");
+  const tool = findTool(tools, "obsbot_gimbal_move_speed");
 
   await tool.handler({ yaw: 40, pitch: 0, roll: 0, autoStopMs: 0 });
 
@@ -153,11 +177,11 @@ function aiStatusBlock(m: number, n: number): Buffer {
   return b;
 }
 
-test("obsbot_ai_tracking enable defaults to normal framing: [16 02 02 00] to sel 6, verifies aiMode", async () => {
+test("obsbot_ai_track enable defaults to normal framing: [16 02 02 00] to sel 6, verifies aiMode", async () => {
   const transport = makeFakeTransport();
   transport.recvStatus = vi.fn(async () => aiStatusBlock(2, 0)); // awake + normal
   const tools = createTools(async () => transport, makeFakeMgr());
-  const tool = findTool(tools, "obsbot_ai_tracking");
+  const tool = findTool(tools, "obsbot_ai_track");
 
   const result = await tool.handler({ enabled: true });
 
@@ -169,11 +193,11 @@ test("obsbot_ai_tracking enable defaults to normal framing: [16 02 02 00] to sel
   expect(result).toMatchObject({ ok: true, enabled: true, mode: "normal", verified: "normal", matched: true });
 });
 
-test("obsbot_ai_tracking enable in close-up framing writes byte[3]=0x02 and verifies close-up", async () => {
+test("obsbot_ai_track enable in close-up framing writes byte[3]=0x02 and verifies close-up", async () => {
   const transport = makeFakeTransport();
   transport.recvStatus = vi.fn(async () => aiStatusBlock(2, 2)); // awake + close-up
   const tools = createTools(async () => transport, makeFakeMgr());
-  const tool = findTool(tools, "obsbot_ai_tracking");
+  const tool = findTool(tools, "obsbot_ai_track");
 
   const result = await tool.handler({ enabled: true, mode: "close-up" });
 
@@ -183,11 +207,11 @@ test("obsbot_ai_tracking enable in close-up framing writes byte[3]=0x02 and veri
   expect(result).toMatchObject({ ok: true, enabled: true, mode: "close-up", verified: "close-up", matched: true });
 });
 
-test("obsbot_ai_tracking disable writes [16 02 00 00] and verifies no-tracking", async () => {
+test("obsbot_ai_track disable writes [16 02 00 00] and verifies no-tracking", async () => {
   const transport = makeFakeTransport();
   transport.recvStatus = vi.fn(async () => aiStatusBlock(0, 0)); // awake + no-tracking
   const tools = createTools(async () => transport, makeFakeMgr());
-  const tool = findTool(tools, "obsbot_ai_tracking");
+  const tool = findTool(tools, "obsbot_ai_track");
 
   const result = await tool.handler({ enabled: false });
 
@@ -197,11 +221,11 @@ test("obsbot_ai_tracking disable writes [16 02 00 00] and verifies no-tracking",
   expect(result).toMatchObject({ ok: true, enabled: false, verified: "no-tracking", matched: true });
 });
 
-test("obsbot_ai_tracking enable in whiteboard scene mode writes [16 02 04 00] and verifies whiteboard", async () => {
+test("obsbot_ai_track enable in whiteboard scene mode writes [16 02 04 00] and verifies whiteboard", async () => {
   const transport = makeFakeTransport();
   transport.recvStatus = vi.fn(async () => aiStatusBlock(4, 0)); // awake + whiteboard
   const tools = createTools(async () => transport, makeFakeMgr());
-  const tool = findTool(tools, "obsbot_ai_tracking");
+  const tool = findTool(tools, "obsbot_ai_track");
 
   const result = await tool.handler({ enabled: true, mode: "whiteboard" });
 
@@ -212,11 +236,11 @@ test("obsbot_ai_tracking enable in whiteboard scene mode writes [16 02 04 00] an
   expect(result).toMatchObject({ ok: true, enabled: true, mode: "whiteboard", verified: "whiteboard", matched: true });
 });
 
-test("obsbot_ai_tracking enable in hand scene mode writes byte[2]=0x03 and verifies hand", async () => {
+test("obsbot_ai_track enable in hand scene mode writes byte[2]=0x03 and verifies hand", async () => {
   const transport = makeFakeTransport();
   transport.recvStatus = vi.fn(async () => aiStatusBlock(3, 0)); // awake + hand (m=3 on this firmware)
   const tools = createTools(async () => transport, makeFakeMgr());
-  const tool = findTool(tools, "obsbot_ai_tracking");
+  const tool = findTool(tools, "obsbot_ai_track");
 
   const result = await tool.handler({ enabled: true, mode: "hand" });
 
@@ -226,10 +250,10 @@ test("obsbot_ai_tracking enable in hand scene mode writes byte[2]=0x03 and verif
   expect(result).toMatchObject({ ok: true, enabled: true, mode: "hand", verified: "hand", matched: true });
 });
 
-test("obsbot_ai_tracking rejects a retired framing name via zod", async () => {
+test("obsbot_ai_track rejects a retired framing name via zod", async () => {
   const transport = makeFakeTransport();
   const tools = createTools(async () => transport, makeFakeMgr());
-  const tool = findTool(tools, "obsbot_ai_tracking");
+  const tool = findTool(tools, "obsbot_ai_track");
   await expect(tool.handler({ enabled: true, mode: "human-close-up" })).rejects.toThrow();
 });
 
@@ -239,7 +263,7 @@ test("gated command returns the readiness error and does NOT act when unreachabl
     throw new Error("KsProperty GET failed");
   });
   const tools = createTools(async () => transport, makeFakeMgr());
-  const tool = findTool(tools, "obsbot_ai_tracking");
+  const tool = findTool(tools, "obsbot_ai_track");
   const result = await tool.handler({ enabled: true });
   expect(result).toMatchObject({ ok: false, reason: "unreachable" });
   expect(transport.xuRaw).not.toHaveBeenCalled();
@@ -254,30 +278,30 @@ test("gated command auto-wakes an asleep camera before acting", async () => {
   // verify settles immediately instead of polling the full window.
   transport.recvStatus = vi.fn(async () => (n++ === 0 ? asleep : aiStatusBlock(2, 0)));
   const tools = createTools(async () => transport, makeFakeMgr());
-  const tool = findTool(tools, "obsbot_ai_tracking");
+  const tool = findTool(tools, "obsbot_ai_track");
   const result = await tool.handler({ enabled: true });
   expect(transport.sendVendor).toHaveBeenCalledTimes(1); // wake frame
   expect(transport.xuRaw).toHaveBeenCalledTimes(1); // the actual command, after wake
   expect(result).toMatchObject({ ok: true, enabled: true });
 });
 
-test("obsbot_list_devices returns mgr.list()", async () => {
+test("obsbot_devices returns mgr.list()", async () => {
   const devices = [{ path: "\\\\.\\usb1", name: "OBSBOT Tiny 2" }];
   const transport = makeFakeTransport();
   const mgr = makeFakeMgr(devices);
   const tools = createTools(async () => transport, mgr);
-  const tool = findTool(tools, "obsbot_list_devices");
+  const tool = findTool(tools, "obsbot_devices");
 
   const result = await tool.handler({});
 
   expect(result).toEqual({ devices });
 });
 
-test("obsbot_ptz_move_angle clamps yaw/pitch to conservative limits", async () => {
+test("obsbot_gimbal_move clamps yaw/pitch to conservative limits", async () => {
   const transport = makeFakeTransport();
   const mgr = makeFakeMgr();
   const tools = createTools(async () => transport, mgr);
-  const tool = findTool(tools, "obsbot_ptz_move_angle");
+  const tool = findTool(tools, "obsbot_gimbal_move");
 
   const result = await tool.handler({ yaw: 999, pitch: -999, roll: 0 });
 
@@ -286,19 +310,19 @@ test("obsbot_ptz_move_angle clamps yaw/pitch to conservative limits", async () =
   expect(result).toEqual({ yaw: 150, pitch: -90, roll: 0 });
 });
 
-test("obsbot_ai_tracking rejects an unknown mode", async () => {
+test("obsbot_ai_track rejects an unknown mode", async () => {
   const transport = makeFakeTransport();
   const tools = createTools(async () => transport, makeFakeMgr());
   await expect(
-    tools.find((t) => t.name === "obsbot_ai_tracking")!.handler({ enabled: true, mode: "nope" }),
+    tools.find((t) => t.name === "obsbot_ai_track")!.handler({ enabled: true, mode: "nope" }),
   ).rejects.toThrow();
   expect(transport.sendVendor).not.toHaveBeenCalled();
 });
 
-test("obsbot_zoom_speed clamps ratio and speed", async () => {
+test("obsbot_zoom_vendor clamps ratio and speed", async () => {
   const transport = makeFakeTransport();
   const tools = createTools(async () => transport, makeFakeMgr());
-  const result = await tools.find((t) => t.name === "obsbot_zoom_speed")!.handler({
+  const result = await tools.find((t) => t.name === "obsbot_zoom_vendor")!.handler({
     ratio: 9,
     speed: 999,
   });
@@ -306,10 +330,10 @@ test("obsbot_zoom_speed clamps ratio and speed", async () => {
   expect(result).toEqual({ ok: true, ratio: 2.0, speed: 255 });
 });
 
-test("obsbot_fov sends a 60-byte payload to XU selector 6", async () => {
+test("obsbot_image_fov sends a 60-byte payload to XU selector 6", async () => {
   const transport = makeFakeTransport();
   const tools = createTools(async () => transport, makeFakeMgr());
-  await tools.find((t) => t.name === "obsbot_fov")!.handler({ fov: "narrow" });
+  await tools.find((t) => t.name === "obsbot_image_fov")!.handler({ fov: "narrow" });
   expect(transport.xuRaw).toHaveBeenCalledTimes(1);
   const [selector, data] = transport.xuRaw.mock.calls[0];
   expect(selector).toBe(6);
@@ -317,10 +341,10 @@ test("obsbot_fov sends a 60-byte payload to XU selector 6", async () => {
   expect([...data.subarray(0, 3)]).toEqual([0x04, 0x01, 2]);
 });
 
-test("obsbot_hdr sends [0x01,0x01,on] to XU selector 6", async () => {
+test("obsbot_image_hdr sends [0x01,0x01,on] to XU selector 6", async () => {
   const transport = makeFakeTransport();
   const tools = createTools(async () => transport, makeFakeMgr());
-  await tools.find((t) => t.name === "obsbot_hdr")!.handler({ enabled: true });
+  await tools.find((t) => t.name === "obsbot_image_hdr")!.handler({ enabled: true });
   const [selector, data] = transport.xuRaw.mock.calls[0];
   expect(selector).toBe(6);
   expect([...data.subarray(0, 3)]).toEqual([0x01, 0x01, 1]);
@@ -368,35 +392,35 @@ test("obsbot_white_balance auto uses the auto flag", async () => {
 });
 
 // --- UVC image controls (standard IAMVideoProcAmp) + exposure (IAMCameraControl) ---
-test("obsbot_image_control maps 0-100 onto the device range and sets via procAmp (brightness=prop 0)", async () => {
+test("obsbot_image_adjust maps 0-100 onto the device range and sets via procAmp (brightness=prop 0)", async () => {
   const transport = makeFakeTransport();
   transport.procAmpRange = vi.fn(async () => ({ min: 0, max: 100 }));
   const tools = createTools(async () => transport, makeFakeMgr());
   const result = await tools
-    .find((t) => t.name === "obsbot_image_control")!
+    .find((t) => t.name === "obsbot_image_adjust")!
     .handler({ control: "brightness", level: 75 });
   expect(transport.procAmpRange).toHaveBeenCalledWith(0);
   expect(transport.procAmpSet).toHaveBeenCalledWith(0, 75, 2); // 75% of [0,100], manual flag
   expect(result).toEqual({ ok: true, control: "brightness", level: 75, value: 75 });
 });
 
-test("obsbot_image_control uses the right property id + range for gain (prop 9)", async () => {
+test("obsbot_image_adjust uses the right property id + range for gain (prop 9)", async () => {
   const transport = makeFakeTransport();
   transport.procAmpRange = vi.fn(async () => ({ min: 1, max: 64 }));
   const tools = createTools(async () => transport, makeFakeMgr());
   const result = await tools
-    .find((t) => t.name === "obsbot_image_control")!
+    .find((t) => t.name === "obsbot_image_adjust")!
     .handler({ control: "gain", level: 50 });
   expect(transport.procAmpRange).toHaveBeenCalledWith(9);
   expect(transport.procAmpSet).toHaveBeenCalledWith(9, 33, 2); // 50% of [1,64] -> 32.5 -> 33
   expect(result).toEqual({ ok: true, control: "gain", level: 50, value: 33 });
 });
 
-test("obsbot_image_control rejects an unsupported control via zod", async () => {
+test("obsbot_image_adjust rejects an unsupported control via zod", async () => {
   const transport = makeFakeTransport();
   const tools = createTools(async () => transport, makeFakeMgr());
   await expect(
-    tools.find((t) => t.name === "obsbot_image_control")!.handler({ control: "gamma", level: 50 }),
+    tools.find((t) => t.name === "obsbot_image_adjust")!.handler({ control: "gamma", level: 50 }),
   ).rejects.toThrow();
 });
 
@@ -461,38 +485,38 @@ test("obsbot_exposure manual sends ONE V3 frame carrying mode and value", async 
 });
 
 // --- String-encoded args from clients that ignore the advertised schema ----
-test("obsbot_ptz_move_angle accepts string-encoded numbers", async () => {
+test("obsbot_gimbal_move accepts string-encoded numbers", async () => {
   const transport = makeFakeTransport();
   const tools = createTools(async () => transport, makeFakeMgr());
   const result = await tools
-    .find((t) => t.name === "obsbot_ptz_move_angle")!
+    .find((t) => t.name === "obsbot_gimbal_move")!
     .handler({ yaw: "30", pitch: "-20", roll: "0" });
   expect(transport.gimbalSet).toHaveBeenCalledTimes(1);
   expect(transport.gimbalSet).toHaveBeenCalledWith(30, -20, 0);
   expect(result).toEqual({ yaw: 30, pitch: -20, roll: 0 });
 });
 
-test("obsbot_zoom_speed accepts string-encoded ratio/speed", async () => {
+test("obsbot_zoom_vendor accepts string-encoded ratio/speed", async () => {
   const transport = makeFakeTransport();
   const tools = createTools(async () => transport, makeFakeMgr());
   const result = await tools
-    .find((t) => t.name === "obsbot_zoom_speed")!
+    .find((t) => t.name === "obsbot_zoom_vendor")!
     .handler({ ratio: "1.5", speed: "6" });
   expect(result).toEqual({ ok: true, ratio: 1.5, speed: 6 });
 });
 
-test("obsbot_ai_tracking accepts string 'true'/'false' for enabled", async () => {
+test("obsbot_ai_track accepts string 'true'/'false' for enabled", async () => {
   const transport = makeFakeTransport();
   transport.recvStatus = vi.fn(async () => aiStatusBlock(2, 0)); // awake + normal, so verify settles fast
   const tools = createTools(async () => transport, makeFakeMgr());
   const on = await tools
-    .find((t) => t.name === "obsbot_ai_tracking")!
+    .find((t) => t.name === "obsbot_ai_track")!
     .handler({ enabled: "true", mode: "normal" });
   expect(on).toMatchObject({ ok: true, enabled: true, mode: "normal" });
 
   transport.recvStatus = vi.fn(async () => aiStatusBlock(0, 0)); // no-tracking, verify target for disable
   const off = await tools
-    .find((t) => t.name === "obsbot_ai_tracking")!
+    .find((t) => t.name === "obsbot_ai_track")!
     .handler({ enabled: "false" });
   expect(off).toMatchObject({ ok: true, enabled: false, mode: "normal" });
 });
@@ -501,16 +525,16 @@ test("boolean coercion does NOT treat arbitrary strings as true", async () => {
   const transport = makeFakeTransport();
   const tools = createTools(async () => transport, makeFakeMgr());
   await expect(
-    tools.find((t) => t.name === "obsbot_hdr")!.handler({ enabled: "yes" }),
+    tools.find((t) => t.name === "obsbot_image_hdr")!.handler({ enabled: "yes" }),
   ).rejects.toThrow();
   expect(transport.xuRaw).not.toHaveBeenCalled();
 });
 
-test("obsbot_snapshot returns an image content block on success", async () => {
+test("obsbot_capture_snapshot returns an image content block on success", async () => {
   const transport = makeFakeTransport();
   const tools = createTools(async () => transport, makeFakeMgr());
   const result = (await tools
-    .find((t) => t.name === "obsbot_snapshot")!
+    .find((t) => t.name === "obsbot_capture_snapshot")!
     .handler({})) as { content: Array<Record<string, unknown>> };
   expect(transport.snapshot).toHaveBeenCalledTimes(1);
   const image = result.content.find((c) => c.type === "image");
@@ -519,78 +543,78 @@ test("obsbot_snapshot returns an image content block on success", async () => {
   expect(JSON.parse(text.text)).toEqual({ width: 1280, height: 720, source: "device" });
 });
 
-test("obsbot_snapshot returns actionable text (no image) when the camera is busy", async () => {
+test("obsbot_capture_snapshot returns actionable text (no image) when the camera is busy", async () => {
   const transport = makeFakeTransport();
   transport.snapshot = vi.fn(async () => {
     throw new CameraBusyError();
   });
   const tools = createTools(async () => transport, makeFakeMgr());
   const result = (await tools
-    .find((t) => t.name === "obsbot_snapshot")!
+    .find((t) => t.name === "obsbot_capture_snapshot")!
     .handler({})) as { content: Array<Record<string, unknown>> };
   expect(result.content.some((c) => c.type === "image")).toBe(false);
   const text = result.content.find((c) => c.type === "text") as { text: string };
   expect(text.text).toMatch(/in use/i);
 });
 
-test("obsbot_snapshot source 'virtual' resolves a device path and passes it through", async () => {
+test("obsbot_capture_snapshot source 'virtual' resolves a device path and passes it through", async () => {
   const transport = makeFakeTransport();
   const mgr = makeFakeMgr([
     { path: "p-tiny", name: "OBSBOT Tiny 2 StreamCamera" },
     { path: "p-virt", name: "OBSBOT Virtual Camera" },
   ]);
   const tools = createTools(async () => transport, mgr);
-  await tools.find((t) => t.name === "obsbot_snapshot")!.handler({ source: "virtual" });
+  await tools.find((t) => t.name === "obsbot_capture_snapshot")!.handler({ source: "virtual" });
   expect(transport.snapshot).toHaveBeenCalledWith(
     expect.objectContaining({ path: "p-virt" }),
   );
 });
 
-test("obsbot_snapshot returns text (no image) when the requested source is absent", async () => {
+test("obsbot_capture_snapshot returns text (no image) when the requested source is absent", async () => {
   const transport = makeFakeTransport();
   const mgr = makeFakeMgr([{ path: "p-tiny", name: "OBSBOT Tiny 2 StreamCamera" }]);
   const tools = createTools(async () => transport, mgr);
   const result = (await tools
-    .find((t) => t.name === "obsbot_snapshot")!
+    .find((t) => t.name === "obsbot_capture_snapshot")!
     .handler({ source: "ndi" })) as { content: Array<Record<string, unknown>> };
   expect(transport.snapshot).not.toHaveBeenCalled();
   expect(result.content.some((c) => c.type === "image")).toBe(false);
 });
 
-test("obsbot_record_start returns the session and output path", async () => {
+test("obsbot_capture_record returns the session and output path", async () => {
   const transport = makeFakeTransport();
   const capture = makeFakeCapture();
   const tools = createTools(async () => transport, makeFakeMgr(), capture);
-  const result = await tools.find((t) => t.name === "obsbot_record_start")!.handler({ durationSec: 10 });
+  const result = await tools.find((t) => t.name === "obsbot_capture_record")!.handler({ durationSec: 10 });
   expect(capture.startRecord).toHaveBeenCalledWith(
     expect.objectContaining({ durationSec: 10, audio: true, source: "device" }),
   );
   expect(result).toMatchObject({ ok: true, sessionId: "cap1", outputPath: expect.any(String), durationSec: 3600 });
 });
 
-test("obsbot_record_start surfaces FfmpegMissingError as actionable text (no throw)", async () => {
+test("obsbot_capture_record surfaces FfmpegMissingError as actionable text (no throw)", async () => {
   const transport = makeFakeTransport();
   const capture = makeFakeCapture({ startRecord: vi.fn(async () => { throw new FfmpegMissingError(); }) });
   const tools = createTools(async () => transport, makeFakeMgr(), capture);
-  const result = (await tools.find((t) => t.name === "obsbot_record_start")!.handler({})) as { content: Array<Record<string, unknown>> };
+  const result = (await tools.find((t) => t.name === "obsbot_capture_record")!.handler({})) as { content: Array<Record<string, unknown>> };
   const text = result.content.find((c) => c.type === "text") as { text: string };
   expect(text.text).toMatch(/ffmpeg/i);
 });
 
-test("obsbot_record_start surfaces a CaptureError as text", async () => {
+test("obsbot_capture_record surfaces a CaptureError as text", async () => {
   const transport = makeFakeTransport();
   const capture = makeFakeCapture({ startRecord: vi.fn(async () => { throw new CaptureError("no 'ndi' video source found"); }) });
   const tools = createTools(async () => transport, makeFakeMgr(), capture);
-  const result = (await tools.find((t) => t.name === "obsbot_record_start")!.handler({ source: "ndi" })) as { content: Array<Record<string, unknown>> };
+  const result = (await tools.find((t) => t.name === "obsbot_capture_record")!.handler({ source: "ndi" })) as { content: Array<Record<string, unknown>> };
   const text = result.content.find((c) => c.type === "text") as { text: string };
   expect(text.text).toMatch(/ndi/i);
 });
 
-test("obsbot_preview_start returns a session id", async () => {
+test("obsbot_capture_preview returns a session id", async () => {
   const transport = makeFakeTransport();
   const capture = makeFakeCapture();
   const tools = createTools(async () => transport, makeFakeMgr(), capture);
-  const result = await tools.find((t) => t.name === "obsbot_preview_start")!.handler({});
+  const result = await tools.find((t) => t.name === "obsbot_capture_preview")!.handler({});
   expect(result).toEqual({ ok: true, sessionId: "cap2" });
 });
 
@@ -612,14 +636,14 @@ test("obsbot_capture_list returns active sessions", async () => {
   expect(result).toEqual({ sessions });
 });
 
-test("obsbot_get_status decodes awake+hdr from the status block", async () => {
+test("obsbot_status decodes awake+hdr from the status block", async () => {
   const transport = makeFakeTransport();
   const block = Buffer.alloc(60);
   block[0x02] = 0; // awake
   block[0x06] = 1; // hdr on
   transport.recvStatus = vi.fn(async () => block);
   const tools = createTools(async () => transport, makeFakeMgr(), undefined, undefined, true); // debug: raw present
-  const tool = findTool(tools, "obsbot_get_status");
+  const tool = findTool(tools, "obsbot_status");
   const result = await tool.handler({});
   expect(transport.recvStatus).toHaveBeenCalledTimes(1);
   expect(result).toMatchObject({
@@ -634,7 +658,7 @@ test("obsbot_get_status decodes awake+hdr from the status block", async () => {
   expect(result.raw.slice(0x06 * 2, 0x06 * 2 + 2)).toBe("01"); // byte 0x06 = hdr on
 });
 
-// --- Debug gating: obsbot_probe and get_status.raw are RE-only, behind --debug. ---
+// --- Debug gating: obsbot_probe and status.raw are RE-only, behind --debug. ---
 test("createTools omits obsbot_probe unless debug is enabled", () => {
   const tools = createTools(async () => makeFakeTransport(), makeFakeMgr());
   expect(tools.find((t) => t.name === "obsbot_probe")).toBeUndefined();
@@ -645,24 +669,24 @@ test("createTools includes obsbot_probe when debug is enabled", () => {
   expect(tools.find((t) => t.name === "obsbot_probe")).toBeDefined();
 });
 
-test("obsbot_get_status omits the raw RE block unless debug is enabled", async () => {
+test("obsbot_status omits the raw RE block unless debug is enabled", async () => {
   const transport = makeFakeTransport();
   const block = Buffer.alloc(60);
   block[0x02] = 0; // awake
   transport.recvStatus = vi.fn(async () => block);
   const tools = createTools(async () => transport, makeFakeMgr());
-  const result = await findTool(tools, "obsbot_get_status").handler({});
+  const result = await findTool(tools, "obsbot_status").handler({});
   expect(result).toMatchObject({ ok: true, awake: true });
   expect(result.raw).toBeUndefined();
 });
 
-test("obsbot_get_status includes the raw block when debug is enabled", async () => {
+test("obsbot_status includes the raw block when debug is enabled", async () => {
   const transport = makeFakeTransport();
   const block = Buffer.alloc(60);
   block[0x02] = 0; // awake
   transport.recvStatus = vi.fn(async () => block);
   const tools = createTools(async () => transport, makeFakeMgr(), undefined, undefined, true);
-  const result = await findTool(tools, "obsbot_get_status").handler({});
+  const result = await findTool(tools, "obsbot_status").handler({});
   expect(result.raw).toHaveLength(120);
 });
 
@@ -1446,19 +1470,19 @@ test("retries are bounded — a persistently bad read fails loudly instead of sp
 // `resolution` replaces the old `maxDim` and defaults to 640, not 1024. Snapshots
 // are base64'd into a tool response an LLM then reads, so the default is chosen to
 // keep token cost low; a caller that needs detail asks for it explicitly.
-test("obsbot_snapshot defaults to 640 and forwards it as maxDim", async () => {
+test("obsbot_capture_snapshot defaults to 640 and forwards it as maxDim", async () => {
   const transport = makeFakeTransport();
   const tools = createTools(async () => transport, makeFakeMgr());
-  await tools.find((t) => t.name === "obsbot_snapshot")!.handler({});
+  await tools.find((t) => t.name === "obsbot_capture_snapshot")!.handler({});
   expect(transport.snapshot).toHaveBeenCalledWith(
     expect.objectContaining({ maxDim: 640 }),
   );
 });
 
-test("obsbot_snapshot honours an explicit resolution", async () => {
+test("obsbot_capture_snapshot honours an explicit resolution", async () => {
   const transport = makeFakeTransport();
   const tools = createTools(async () => transport, makeFakeMgr());
-  await tools.find((t) => t.name === "obsbot_snapshot")!.handler({ resolution: 1920 });
+  await tools.find((t) => t.name === "obsbot_capture_snapshot")!.handler({ resolution: 1920 });
   expect(transport.snapshot).toHaveBeenCalledWith(
     expect.objectContaining({ maxDim: 1920 }),
   );

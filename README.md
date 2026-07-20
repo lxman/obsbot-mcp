@@ -43,7 +43,7 @@ If you're running from a local checkout instead of an npm install, point `comman
 
 By default the server advertises only the normal control surface. Pass `--debug` to additionally
 expose the diagnostics surface — the `obsbot_probe` tool (raw XU byte get/set/query) and the
-`raw` 60-byte status block on `obsbot_get_status`:
+`raw` 60-byte status block on `obsbot_status`:
 
 ```json
 {
@@ -64,16 +64,16 @@ With the installed binary, use `"command": "obsbot-mcp"` and `"args": ["--debug"
 
 | Tool | Parameters | Description |
 |------|------------|-------------|
-| `obsbot_list_devices` | — | List connected OBSBOT-compatible video capture devices. |
+| `obsbot_devices` | — | List connected OBSBOT-compatible video capture devices. |
 | `obsbot_set_run_status` | `state`: `"run" \| "sleep"` | Wake (`"run"`) or sleep the camera/gimbal. |
-| `obsbot_get_status` | — | Read the live status block: `{ awake, hdr, aiMode, trackSpeed }`. Under `--debug`, also returns the raw 60-byte block as hex. |
+| `obsbot_status` | — | Read the live status block: `{ awake, hdr, aiMode, trackSpeed }`. Under `--debug`, also returns the raw 60-byte block as hex. |
 
 ### Gimbal (PTZ)
 
 | Tool | Parameters | Description |
 |------|------------|-------------|
-| `obsbot_ptz_move_angle` | `yaw`, `pitch`, `roll` (degrees, `roll` defaults `0`) | Move the gimbal to an absolute angle. Positive yaw pans to the camera's left, positive pitch tilts down. Yaw clamped to `[-150, 150]`, pitch to `[-90, 90]`. Absolute 1:1 degrees, hardware-verified. |
-| `obsbot_ptz_move_speed` | `yaw`, `pitch`, `roll` (deg/s, `roll` defaults `0`), `autoStopMs` (default `800`) | Drive the gimbal at a speed, then auto-stop after `autoStopMs` so it can't run away. Same yaw/pitch sign convention as `move_angle`. |
+| `obsbot_gimbal_move` | `yaw`, `pitch`, `roll` (degrees, `roll` defaults `0`) | Move the gimbal to an absolute angle. Positive yaw pans to the camera's left, positive pitch tilts down. Yaw clamped to `[-150, 150]`, pitch to `[-90, 90]`. Absolute 1:1 degrees, hardware-verified. |
+| `obsbot_gimbal_move_speed` | `yaw`, `pitch`, `roll` (deg/s, `roll` defaults `0`), `autoStopMs` (default `800`) | Drive the gimbal at a speed, then auto-stop after `autoStopMs` so it can't run away. Same yaw/pitch sign convention as `gimbal_move`. |
 | `obsbot_gimbal_recenter` | — | Recenter the gimbal (return to home position). |
 | `obsbot_gimbal_position` | — | Read the gimbal's current absolute `{ yaw, pitch }` in degrees via standard UVC Pan/Tilt. May lag a move still in progress. |
 
@@ -97,35 +97,35 @@ failure if the device didn't land the change.
 
 | Tool | Parameters | Description |
 |------|------------|-------------|
-| `obsbot_zoom_absolute` | `ratio` (`1.0`–`2.0`) | Set absolute zoom ratio, clamped to `[1.0, 2.0]`. |
-| `obsbot_zoom_speed` | `ratio` (`1.0`–`2.0`), `speed` (default `0`) | Zoom to a ratio at a chosen speed: `0` = device default, `1`–`10` slow→fast, `255` = maximum. |
+| `obsbot_zoom_uvc` | `ratio` (`1.0`–`2.0`) | Standard UVC zoom: set an absolute zoom ratio, clamped to `[1.0, 2.0]`, snaps to the requested target exactly. |
+| `obsbot_zoom_vendor` | `ratio` (`1.0`–`2.0`), `speed` (default `0`) | Vendor zoom path with adjustable speed: zoom to a ratio at a chosen speed (`0` = device default, `1`–`10` slow→fast, `255` = maximum). Its ratio scale differs from `obsbot_zoom_uvc` and may not land exactly on the requested target. |
 
 ### AI tracking
 
 | Tool | Parameters | Description |
 |------|------------|-------------|
-| `obsbot_ai_tracking` | `enabled` (bool), `mode` (default `"normal"`) | Enable/disable AI tracking and choose the mode: a human framing (`normal \| upper-body \| close-up \| headless \| lower-body`) or a scene mode (`group \| whiteboard \| desk \| hand`). Polls status and returns `{ verified, matched }` (`matched:false` = no subject tracked yet). |
+| `obsbot_ai_track` | `enabled` (bool), `mode` (default `"normal"`) | Enable/disable AI tracking and choose the mode: a human framing (`normal \| upper-body \| close-up \| headless \| lower-body`) or a scene mode (`group \| whiteboard \| desk \| hand`). Polls status and returns `{ verified, matched }` (`matched:false` = no subject tracked yet). |
 | `obsbot_ai_track_speed` | `speed`: `"standard" \| "sport"` | Set the tracking-speed preset (Center's Standard/Sport): `standard` (slower follow) or `sport` (snappier). |
-| `obsbot_face_focus` | `enabled` (bool) | Enable or disable face-priority autofocus. |
+| `obsbot_focus_face` | `enabled` (bool) | Enable or disable face-priority autofocus. |
 
 ### Image & lens
 
 | Tool | Parameters | Description |
 |------|------------|-------------|
-| `obsbot_fov` | `fov`: `"wide" \| "medium" \| "narrow"` | Set the field of view: wide (86°), medium (78°), narrow (65°). |
-| `obsbot_hdr` | `enabled` (bool) | Toggle HDR/WDR imaging on or off. |
+| `obsbot_image_fov` | `fov`: `"wide" \| "medium" \| "narrow"` | Set the field of view: wide (86°), medium (78°), narrow (65°). |
+| `obsbot_image_hdr` | `enabled` (bool) | Toggle HDR/WDR imaging on or off. |
 | `obsbot_focus` | `mode`: `"auto" \| "manual"`, `position` (`0`–`100`, default `50`) | `auto` = continuous autofocus; `manual` = set the focus motor to `position` (near→far). |
 | `obsbot_exposure` | `mode`: `"auto" \| "manual"`, `level` (`0`–`100`, default `50`), `priority` (`"global" \| "face"`, optional) | `auto` = auto-exposure (optional `priority` selects global vs face metering); `manual` = set `level` (0 darkest → 100 brightest). |
 | `obsbot_white_balance` | `mode`: `"auto" \| "manual"`, `temperature` (Kelvin, default `5000`) | `auto` = auto white balance; `manual` = set a colour temperature (clamped to device range). |
-| `obsbot_image_control` | `control`, `level` (`0`–`100`) | Adjust `brightness \| contrast \| hue \| saturation \| sharpness \| gain \| backlight-compensation`; `level` maps onto the device range. |
+| `obsbot_image_adjust` | `control`, `level` (`0`–`100`) | Adjust `brightness \| contrast \| hue \| saturation \| sharpness \| gain \| backlight-compensation`; `level` maps onto the device range. |
 
 ### Capture
 
 | Tool | Parameters | Description |
 |------|------------|-------------|
-| `obsbot_snapshot` | `maxDim` (`256`–`1920`, default `1024`), `quality` (`1`–`100`, default `80`), `settleMs` (default `600`), `source` (default `"device"`) | Grab one still frame and return it as an image (for framing/lighting/exposure checks). `source`: `device \| virtual \| ndi`. |
-| `obsbot_record_start` | `durationSec` (optional), `audio` (default `true`), `outputPath` (optional), `source` (default `"device"`) | Start recording to MP4. Open-ended recordings auto-stop after 60 min; audio uses the OBSBOT mic; defaults under `Videos/OBSBOT`. Returns a `sessionId`. **Needs ffmpeg.**¹ |
-| `obsbot_preview_start` | `source` (default `"device"`) | Open a live preview window. Returns a `sessionId`. **Needs ffplay.**¹ |
+| `obsbot_capture_snapshot` | `maxDim` (`256`–`1920`, default `1024`), `quality` (`1`–`100`, default `80`), `settleMs` (default `600`), `source` (default `"device"`) | Grab one still frame and return it as an image (for framing/lighting/exposure checks). `source`: `device \| virtual \| ndi`. |
+| `obsbot_capture_record` | `durationSec` (optional), `audio` (default `true`), `outputPath` (optional), `source` (default `"device"`) | Start recording to MP4. Open-ended recordings auto-stop after 60 min; audio uses the OBSBOT mic; defaults under `Videos/OBSBOT`. Returns a `sessionId`. **Needs ffmpeg.**¹ |
+| `obsbot_capture_preview` | `source` (default `"device"`) | Open a live preview window. Returns a `sessionId`. **Needs ffplay.**¹ |
 | `obsbot_capture_stop` | `sessionId` | Stop a recording or preview session (recordings are finalized gracefully). |
 | `obsbot_capture_list` | — | List active recording/preview sessions. |
 
@@ -214,7 +214,7 @@ What has actually been exercised against hardware, and what hasn't:
   behaviour, not a bug: turn tracking off for unopposed manual control.
 - **The camera may not enumerate through a USB hub or dock.** A Tiny 2 connected through a USB-C
   dock was invisible to `ioreg` and `system_profiler` entirely — not just to this server. If
-  `obsbot_list_devices` comes back empty, try a direct connection before assuming a software fault.
+  `obsbot_devices` comes back empty, try a direct connection before assuming a software fault.
 - **Only the OBSBOT Tiny 2 is supported.** On macOS the USB vendor/product IDs are hardcoded
   (`0x3564`/`0xFEF8`), so no other model is detected at all. Windows and Linux match devices by
   name, so a different OBSBOT may be *found* — but the vendor command set is Tiny 2 specific
