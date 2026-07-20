@@ -1,6 +1,7 @@
 import { HelperProcess } from "./helper-process.js";
 import { ObsbotTransport, Snapshot, SnapshotOpts } from "./transport.js";
 import { encodePtzMoveSpeed } from "../codec/commands.js";
+import { readSerialVia } from "./read-serial.js";
 
 const VENDOR_XU_SELECTOR = 0x02;
 // Unproven per-command reply path — reads back zeros. See the WindowsTransport
@@ -137,6 +138,10 @@ export class LinuxTransport implements ObsbotTransport {
       this.camCtrlSet(0, 0, 2),
       this.camCtrlSet(1, 0, 2),
     ]);
+  }
+
+  async readSerial(): Promise<string> {
+    return readSerialVia(this);
   }
 
   nextSeq(): number {

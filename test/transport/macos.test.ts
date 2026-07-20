@@ -1,6 +1,7 @@
 import { expect, test, vi } from "vitest";
 import { MacosTransport } from "../../src/transport/macos.js";
 import type { HelperProcess } from "../../src/transport/helper-process.js";
+import { buildFrame } from "../../src/codec/frame.js";
 
 // The Tiny 2 exposes live absolute pan/tilt on UVC CT selector 0x0D as two
 // int32 arc-seconds. The helper returns the raw per-axis arc-second value; the
@@ -21,6 +22,43 @@ function makeFakeHelper(camCtrlGetValue = 180000) {
     camCtrlSet: vi.fn(async (_p: number, _v: number, _f: number) => {}),
     camCtrlRange: vi.fn(async (_p: number) => ({ min: -468000, max: 468000 })),
     camCtrlGet: vi.fn(async (_p: number) => ({ value: camCtrlGetValue, flags: 2 })),
+    procAmpSet: vi.fn(async (_p: number, _v: number, _f: number) => {}),
+    procAmpRange: vi.fn(async (_p: number) => ({ min: 0, max: 100 })),
+    close: vi.fn(async () => {}),
+  } as unknown as HelperProcess;
+}
+
+// Fake helper for readSerial: xuSet captures the request's seq (bytes 2-3
+// LE) so the following xuGet can echo it back in a valid UG_GET_SN reply
+// frame — built with the repo's own buildFrame so both CRCs are correct and
+// parseFrame accepts it. Reply swaps sender/receiver vs the request (0x0d ->
+// 0x0a) and carries the serial as its payload.
+function makeFakeHelperWithSerial(serial: string) {
+  let lastSeq = 0;
+  return {
+    xuSet: vi.fn(async (_selector: number, data: Buffer) => {
+      lastSeq = data.readUInt16LE(2);
+    }),
+    xuGet: vi.fn(async (_selector: number, _length: number) =>
+      buildFrame({
+        seq: lastSeq,
+        cmd: 0x18c8,
+        receiver: 0x0a,
+        sender: 0x0d,
+        payload: Buffer.from(serial, "ascii"),
+      }),
+    ),
+    zoomRange: vi.fn(async () => ({ min: 0, max: 100 })),
+    zoomSet: vi.fn(async (_units: number) => {}),
+    snapshot: vi.fn(async (_opts: unknown) => ({
+      mime: "image/jpeg",
+      width: 640,
+      height: 360,
+      base64: "QUJD",
+    })),
+    camCtrlSet: vi.fn(async (_p: number, _v: number, _f: number) => {}),
+    camCtrlRange: vi.fn(async (_p: number) => ({ min: -468000, max: 468000 })),
+    camCtrlGet: vi.fn(async (_p: number) => ({ value: 0, flags: 2 })),
     procAmpSet: vi.fn(async (_p: number, _v: number, _f: number) => {}),
     procAmpRange: vi.fn(async (_p: number) => ({ min: 0, max: 100 })),
     close: vi.fn(async () => {}),
@@ -109,4 +147,10 @@ test("close delegates to helper", async () => {
   const t = new MacosTransport(helper);
   await t.close();
   expect(helper.close).toHaveBeenCalledOnce();
+});
+
+test("readSerial sends a 0x01 UG_GET_SN GET and returns the ASCII serial", async () => {
+  const helper = makeFakeHelperWithSerial("RMOWAHG3293TTL");
+  const t = new MacosTransport(helper);
+  expect(await t.readSerial()).toBe("RMOWAHG3293TTL");
 });

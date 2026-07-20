@@ -33,6 +33,13 @@ export const encodeVendorProbe = (name: string, payload: Buffer): VendorFrame =>
 export const encodeVendorGet = (name: string): VendorFrame =>
   vendorOp(name, Buffer.alloc(0), 0x01);
 
+/**
+ * Decode a UG_GET_SN reply payload (14 ASCII bytes) into the serial string.
+ * Anything from the first NUL onward is dropped, then the result is trimmed.
+ */
+export const decodeSerial = (payload: Buffer): string =>
+  payload.toString("ascii").replace(/\0.*$/, "").trim();
+
 // The gimbal move wire payload order is [roll, pitch, yaw] (data[0..3]=roll,
 // [4..7]=pitch, [8..11]=yaw). Sending them in logical (yaw,pitch,roll) order put yaw
 // into the roll slot (roll is unused on Tiny 2), which is why move-to-angle appeared

@@ -3,7 +3,7 @@ import {
   encodeSetRunStatus, encodePtzMoveAngle, encodePtzMoveSpeed, encodeRecenter, zoomRatioToUnits,
   encodeAiTrackEnable, encodeAiTrackDisable, encodeAiGroupEnable, encodeAiTrackSpeed,
   encodeZoomWithSpeed, encodeFaceFocus, encodeGetFaceFocus, decodeFaceFocus, encodeFov, encodeHdr, encodeAiTracking, AI_FRAMING_MODES, percentToRange,
-  encodeAiMode, AI_WORK_MODES, encodeFaceAe, encodeSetExposure, encodeVendorGet,
+  encodeAiMode, AI_WORK_MODES, encodeFaceAe, encodeSetExposure, encodeVendorGet, decodeSerial,
 } from "../../src/codec/commands.js";
 import { decodeStatus } from "../../src/codec/commands.js";
 import { bufToHex } from "../../src/codec/encoding.js";
@@ -317,4 +317,12 @@ test("encodeVendorGet builds a header-only 0x01 GET for UG_GET_SN", () => {
   expect(f[9]).toBe(0x0d);                 // receiver (Upgrade)
   expect(f.readUInt16LE(10)).toBe(0x18c8); // wireCmd
   expect(f.readUInt16LE(12)).toBe(0);      // no nested payload
+});
+
+test("decodeSerial reads 14 ASCII chars from the payload", () => {
+  const payload = Buffer.from("RMOWAHG3293TTL", "ascii");
+  expect(decodeSerial(payload)).toBe("RMOWAHG3293TTL");
+});
+test("decodeSerial trims a trailing NUL", () => {
+  expect(decodeSerial(Buffer.from("RMOWAHG3293TTL\0", "ascii"))).toBe("RMOWAHG3293TTL");
 });
