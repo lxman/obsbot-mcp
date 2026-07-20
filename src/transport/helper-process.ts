@@ -89,7 +89,11 @@ export class HelperProcess {
 
   async enumerate(): Promise<DeviceInfo[]> {
     const resp = await this.rpc({ op: "enumerate" });
-    return resp.devices as DeviceInfo[];
+    return (resp.devices as Array<Record<string, unknown>>).map((d) => ({
+      path: String(d.path ?? ""),
+      name: String(d.name ?? ""),
+      locationId: typeof d.locationId === "number" ? d.locationId : undefined,
+    }));
   }
 
   async open(path: string): Promise<number> {

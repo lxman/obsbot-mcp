@@ -20,13 +20,13 @@ export const gimbalChecks = [
 
   defineCheck({
     id: "gimbal.move.absolute",
-    tool: "obsbot_ptz_move_angle",
+    tool: "obsbot_gimbal_move",
     profile: "quick",
     tier: TIERS.VERIFIED,
     timeoutMs: 30000,
     run: async (ctx) => {
       const target = { yaw: 40, pitch: -15 };
-      await ctx.call("obsbot_ptz_move_angle", target);
+      await ctx.call("obsbot_gimbal_move", target);
       const landed = await ctx.until(
         async () => {
           const p = await ctx.pos();
@@ -51,7 +51,7 @@ export const gimbalChecks = [
     tier: TIERS.VERIFIED,
     timeoutMs: 30000,
     run: async (ctx) => {
-      await ctx.call("obsbot_ptz_move_angle", { yaw: 50, pitch: 20 });
+      await ctx.call("obsbot_gimbal_move", { yaw: 50, pitch: 20 });
       await ctx.sleep(2500);
       await ctx.call("obsbot_gimbal_recenter");
       const centered = await ctx.until(
@@ -67,7 +67,7 @@ export const gimbalChecks = [
 
   defineCheck({
     id: "gimbal.move.speed",
-    tool: "obsbot_ptz_move_speed",
+    tool: "obsbot_gimbal_move_speed",
     profile: "quick",
     tier: TIERS.VERIFIED,
     timeoutMs: 30000,
@@ -75,7 +75,7 @@ export const gimbalChecks = [
       await ctx.call("obsbot_gimbal_recenter");
       await ctx.sleep(2500);
       const before = await ctx.pos();
-      await ctx.call("obsbot_ptz_move_speed", { yaw: 20, pitch: 0, autoStopMs: 800 });
+      await ctx.call("obsbot_gimbal_move_speed", { yaw: 20, pitch: 0, autoStopMs: 800 });
       await ctx.sleep(2000);
       const after = await ctx.pos();
       const moved = Math.abs(after.yaw - before.yaw);

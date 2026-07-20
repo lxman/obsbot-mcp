@@ -7,15 +7,15 @@ const ffmpegMissing = (r) => r.ok === false && /ffmpeg/i.test(r.error ?? "");
 export const captureChecks = [
   defineCheck({
     id: "capture.snapshot",
-    tool: "obsbot_snapshot",
+    tool: "obsbot_capture_snapshot",
     profile: "quick",
     tier: TIERS.VERIFIED,
     timeoutMs: 40000,
     run: async (ctx) => {
-      const r = await ctx.call("obsbot_snapshot", { maxDim: 640, quality: 70 });
+      const r = await ctx.call("obsbot_capture_snapshot", { maxDim: 640, quality: 70 });
       if (ffmpegMissing(r)) return { skip: "ffmpeg absent" };
       if (r.ok === false) throw new Error(r.error);
-      // obsbot_snapshot returns MCP content blocks, not a flat {base64}.
+      // obsbot_capture_snapshot returns MCP content blocks, not a flat {base64}.
       const image = (r.content ?? []).find((b) => b.type === "image");
       if (!image) {
         const text = (r.content ?? []).find((b) => b.type === "text")?.text ?? "no content";
@@ -31,12 +31,12 @@ export const captureChecks = [
 
   defineCheck({
     id: "capture.record",
-    tool: "obsbot_record_start",
+    tool: "obsbot_capture_record",
     profile: "quick",
     tier: TIERS.VERIFIED,
     timeoutMs: 50000,
     run: async (ctx) => {
-      const start = await ctx.call("obsbot_record_start", { durationSec: 2, audio: false });
+      const start = await ctx.call("obsbot_capture_record", { durationSec: 2, audio: false });
       if (ffmpegMissing(start)) return { skip: "ffmpeg absent" };
       if (start.ok === false) throw new Error(start.error);
       await ctx.sleep(4000);
@@ -50,12 +50,12 @@ export const captureChecks = [
   // uncovered — the manifest caught that, which is what it is for.
   defineCheck({
     id: "capture.preview.start",
-    tool: "obsbot_preview_start",
+    tool: "obsbot_capture_preview",
     profile: "quick",
     tier: TIERS.VERIFIED,
     timeoutMs: 50000,
     run: async (ctx) => {
-      const start = await ctx.call("obsbot_preview_start", {});
+      const start = await ctx.call("obsbot_capture_preview", {});
       if (ffmpegMissing(start)) return { skip: "ffmpeg absent" };
       if (start.ok === false) throw new Error(start.error);
       // Handed to the stop check below, which runs next.

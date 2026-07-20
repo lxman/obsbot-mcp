@@ -1,12 +1,12 @@
 import { crc16usb } from "./crc.js";
 import { u16le } from "./encoding.js";
 
-export interface FrameOpts { seq: number; cmd: number; receiver: number; payload: Buffer; sender?: number; }
+export interface FrameOpts { seq: number; cmd: number; receiver: number; payload: Buffer; sender?: number; flags?: number; }
 
 export function buildFrame(o: FrameOpts): Buffer {
   const frame = Buffer.alloc(60);            // zero-padded fixed buffer
   frame[0] = 0xaa;
-  frame[1] = 0x25;                            // flags: UVC + nested payload (const for v1 cmds)
+  frame[1] = o.flags ?? 0x25;                 // 0x25 = SET (nested payload); 0x01 = header-only GET
   u16le(o.seq).copy(frame, 2);
   u16le(12).copy(frame, 4);                   // len = 12 (header covered by token)
   // token field (6-7) stays 0 for the CRC, filled after

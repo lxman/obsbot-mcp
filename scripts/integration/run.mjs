@@ -35,15 +35,17 @@ import { captureChecks } from "./checks/capture.mjs";
 import { transitionChecks } from "./checks/transitions.mjs";
 
 const ALL_TOOLS = [
-  "obsbot_list_devices", "obsbot_set_run_status", "obsbot_ptz_move_angle",
-  "obsbot_ptz_move_speed", "obsbot_gimbal_recenter", "obsbot_zoom_absolute",
-  "obsbot_ai_tracking", "obsbot_ai_track_speed", "obsbot_zoom_speed",
-  "obsbot_face_focus", "obsbot_get_status", "obsbot_probe", "obsbot_fov",
-  "obsbot_hdr", "obsbot_focus", "obsbot_gimbal_position", "obsbot_preset_list",
+  "obsbot_devices", "obsbot_wake", "obsbot_sleep", "obsbot_gimbal_move",
+  "obsbot_gimbal_move_speed", "obsbot_gimbal_recenter", "obsbot_zoom_uvc",
+  "obsbot_ai_track", "obsbot_ai_track_speed", "obsbot_zoom_vendor",
+  "obsbot_focus_face", "obsbot_status", "obsbot_debug_probe", "obsbot_image_fov",
+  "obsbot_image_hdr", "obsbot_focus_auto", "obsbot_focus_manual",
+  "obsbot_gimbal_position", "obsbot_preset_list",
   "obsbot_preset_save", "obsbot_preset_recall", "obsbot_preset_update",
-  "obsbot_preset_rename", "obsbot_preset_delete", "obsbot_white_balance",
-  "obsbot_image_control", "obsbot_exposure", "obsbot_snapshot",
-  "obsbot_record_start", "obsbot_preview_start", "obsbot_capture_stop",
+  "obsbot_preset_rename", "obsbot_preset_delete", "obsbot_image_wb_auto",
+  "obsbot_image_wb_manual", "obsbot_image_adjust", "obsbot_image_exposure_auto",
+  "obsbot_image_exposure_manual", "obsbot_capture_snapshot",
+  "obsbot_capture_record", "obsbot_capture_preview", "obsbot_capture_stop",
   "obsbot_capture_list",
 ];
 
@@ -56,7 +58,7 @@ const WATCHDOG_MS = process.argv.includes("--deep") ? 15 * 60_000 : 10 * 60_000;
 const watchdog = setTimeout(() => {
   console.error(`
 WATCHDOG: run exceeded ${WATCHDOG_MS / 60000} minutes — forcing exit.`);
-  console.error("The camera may be left awake; run obsbot_set_run_status sleep if so.");
+  console.error("The camera may be left awake; run obsbot_sleep if so.");
   process.exit(2);
 }, WATCHDOG_MS);
 
@@ -75,11 +77,13 @@ async function main() {
   let byName = null;
 
   try {
-    const mgr = new DeviceManager(helper);
-    const transport = await mgr.openFirstObsbot();
-    // debug=true exposes obsbot_probe (RE/diagnostics, filtered out otherwise), and a
+    const mgr = new DeviceManager(async () => helper);
+    // Bind the single camera eagerly; createTools resolves per-camera via mgr.get()
+    // inside each handler (no `camera` selector => this one bound camera).
+    await mgr.openFirstObsbot();
+    // debug=true exposes obsbot_debug_probe (RE/diagnostics, filtered out otherwise), and a
     // CaptureManager is required or every capture tool returns 'not configured'.
-    const tools = createTools(async () => transport, mgr, new CaptureManager(), undefined, true);
+    const tools = createTools(mgr, new CaptureManager(), true);
     byName = new Map(tools.map((t) => [t.name, t]));
 
     const call = async (name, args = {}) => {
@@ -103,7 +107,7 @@ async function main() {
       if (!keepAwake) return;
       if (Date.now() - lastWake < HEARTBEAT_MS) return;
       lastWake = Date.now();
-      await call("obsbot_set_run_status", { state: "run" });
+      await call("obsbot_wake");
     };
 
     const ctx = {
@@ -112,7 +116,7 @@ async function main() {
       log: (m) => console.log(`   ${m}`),
       deep,
       pos: async () => call("obsbot_gimbal_position"),
-      status: async () => call("obsbot_get_status"),
+      status: async () => call("obsbot_status"),
       // Collect `count` samples spaced `everyMs` apart — the primitive behind the
       // mid-flight probes. A single sample of a system in motion describes one
       // instant, not the state the next call lands in.
@@ -150,9 +154,9 @@ async function main() {
         // actually asleep: the gimbal self-centers for ~1-2s after a wake and
         // overrides commands issued inside that window, so an unconditional wake
         // before every check makes the next move silently fail.
-        const st = await call("obsbot_get_status");
+        const st = await call("obsbot_status");
         if (st.awake === false) {
-          await call("obsbot_set_run_status", { state: "run" });
+          await call("obsbot_wake");
           await sleep(WAKE_SETTLE_MS);
         }
         lastWake = Date.now();
@@ -177,7 +181,7 @@ async function main() {
   } finally {
     // Always leave the camera asleep, including on error or abort.
     try {
-      await byName?.get("obsbot_set_run_status")?.handler({ state: "sleep" });
+      await byName?.get("obsbot_sleep")?.handler({});
     } catch {
       /* teardown is best-effort; never mask the original failure */
     }

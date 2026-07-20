@@ -1,7 +1,19 @@
 import { decodeStatus } from "../codec/commands.js";
 import { encodeSetRunStatus } from "../codec/commands.js";
 import { ObsbotTransport } from "../transport/transport.js";
-import { DeviceSession } from "../device/session.js";
+
+/**
+ * The minimal slice of connection-lifecycle control the readiness gate needs to
+ * self-heal a mid-session disconnect: drop the dead transport so a re-resolve
+ * rebinds, and report (once, clearing on read) whether that re-resolve was a
+ * reconnect. Satisfied by DeviceManager (via a thin adapter in server.ts); the
+ * two methods are exactly what the retired DeviceSession exposed, so ensureReady
+ * changes only the type it depends on, not its body.
+ */
+export interface ReconnectCtl {
+  invalidate(): Promise<void>;
+  takeReconnected(): boolean;
+}
 
 export type ReadyResult =
   | { ok: true; transport: ObsbotTransport; reconnected: boolean }
@@ -35,12 +47,12 @@ const readAwake = async (t: ObsbotTransport): Promise<boolean> =>
  *  - awake        → { ok:true, transport, reconnected }.
  *
  * The command is only sent by the caller after ok:true — a gate failure never
- * touches the gimbal. Without a session, self-heal is skipped but awake-gating
- * still applies.
+ * touches the gimbal. Without a reconnect controller, self-heal is skipped but
+ * awake-gating still applies.
  */
 export async function ensureReady(
   getTransport: () => Promise<ObsbotTransport>,
-  session?: DeviceSession,
+  reconnect?: ReconnectCtl,
   opts: ReadyOpts = {},
 ): Promise<ReadyResult> {
   const { pollMs, wakeTimeoutMs, settleMs } = { ...DEFAULTS, ...opts };
@@ -56,11 +68,11 @@ export async function ensureReady(
   try {
     awake = await readAwake(t);
   } catch (e) {
-    // Probe failed — device likely unplugged. Self-heal once if we have a session.
-    if (!session) {
+    // Probe failed — device likely unplugged. Self-heal once if we can.
+    if (!reconnect) {
       return { ok: false, reason: "unreachable", error: `camera not reachable: ${msg(e)}` };
     }
-    session.invalidate();
+    await reconnect.invalidate();
     try {
       t = await getTransport();
       awake = await readAwake(t);
@@ -90,5 +102,5 @@ export async function ensureReady(
     await sleep(settleMs); // let the gimbal finish rising before we drive it
   }
 
-  return { ok: true, transport: t, reconnected: session?.takeReconnected() ?? false };
+  return { ok: true, transport: t, reconnected: reconnect?.takeReconnected() ?? false };
 }

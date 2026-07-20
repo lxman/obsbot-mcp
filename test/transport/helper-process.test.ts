@@ -89,3 +89,12 @@ test("camctrl_get round-trips value and flags", async () => {
   expect(await h.camCtrlGet(0)).toEqual({ value: 300, flags: 2 });
   await h.close();
 });
+
+test("enumerate surfaces locationId from the helper", async () => {
+  const h = new HelperProcess(["node", fake]);
+  await h.start();
+  const devs = await h.enumerate();
+  expect(devs[0].locationId).toBe(51511296);
+  expect(devs[0].serial).toBeUndefined(); // serial is read later, not at enumerate
+  await h.close();
+});

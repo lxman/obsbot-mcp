@@ -7,22 +7,38 @@ import { OP_BY_NAME } from "./opcodes.js";
 // from the reverse-engineered opcode table (src/codec/opcodes.ts) rather than
 // magic numbers, so the same definitions serve every platform transport and
 // new commands are a table row + a payload encoder.
-const vendorOp = (name: string, payload: Buffer): VendorFrame => {
+const vendorOp = (name: string, payload: Buffer, flags?: number): VendorFrame => {
   const op = OP_BY_NAME.get(name);
   if (!op || op.wireCmd === null || op.receiver === null) {
     throw new Error(`opcode "${name}" is not a sendable V3 command`);
   }
   const { wireCmd, receiver } = op;
-  return { kind: "vendor", buildFrame: (seq: number) => buildFrame({ seq, cmd: wireCmd, receiver, payload }) };
+  return { kind: "vendor", buildFrame: (seq: number) => buildFrame({ seq, cmd: wireCmd, receiver, payload, flags }) };
 };
 
 /**
  * RE/diagnostics: build ANY opcode-table entry as a V3 frame with an arbitrary
- * payload. Used by the obsbot_probe tool to exercise unmapped GET/query opcodes
- * (e.g. AI_GET_QUICK_STATUS) while reverse-engineering the feedback surface.
+ * payload. Used by the obsbot_debug_probe tool to exercise unmapped GET/query
+ * opcodes (e.g. AI_GET_QUICK_STATUS) while reverse-engineering the feedback surface.
  */
 export const encodeVendorProbe = (name: string, payload: Buffer): VendorFrame =>
   vendorOp(name, payload);
+
+/**
+ * Header-only vendor GET (flags 0x01, no nested payload). On this device the
+ * framed-V3 vendor GET path only answers when the frame's flags byte is 0x01;
+ * SET commands (the vendorOp default) use 0x25. wireCmd/receiver come from the
+ * opcode table, same as every other vendor encoder.
+ */
+export const encodeVendorGet = (name: string): VendorFrame =>
+  vendorOp(name, Buffer.alloc(0), 0x01);
+
+/**
+ * Decode a UG_GET_SN reply payload (14 ASCII bytes) into the serial string.
+ * Anything from the first NUL onward is dropped, then the result is trimmed.
+ */
+export const decodeSerial = (payload: Buffer): string =>
+  payload.toString("ascii").replace(/\0.*$/, "").trim();
 
 // The gimbal move wire payload order is [roll, pitch, yaw] (data[0..3]=roll,
 // [4..7]=pitch, [8..11]=yaw). Sending them in logical (yaw,pitch,roll) order put yaw

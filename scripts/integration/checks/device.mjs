@@ -3,27 +3,27 @@ import { defineCheck, TIERS, measurement } from "../harness.mjs";
 export const deviceChecks = [
   defineCheck({
     id: "device.list",
-    tool: "obsbot_list_devices",
+    tool: "obsbot_devices",
     profile: "quick",
     tier: TIERS.VERIFIED,
     run: async (ctx) => {
-      const r = await ctx.call("obsbot_list_devices");
-      const devices = r.devices ?? [];
-      if (devices.length === 0) throw new Error("no OBSBOT device enumerated");
+      const r = await ctx.call("obsbot_devices");
+      const cameras = r.cameras ?? [];
+      if (cameras.length === 0) throw new Error("no OBSBOT device enumerated");
       return {
-        evidence: { count: devices.length },
-        measurements: [measurement("devices", devices.length, "")],
+        evidence: { count: cameras.length },
+        measurements: [measurement("devices", cameras.length, "")],
       };
     },
   }),
 
   defineCheck({
     id: "device.status",
-    tool: "obsbot_get_status",
+    tool: "obsbot_status",
     profile: "quick",
     tier: TIERS.VERIFIED,
     run: async (ctx) => {
-      const s = await ctx.call("obsbot_get_status");
+      const s = await ctx.call("obsbot_status");
       if (typeof s.awake !== "boolean") throw new Error("status block did not decode an awake flag");
       return { evidence: { awake: s.awake, aiMode: s.aiMode } };
     },
@@ -33,14 +33,19 @@ export const deviceChecks = [
     id: "device.run-status.wake",
     // Observes sleep deliberately: the runner must not keep this one awake.
     managesSleep: true,
-    tool: "obsbot_set_run_status",
+    // NOTE: this check drives both obsbot_sleep and obsbot_wake (the round trip
+    // is the point), but the coverage manifest only tracks one `tool` per check.
+    // obsbot_wake is declared here because it's the transition whose result is
+    // the check's returned evidence; obsbot_sleep coverage is claimed by
+    // transitions.T5.gate-behaviour instead. See task report for detail.
+    tool: "obsbot_wake",
     profile: "quick",
     tier: TIERS.VERIFIED,
     timeoutMs: 30000,
     run: async (ctx) => {
-      await ctx.call("obsbot_set_run_status", { state: "sleep" });
+      await ctx.call("obsbot_sleep", {});
       await ctx.until(async () => (await ctx.status()).awake === false);
-      await ctx.call("obsbot_set_run_status", { state: "run" });
+      await ctx.call("obsbot_wake", {});
       const awake = await ctx.until(async () => (await ctx.status()).awake === true);
       // Independent channel: the status block, not the command's own return value.
       return { evidence: { awake } };
@@ -49,13 +54,13 @@ export const deviceChecks = [
 
   defineCheck({
     id: "device.probe",
-    tool: "obsbot_probe",
+    tool: "obsbot_debug_probe",
     profile: "quick",
     tier: TIERS.VERIFIED,
     run: async (ctx) => {
       // probe is an RE instrument, not a feature. Exercised only to prove the raw
       // XU read path is alive; the status block starts 0x25 on this device.
-      const r = await ctx.call("obsbot_probe", { mode: "get", selector: 6, length: 60 });
+      const r = await ctx.call("obsbot_debug_probe", { mode: "get", selector: 6, length: 60 });
       if (r.ok === false) throw new Error(r.error);
       // mode 'get' returns { selector, len, raw } — the field is `raw`, not `hex`.
       const raw = r.raw ?? "";

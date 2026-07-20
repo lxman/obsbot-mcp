@@ -69,6 +69,12 @@ export interface ObsbotTransport {
   gimbalSpeed(yaw: number, pitch: number, roll: number, autoStopMs: number): Promise<void>;
   /** Recenter the gimbal to yaw=0, pitch=0. */
   gimbalRecenter(): Promise<void>;
+  /**
+   * Read the camera's 14-char ASCII serial number (UG_GET_SN): sends a
+   * header-only vendor GET on the vendor XU selector and polls the reply
+   * mailbox for a valid, matching reply. Throws if no valid reply arrives.
+   */
+  readSerial(): Promise<string>;
   nextSeq(): number;
   close(): Promise<void>;
 }

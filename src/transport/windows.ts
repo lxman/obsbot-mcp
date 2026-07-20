@@ -1,6 +1,7 @@
 import { HelperProcess } from "./helper-process.js";
 import { ObsbotTransport, Snapshot, SnapshotOpts } from "./transport.js";
 import { encodeRecenter, encodePtzMoveAngle, encodePtzMoveSpeed } from "../codec/commands.js";
+import { readSerialVia } from "./read-serial.js";
 
 const VENDOR_XU_SELECTOR = 0x02;
 // Intended read-back selector for the (future) per-command V3-frame Get path
@@ -97,6 +98,10 @@ export class WindowsTransport implements ObsbotTransport {
 
   async gimbalRecenter(): Promise<void> {
     await this.sendVendor(encodeRecenter().buildFrame(this.nextSeq()));
+  }
+
+  async readSerial(): Promise<string> {
+    return readSerialVia(this);
   }
 
   nextSeq(): number {

@@ -1,6 +1,7 @@
 import { HelperProcess } from "./helper-process.js";
 import { ObsbotTransport, Snapshot, SnapshotOpts } from "./transport.js";
 import { encodeRecenter, encodePtzMoveAngle, encodePtzMoveSpeed } from "../codec/commands.js";
+import { readSerialVia } from "./read-serial.js";
 
 // Same XU selector constants as WindowsTransport — they're defined by the
 // OBSBOT protocol, not the OS:
@@ -123,6 +124,10 @@ export class MacosTransport implements ObsbotTransport {
 
   async gimbalRecenter(): Promise<void> {
     await this.sendVendor(encodeRecenter().buildFrame(this.nextSeq()));
+  }
+
+  async readSerial(): Promise<string> {
+    return readSerialVia(this);
   }
 
   nextSeq(): number {

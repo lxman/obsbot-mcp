@@ -6,26 +6,26 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { zodToJsonSchema } from "zod-to-json-schema";
 import { DeviceManager } from "../device/manager.js";
-import { DeviceSession } from "../device/session.js";
 import { HelperProcess } from "../transport/helper-process.js";
-import { ObsbotTransport } from "../transport/transport.js";
 import { createTools, ToolDef } from "./tools.js";
 import { renderToolResult } from "./render.js";
 import { CaptureManager } from "../capture/manager.js";
 
 export async function startServer(opts: { debug?: boolean } = {}): Promise<void> {
-  const helper = new HelperProcess();
-  await helper.start();
-  const mgr = new DeviceManager(helper);
+  const mgr = new DeviceManager(async () => {
+    const helper = new HelperProcess();
+    await helper.start();
+    return helper;
+  });
 
-  // DeviceSession owns the connection lifecycle: lazy open, invalidate + re-open
-  // on a mid-session disconnect (self-heal), and reconnect tracking.
-  const session = new DeviceSession(mgr);
-  const getTransport = (): Promise<ObsbotTransport> => session.get();
-
+  // DeviceManager now owns the connection lifecycle: lazy bind, invalidate +
+  // re-bind on a mid-session disconnect (self-heal), and per-camera reconnect
+  // tracking. createTools derives per-camera resolution (getTransport / reconnect
+  // / readiness gate) from the manager itself, keyed by each tool's optional
+  // `camera` selector — so nothing per-camera is wired up out here anymore.
   const capture = new CaptureManager();
-  // --debug exposes the RE/diagnostics surface (obsbot_probe tool + get_status raw block).
-  const tools: ToolDef[] = createTools(getTransport, mgr, capture, session, opts.debug ?? false);
+  // --debug exposes the RE/diagnostics surface (obsbot_debug_probe tool + status raw block).
+  const tools: ToolDef[] = createTools(mgr, capture, opts.debug ?? false);
 
   // Kill any recording/preview child processes when the server exits, so nothing orphans.
   const shutdown = (): void => capture.stopAll();
