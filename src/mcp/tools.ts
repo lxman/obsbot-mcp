@@ -80,41 +80,50 @@ const bool = () =>
     z.boolean(),
   );
 
+// Optional per-camera selector, shared by every camera-addressing tool. The value
+// is the camera's serial; the handler forwards it to DeviceManager.get(serial)
+// (via getTransport/gate) so the command targets that camera. Omitted + a single
+// camera attached resolves to that camera, so single-camera callers are unaffected.
+// EXEMPT tools (obsbot_devices, obsbot_capture_stop/list, obsbot_debug_probe) keep
+// a plain z.object and never advertise `camera`.
+const withCamera = <T extends z.ZodRawShape>(shape: T) =>
+  z.object({ ...shape, camera: z.string().optional() });
+
 const listDevicesSchema = z.object({});
-const wakeSchema = z.object({});
-const sleepSchema = z.object({});
-const ptzMoveAngleSchema = z.object({
+const wakeSchema = withCamera({});
+const sleepSchema = withCamera({});
+const ptzMoveAngleSchema = withCamera({
   yaw: num(),
   pitch: num(),
   roll: num().default(0),
 });
-const ptzMoveSpeedSchema = z.object({
+const ptzMoveSpeedSchema = withCamera({
   yaw: num(),
   pitch: num(),
   roll: num().default(0),
   autoStopMs: num().default(800),
 });
-const gimbalRecenterSchema = z.object({});
-const zoomAbsoluteSchema = z.object({ ratio: num() });
+const gimbalRecenterSchema = withCamera({});
+const zoomAbsoluteSchema = withCamera({ ratio: num() });
 
 // mode covers the human framings AND the standalone scene modes (group/whiteboard/
 // desk/hand). For a framing, enable = human tracking with that framing; for a scene
 // mode, `enabled` is implied true (disable via enabled:false, which cancels tracking).
 const AI_TRACKING_MODES = [...AI_FRAMING_MODES, ...AI_SCENE_MODES];
-const aiTrackingSchema = z.object({
+const aiTrackingSchema = withCamera({
   enabled: bool(),
   mode: z.enum(AI_TRACKING_MODES as [string, ...string[]]).default("normal"),
 });
 const isSceneMode = (m: string): m is AiSceneMode => (AI_SCENE_MODES as string[]).includes(m);
-const aiTrackSpeedSchema = z.object({
+const aiTrackSpeedSchema = withCamera({
   speed: z.enum(AI_TRACK_SPEEDS as [AiTrackSpeed, ...AiTrackSpeed[]]),
 });
-const zoomSpeedSchema = z.object({
+const zoomSpeedSchema = withCamera({
   ratio: num(),
   speed: num().default(0),
 });
-const faceFocusSchema = z.object({ enabled: bool() });
-const getStatusSchema = z.object({});
+const faceFocusSchema = withCamera({ enabled: bool() });
+const getStatusSchema = withCamera({});
 // Generic RE/spelunking primitive: raw send-bytes / get-bytes on any XU selector,
 // plus a `query` convenience that frames a table opcode and reads the reply.
 const probeSchema = z.object({
@@ -135,39 +144,39 @@ const PROBE_VENDOR_SELECTOR = 0x02;
 // single unvalidated read can return stale data — same hazard readSerialVia
 // (transport/read-serial.ts) polls around. Mirrors its POLL_ATTEMPTS.
 const PROBE_QUERY_POLL_ATTEMPTS = 8;
-const fovSchema = z.object({ fov: z.enum(FOV_TYPES as [FovType, ...FovType[]]) });
-const hdrSchema = z.object({ enabled: bool() });
-const focusAutoSchema = z.object({});
-const focusManualSchema = z.object({
+const fovSchema = withCamera({ fov: z.enum(FOV_TYPES as [FovType, ...FovType[]]) });
+const hdrSchema = withCamera({ enabled: bool() });
+const focusAutoSchema = withCamera({});
+const focusManualSchema = withCamera({
   position: num().pipe(z.number().min(0).max(100)).default(50),
 });
-const imageWbAutoSchema = z.object({});
-const imageWbManualSchema = z.object({ temperature: num().default(5000) });
-const imageControlSchema = z.object({
+const imageWbAutoSchema = withCamera({});
+const imageWbManualSchema = withCamera({ temperature: num().default(5000) });
+const imageControlSchema = withCamera({
   control: z.enum(IMAGE_CONTROLS as [ImageControl, ...ImageControl[]]),
   level: num().pipe(z.number().min(0).max(100)),
 });
-const imageExposureAutoSchema = z.object({
+const imageExposureAutoSchema = withCamera({
   // Auto-exposure metering priority: global (whole frame) or face (meters for a
   // detected face). Optional.
   priority: z.enum(["global", "face"]).optional(),
 });
-const imageExposureManualSchema = z.object({
+const imageExposureManualSchema = withCamera({
   level: num().pipe(z.number().min(0).max(100)).default(50),
 });
-const gimbalPositionSchema = z.object({});
-const presetListSchema = z.object({});
-const presetSaveSchema = z.object({
+const gimbalPositionSchema = withCamera({});
+const presetListSchema = withCamera({});
+const presetSaveSchema = withCamera({
   slot: num().pipe(z.union([z.literal(1), z.literal(2), z.literal(3)])),
 });
-const presetSlotSchema = z.object({
+const presetSlotSchema = withCamera({
   slot: num().pipe(z.union([z.literal(1), z.literal(2), z.literal(3)])),
 });
 const presetRecallSchema = presetSlotSchema;
-const presetUpdateSchema = z.object({
+const presetUpdateSchema = withCamera({
   slot: num().pipe(z.union([z.literal(1), z.literal(2), z.literal(3)])),
 });
-const presetRenameSchema = z.object({
+const presetRenameSchema = withCamera({
   slot: num().pipe(z.union([z.literal(1), z.literal(2), z.literal(3)])),
   name: z.string(),
 });
@@ -189,7 +198,7 @@ const PRESET_NAME_MAX = 40;
 // 2M base64 characters, which is far past a usable token budget for "let me look
 // at the shot". The cap is honest: asking for more than the ceiling is rejected
 // rather than silently answered with 1080p.
-const snapshotSchema = z.object({
+const snapshotSchema = withCamera({
   resolution: num().pipe(z.number().min(256).max(1920)).default(640),
   quality: num().pipe(z.number().min(1).max(100)).default(80),
   settleMs: num().pipe(z.number().min(0).max(5000)).default(600),
@@ -367,17 +376,28 @@ async function readPresetSlots(
 }
 
 export function createTools(
-  getTransport: () => Promise<ObsbotTransport>,
   mgr: DeviceManager,
   capture?: CaptureManager,
-  reconnect?: ReconnectCtl,
   debug = false,
   presetRead: PresetReadOpts = {},
 ): ToolDef[] {
+  // Per-camera resolution derived from the manager. Every camera-addressing tool
+  // takes an optional `camera` selector (the serial); it threads through here so
+  // the transport, reconnect controller and readiness gate all target that one
+  // camera. `camera` omitted + a single camera attached => that camera (identical
+  // to the pre-selector behaviour). `camera` omitted + several attached => mgr.get
+  // throws AmbiguousCameraError, and an unknown serial throws UnknownCameraError;
+  // both surface to the caller via the gate's "unreachable" path (its getTransport
+  // throwing is already treated as unreachable, and the message is carried through).
+  const getTransport = (camera?: string): Promise<ObsbotTransport> => mgr.get(camera);
+  const reconnectFor = (camera?: string): ReconnectCtl => ({
+    invalidate: () => mgr.invalidate(camera),
+    takeReconnected: () => mgr.takeReconnected(camera),
+  });
   // Readiness gate for gimbal/AI commands: probe presence + auto-wake if asleep,
   // self-heal (invalidate + re-open) on a mid-session disconnect. Returns the
   // ready transport or an { ok:false } error the handler passes straight through.
-  const gate = () => ensureReady(getTransport, reconnect);
+  const gate = (camera?: string) => ensureReady(() => getTransport(camera), reconnectFor(camera));
   const needCapture = (): CaptureManager => {
     if (!capture) throw new Error("capture manager not configured");
     return capture;
@@ -402,8 +422,8 @@ export function createTools(
       description: "Wake the camera/gimbal (sends \"run\").",
       schema: wakeSchema,
       handler: async (args: unknown) => {
-        wakeSchema.parse(args);
-        const t = await getTransport();
+        const { camera } = wakeSchema.parse(args);
+        const t = await getTransport(camera);
         await t.sendVendor(encodeSetRunStatus("run").buildFrame(t.nextSeq()));
         return { ok: true, state: "run" };
       },
@@ -413,8 +433,8 @@ export function createTools(
       description: "Sleep the camera/gimbal (sends \"sleep\").",
       schema: sleepSchema,
       handler: async (args: unknown) => {
-        sleepSchema.parse(args);
-        const t = await getTransport();
+        const { camera } = sleepSchema.parse(args);
+        const t = await getTransport(camera);
         await t.sendVendor(encodeSetRunStatus("sleep").buildFrame(t.nextSeq()));
         return { ok: true, state: "sleep" };
       },
@@ -431,7 +451,7 @@ export function createTools(
         const yaw = clamp(parsed.yaw, -150, 150);
         const pitch = clamp(parsed.pitch, -90, 90);
         const roll = parsed.roll;
-        const ready = await gate();
+        const ready = await gate(parsed.camera);
         if (!ready.ok) return ready;
         const t = ready.transport;
         await t.gimbalSet(yaw, pitch, roll);
@@ -445,8 +465,8 @@ export function createTools(
         "obsbot_gimbal_move), then automatically stop after autoStopMs (default 800ms) so it can't run away.",
       schema: ptzMoveSpeedSchema,
       handler: async (args: unknown) => {
-        const { yaw, pitch, roll, autoStopMs } = ptzMoveSpeedSchema.parse(args);
-        const ready = await gate();
+        const { yaw, pitch, roll, autoStopMs, camera } = ptzMoveSpeedSchema.parse(args);
+        const ready = await gate(camera);
         if (!ready.ok) return ready;
         const t = ready.transport;
         // Firmware velocity-yaw is inverted relative to position-yaw: the vendor
@@ -461,8 +481,8 @@ export function createTools(
       description: "Recenter the gimbal.",
       schema: gimbalRecenterSchema,
       handler: async (args: unknown) => {
-        gimbalRecenterSchema.parse(args);
-        const ready = await gate();
+        const { camera } = gimbalRecenterSchema.parse(args);
+        const ready = await gate(camera);
         if (!ready.ok) return ready;
         const t = ready.transport;
         await t.gimbalRecenter();
@@ -479,7 +499,7 @@ export function createTools(
       handler: async (args: unknown) => {
         const parsed = zoomAbsoluteSchema.parse(args);
         const ratio = clamp(parsed.ratio, 1.0, 2.0);
-        const t = await getTransport();
+        const t = await getTransport(parsed.camera);
         const { min, max } = await t.zoomRange();
         await t.zoomSet(zoomRatioToUnits(ratio, min, max));
         return { ok: true, ratio };
@@ -497,8 +517,8 @@ export function createTools(
         "means no subject was being tracked, so the mode could not take effect yet).",
       schema: aiTrackingSchema,
       handler: async (args: unknown) => {
-        const { enabled, mode } = aiTrackingSchema.parse(args);
-        const ready = await gate();
+        const { enabled, mode, camera } = aiTrackingSchema.parse(args);
+        const ready = await gate(camera);
         if (!ready.ok) return ready;
         const t = ready.transport;
         const readAiMode = async (): Promise<AiModeStatus> => {
@@ -535,8 +555,8 @@ export function createTools(
         "speed: standard (slower follow) | sport (snappier follow).",
       schema: aiTrackSpeedSchema,
       handler: async (args: unknown) => {
-        const { speed } = aiTrackSpeedSchema.parse(args);
-        const t = await getTransport();
+        const { speed, camera } = aiTrackSpeedSchema.parse(args);
+        const t = await getTransport(camera);
         await t.sendVendor(encodeAiTrackSpeed(speed).buildFrame(t.nextSeq()));
         return { ok: true, speed };
       },
@@ -552,7 +572,7 @@ export function createTools(
         const parsed = zoomSpeedSchema.parse(args);
         const ratio = clamp(parsed.ratio, 1.0, 2.0);
         const speed = clamp(Math.round(parsed.speed), 0, 255);
-        const t = await getTransport();
+        const t = await getTransport(parsed.camera);
         await t.sendVendor(
           encodeZoomWithSpeed(Math.round(ratio * 100), speed).buildFrame(t.nextSeq()),
         );
@@ -564,8 +584,8 @@ export function createTools(
       description: "Enable or disable face-priority autofocus.",
       schema: faceFocusSchema,
       handler: async (args: unknown) => {
-        const { enabled } = faceFocusSchema.parse(args);
-        const t = await getTransport();
+        const { enabled, camera } = faceFocusSchema.parse(args);
+        const t = await getTransport(camera);
         await t.sendVendor(encodeFaceFocus(enabled).buildFrame(t.nextSeq()));
         return { ok: true, enabled };
       },
@@ -580,8 +600,8 @@ export function createTools(
         "(for reverse-engineering undecoded offsets).",
       schema: getStatusSchema,
       handler: async (args: unknown) => {
-        getStatusSchema.parse(args);
-        const t = await getTransport();
+        const { camera } = getStatusSchema.parse(args);
+        const t = await getTransport(camera);
         try {
           const block = await t.recvStatus();
           return { ok: true, ...decodeStatus(block), ...(debug ? { raw: block.toString("hex") } : {}) };
@@ -678,8 +698,8 @@ export function createTools(
       description: "Set the field of view. fov: wide (86°) | medium (78°) | narrow (65°).",
       schema: fovSchema,
       handler: async (args: unknown) => {
-        const { fov } = fovSchema.parse(args);
-        const t = await getTransport();
+        const { fov, camera } = fovSchema.parse(args);
+        const t = await getTransport(camera);
         await t.xuRaw(UVC_XU_SELECTOR, encodeFov(fov as FovType));
         return { ok: true, fov };
       },
@@ -689,8 +709,8 @@ export function createTools(
       description: "Toggle HDR/WDR imaging on or off.",
       schema: hdrSchema,
       handler: async (args: unknown) => {
-        const { enabled } = hdrSchema.parse(args);
-        const t = await getTransport();
+        const { enabled, camera } = hdrSchema.parse(args);
+        const t = await getTransport(camera);
         await t.xuRaw(UVC_XU_SELECTOR, encodeHdr(enabled));
         return { ok: true, enabled };
       },
@@ -700,8 +720,8 @@ export function createTools(
       description: "Enable continuous autofocus.",
       schema: focusAutoSchema,
       handler: async (args: unknown) => {
-        focusAutoSchema.parse(args);
-        const t = await getTransport();
+        const { camera } = focusAutoSchema.parse(args);
+        const t = await getTransport(camera);
         await t.camCtrlSet(CAMERA_CONTROL_FOCUS, 0, UVC_FLAG_AUTO);
         return { ok: true, mode: "auto" };
       },
@@ -712,8 +732,8 @@ export function createTools(
         "Set the focus motor to position (0-100, near→far), mapped onto the device range.",
       schema: focusManualSchema,
       handler: async (args: unknown) => {
-        const { position } = focusManualSchema.parse(args);
-        const t = await getTransport();
+        const { position, camera } = focusManualSchema.parse(args);
+        const t = await getTransport(camera);
         const { min, max } = await t.camCtrlRange(CAMERA_CONTROL_FOCUS);
         const value = percentToRange(position, min, max);
         await t.camCtrlSet(CAMERA_CONTROL_FOCUS, value, UVC_FLAG_MANUAL);
@@ -729,8 +749,8 @@ export function createTools(
         "and reflects motion the host did not command (speed moves, recenter, tracking).",
       schema: gimbalPositionSchema,
       handler: async (args: unknown) => {
-        gimbalPositionSchema.parse(args);
-        const t = await getTransport();
+        const { camera } = gimbalPositionSchema.parse(args);
+        const t = await getTransport(camera);
         const pan = await t.camCtrlGet(CAMERA_CONTROL_PAN);
         const tilt = await t.camCtrlGet(CAMERA_CONTROL_TILT);
         // UVC pan value is degrees, same sign as our yaw (+ = camera-left). UVC tilt
@@ -746,12 +766,12 @@ export function createTools(
         "framed-reply path (which is non-functional for preset data on this device).",
       schema: presetListSchema,
       handler: async (args: unknown) => {
-        presetListSchema.parse(args);
-        const ready = await gate();
+        const { camera } = presetListSchema.parse(args);
+        const ready = await gate(camera);
         if (!ready.ok) return ready;
         const t = ready.transport;
         try {
-          const slots = await readPresetSlots(t, gate, presetRead);
+          const slots = await readPresetSlots(t, () => gate(camera), presetRead);
           return { ok: true, slots, ...(ready.reconnected && { reconnected: true }) };
         } catch (e) {
           return { ok: false, error: msg(e) };
@@ -767,13 +787,13 @@ export function createTools(
         "re-reading the slot list after writing.",
       schema: presetSaveSchema,
       handler: async (args: unknown) => {
-        const { slot } = presetSaveSchema.parse(args);
-        const ready = await gate();
+        const { slot, camera } = presetSaveSchema.parse(args);
+        const ready = await gate(camera);
         if (!ready.ok) return ready;
         const t = ready.transport;
         let pose: PresetPose;
         try {
-          const before = await readPresetSlots(t, gate, presetRead);
+          const before = await readPresetSlots(t, () => gate(camera), presetRead);
           if (before[slot - 1].occupied) {
             return { ok: false, error: `slot ${slot} is occupied; update or delete first` };
           }
@@ -792,7 +812,7 @@ export function createTools(
         // M1: the ADD above has committed. From here on, a thrown error must say so —
         // otherwise a retry hits "slot occupied" with no clue the save actually landed.
         try {
-          const after = await readPresetSlots(t, gate, presetRead);
+          const after = await readPresetSlots(t, () => gate(camera), presetRead);
           if (!after[slot - 1].occupied) {
             return { ok: false, error: "verification failed", expected: "occupied", actual: "empty" };
           }
@@ -813,12 +833,12 @@ export function createTools(
         "only confirms the slot is still occupied, not that the pose has arrived.",
       schema: presetRecallSchema,
       handler: async (args: unknown) => {
-        const { slot } = presetRecallSchema.parse(args);
-        const ready = await gate();
+        const { slot, camera } = presetRecallSchema.parse(args);
+        const ready = await gate(camera);
         if (!ready.ok) return ready;
         const t = ready.transport;
         try {
-          const before = await readPresetSlots(t, gate, presetRead);
+          const before = await readPresetSlots(t, () => gate(camera), presetRead);
           if (!before[slot - 1].occupied) {
             return { ok: false, error: `slot ${slot} is empty; save first` };
           }
@@ -831,7 +851,7 @@ export function createTools(
           if (recallPose) {
             await t.gimbalSet(recallPose.pan, recallPose.tilt);
           }
-          const after = await readPresetSlots(t, gate, presetRead);
+          const after = await readPresetSlots(t, () => gate(camera), presetRead);
           if (!after[slot - 1].occupied) {
             return { ok: false, error: "verification failed", expected: "occupied", actual: "empty" };
           }
@@ -849,14 +869,14 @@ export function createTools(
         "create it). Verifies by re-reading the slot list after writing.",
       schema: presetUpdateSchema,
       handler: async (args: unknown) => {
-        const { slot } = presetUpdateSchema.parse(args);
-        const ready = await gate();
+        const { slot, camera } = presetUpdateSchema.parse(args);
+        const ready = await gate(camera);
         if (!ready.ok) return ready;
         const t = ready.transport;
         let pose: PresetPose;
         let previous: PresetPose | null = null;
         try {
-          const before = await readPresetSlots(t, gate, presetRead);
+          const before = await readPresetSlots(t, () => gate(camera), presetRead);
           if (!before[slot - 1].occupied) {
             return { ok: false, error: `slot ${slot} is empty; save first` };
           }
@@ -878,7 +898,7 @@ export function createTools(
         }
         // M1: the UPDATE above has committed. From here on, a thrown error must say so.
         try {
-          const after = await readPresetSlots(t, gate, presetRead);
+          const after = await readPresetSlots(t, () => gate(camera), presetRead);
           if (!after[slot - 1].occupied) {
             return { ok: false, error: "verification failed", expected: "occupied", actual: "empty" };
           }
@@ -904,12 +924,12 @@ export function createTools(
         "the slot list after writing.",
       schema: presetRenameSchema,
       handler: async (args: unknown) => {
-        const { slot, name } = presetRenameSchema.parse(args);
-        const ready = await gate();
+        const { slot, name, camera } = presetRenameSchema.parse(args);
+        const ready = await gate(camera);
         if (!ready.ok) return ready;
         const t = ready.transport;
         try {
-          const before = await readPresetSlots(t, gate, presetRead);
+          const before = await readPresetSlots(t, () => gate(camera), presetRead);
           if (!before[slot - 1].occupied) {
             return { ok: false, error: `slot ${slot} is empty; save first` };
           }
@@ -920,7 +940,7 @@ export function createTools(
           // device actually expects ASCII or base64 on the WRITE side is NOT yet
           // hardware-confirmed; flagged for the hardware verification task.
           await t.sendVendor(encodePresetSetName(t.nextSeq(), slot, clean));
-          const after = await readPresetSlots(t, gate, presetRead);
+          const after = await readPresetSlots(t, () => gate(camera), presetRead);
           if (after[slot - 1].name !== clean) {
             return { ok: false, error: "verification failed", expected: clean, actual: after[slot - 1].name };
           }
@@ -937,8 +957,8 @@ export function createTools(
         "slot list after writing.",
       schema: presetDeleteSchema,
       handler: async (args: unknown) => {
-        const { slot } = presetDeleteSchema.parse(args);
-        const ready = await gate();
+        const { slot, camera } = presetDeleteSchema.parse(args);
+        const ready = await gate(camera);
         if (!ready.ok) return ready;
         const t = ready.transport;
         // Tracks whether the destructive write already left the host. If the
@@ -946,7 +966,7 @@ export function createTools(
         // and invites a blind retry of an operation that already committed.
         let sent = false;
         try {
-          const before = await readPresetSlots(t, gate, presetRead);
+          const before = await readPresetSlots(t, () => gate(camera), presetRead);
           if (!before[slot - 1].occupied) {
             return { ok: false, error: `slot ${slot} is already empty` };
           }
@@ -956,7 +976,7 @@ export function createTools(
           const destroyed = { name: before[slot - 1].name, pose: before[slot - 1].pose };
           await t.sendVendor(encodePresetDelete(t.nextSeq(), slot));
           sent = true;
-          const after = await readPresetSlots(t, gate, presetRead);
+          const after = await readPresetSlots(t, () => gate(camera), presetRead);
           if (after[slot - 1].occupied) {
             return { ok: false, error: "verification failed", expected: "empty", actual: "occupied" };
           }
@@ -978,8 +998,8 @@ export function createTools(
       description: "Enable auto white balance.",
       schema: imageWbAutoSchema,
       handler: async (args: unknown) => {
-        imageWbAutoSchema.parse(args);
-        const t = await getTransport();
+        const { camera } = imageWbAutoSchema.parse(args);
+        const t = await getTransport(camera);
         const { min } = await t.procAmpRange(VIDEO_PROCAMP_WHITE_BALANCE);
         await t.procAmpSet(VIDEO_PROCAMP_WHITE_BALANCE, min, UVC_FLAG_AUTO);
         return { ok: true, mode: "auto" };
@@ -992,8 +1012,8 @@ export function createTools(
         "supported range).",
       schema: imageWbManualSchema,
       handler: async (args: unknown) => {
-        const { temperature } = imageWbManualSchema.parse(args);
-        const t = await getTransport();
+        const { temperature, camera } = imageWbManualSchema.parse(args);
+        const t = await getTransport(camera);
         const { min, max } = await t.procAmpRange(VIDEO_PROCAMP_WHITE_BALANCE);
         const value = clamp(Math.round(temperature), min, max);
         await t.procAmpSet(VIDEO_PROCAMP_WHITE_BALANCE, value, UVC_FLAG_MANUAL);
@@ -1008,9 +1028,9 @@ export function createTools(
         "the device's supported range for that control. Standard UVC (IAMVideoProcAmp), no auto.",
       schema: imageControlSchema,
       handler: async (args: unknown) => {
-        const { control, level } = imageControlSchema.parse(args);
+        const { control, level, camera } = imageControlSchema.parse(args);
         const property = IMAGE_CONTROL_PROP[control];
-        const t = await getTransport();
+        const t = await getTransport(camera);
         const { min, max } = await t.procAmpRange(property);
         const value = percentToRange(level, min, max);
         await t.procAmpSet(property, value, UVC_FLAG_MANUAL);
@@ -1027,8 +1047,8 @@ export function createTools(
         "stub on the Tiny 2.",
       schema: imageExposureAutoSchema,
       handler: async (args: unknown) => {
-        const { priority } = imageExposureAutoSchema.parse(args);
-        const t = await getTransport();
+        const { priority, camera } = imageExposureAutoSchema.parse(args);
+        const t = await getTransport(camera);
         // Mode and value go in ONE command — CAM_SET_EXPOSURE_TINY2 with a 5-byte
         // [mode][value] payload. The separate CAM_SET_EXPOSURE_MODE command is inert
         // on this device, and a 4-byte value payload is silently discarded.
@@ -1058,8 +1078,8 @@ export function createTools(
         "stub on the Tiny 2.",
       schema: imageExposureManualSchema,
       handler: async (args: unknown) => {
-        const { level } = imageExposureManualSchema.parse(args);
-        const t = await getTransport();
+        const { level, camera } = imageExposureManualSchema.parse(args);
+        const t = await getTransport(camera);
         // Device exposure range is 1..2500 (read from CAM_GET_EXPOSURE_RANGE_TINY2;
         // the previous 0..65535 figure came from the Tiny4Linux reference and does
         // not match this hardware).
@@ -1080,8 +1100,8 @@ export function createTools(
         "If the camera is in use by another app, returns a message instead of an image.",
       schema: snapshotSchema,
       handler: async (args: unknown) => {
-        const { resolution, quality, settleMs, source } = snapshotSchema.parse(args);
-        const t = await getTransport();
+        const { resolution, quality, settleMs, source, camera } = snapshotSchema.parse(args);
+        const t = await getTransport(camera);
         let path: string | undefined;
         if (source !== "device") {
           const devices = await mgr.list();

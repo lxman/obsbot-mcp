@@ -78,10 +78,12 @@ async function main() {
 
   try {
     const mgr = new DeviceManager(async () => helper);
-    const transport = await mgr.openFirstObsbot();
+    // Bind the single camera eagerly; createTools resolves per-camera via mgr.get()
+    // inside each handler (no `camera` selector => this one bound camera).
+    await mgr.openFirstObsbot();
     // debug=true exposes obsbot_debug_probe (RE/diagnostics, filtered out otherwise), and a
     // CaptureManager is required or every capture tool returns 'not configured'.
-    const tools = createTools(async () => transport, mgr, new CaptureManager(), undefined, true);
+    const tools = createTools(mgr, new CaptureManager(), true);
     byName = new Map(tools.map((t) => [t.name, t]));
 
     const call = async (name, args = {}) => {
