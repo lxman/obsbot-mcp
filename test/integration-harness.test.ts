@@ -95,7 +95,7 @@ test("a MANUAL check is reported without being run", async () => {
   const body = vi.fn();
   const check = defineCheck({
     id: "demo.manual",
-    tool: "obsbot_set_run_status",
+    tool: "obsbot_wake",
     profile: "quick",
     tier: TIERS.MANUAL,
     reason: "requires a cable pull",

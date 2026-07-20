@@ -103,6 +103,21 @@ test.each(RENAMES)("%s is renamed to %s (old name gone)", (oldName, newName) => 
   expect(names).not.toContain(oldName);
 });
 
+// Hard break: the v0.4.0 splits (naming spec §3, judgement call §4.1). Each
+// combined mode/state tool becomes two distinct tools; the combined name has
+// no alias.
+const SPLITS: [string, string, string][] = [
+  ["obsbot_set_run_status", "obsbot_wake", "obsbot_sleep"],
+  ["obsbot_focus", "obsbot_focus_auto", "obsbot_focus_manual"],
+  ["obsbot_white_balance", "obsbot_image_wb_auto", "obsbot_image_wb_manual"],
+  ["obsbot_exposure", "obsbot_image_exposure_auto", "obsbot_image_exposure_manual"],
+];
+test.each(SPLITS)("%s splits into %s and %s (old name gone)", (oldName, newA, newB) => {
+  const names = createTools(async () => makeFakeTransport(), makeFakeMgr()).map((t) => t.name);
+  expect(names).toEqual(expect.arrayContaining([newA, newB]));
+  expect(names).not.toContain(oldName);
+});
+
 test("obsbot_zoom_uvc clamps ratio above max and calls zoomSet with max-mapped units", async () => {
   const transport = makeFakeTransport();
   const mgr = makeFakeMgr();
@@ -117,14 +132,26 @@ test("obsbot_zoom_uvc clamps ratio above max and calls zoomSet with max-mapped u
   expect(result).toEqual({ ok: true, ratio: 2.0 });
 });
 
-test("obsbot_set_run_status rejects an invalid state via zod", async () => {
+test("obsbot_wake sends run status without a state arg", async () => {
   const transport = makeFakeTransport();
-  const mgr = makeFakeMgr();
-  const tools = createTools(async () => transport, mgr);
-  const tool = findTool(tools, "obsbot_set_run_status");
+  const tools = createTools(async () => transport, makeFakeMgr());
+  const result = await findTool(tools, "obsbot_wake").handler({});
 
-  await expect(tool.handler({ state: "not-a-state" })).rejects.toThrow();
-  expect(transport.sendVendor).not.toHaveBeenCalled();
+  expect(transport.sendVendor).toHaveBeenCalledTimes(1);
+  const frame = transport.sendVendor.mock.calls[0][0] as Buffer;
+  expect(frame[16]).toBe(0); // encodeSetRunStatus("run") -> wake=0
+  expect(result).toEqual({ ok: true, state: "run" });
+});
+
+test("obsbot_sleep sends sleep status without a state arg", async () => {
+  const transport = makeFakeTransport();
+  const tools = createTools(async () => transport, makeFakeMgr());
+  const result = await findTool(tools, "obsbot_sleep").handler({});
+
+  expect(transport.sendVendor).toHaveBeenCalledTimes(1);
+  const frame = transport.sendVendor.mock.calls[0][0] as Buffer;
+  expect(frame[16]).toBe(1); // encodeSetRunStatus("sleep") -> sleep=1
+  expect(result).toEqual({ ok: true, state: "sleep" });
 });
 
 test("obsbot_gimbal_move_speed sends move then auto-stop", async () => {
@@ -350,12 +377,11 @@ test("obsbot_image_hdr sends [0x01,0x01,on] to XU selector 6", async () => {
   expect([...data.subarray(0, 3)]).toEqual([0x01, 0x01, 1]);
 });
 
-test("obsbot_focus manual maps 0-100 onto the device range via camCtrl", async () => {
+test("obsbot_focus_manual maps 0-100 onto the device range via camCtrl", async () => {
   const transport = makeFakeTransport();
   transport.camCtrlRange = vi.fn(async () => ({ min: 0, max: 200 }));
   const tools = createTools(async () => transport, makeFakeMgr());
-  const result = await tools.find((t) => t.name === "obsbot_focus")!.handler({
-    mode: "manual",
+  const result = await tools.find((t) => t.name === "obsbot_focus_manual")!.handler({
     position: 50,
   });
   expect(transport.camCtrlRange).toHaveBeenCalledWith(6);
@@ -363,32 +389,33 @@ test("obsbot_focus manual maps 0-100 onto the device range via camCtrl", async (
   expect(result).toEqual({ ok: true, mode: "manual", position: 50, value: 100 });
 });
 
-test("obsbot_focus auto uses the auto flag without querying range", async () => {
+test("obsbot_focus_auto uses the auto flag without querying range", async () => {
   const transport = makeFakeTransport();
   const tools = createTools(async () => transport, makeFakeMgr());
-  await tools.find((t) => t.name === "obsbot_focus")!.handler({ mode: "auto" });
+  const result = await tools.find((t) => t.name === "obsbot_focus_auto")!.handler({});
   expect(transport.camCtrlSet).toHaveBeenCalledWith(6, 0, 1);
   expect(transport.camCtrlRange).not.toHaveBeenCalled();
+  expect(result).toEqual({ ok: true, mode: "auto" });
 });
 
-test("obsbot_white_balance manual clamps Kelvin to device range via procAmp", async () => {
+test("obsbot_image_wb_manual clamps Kelvin to device range via procAmp", async () => {
   const transport = makeFakeTransport();
   transport.procAmpRange = vi.fn(async () => ({ min: 2800, max: 6500 }));
   const tools = createTools(async () => transport, makeFakeMgr());
-  const result = await tools.find((t) => t.name === "obsbot_white_balance")!.handler({
-    mode: "manual",
+  const result = await tools.find((t) => t.name === "obsbot_image_wb_manual")!.handler({
     temperature: 9000,
   });
   expect(transport.procAmpSet).toHaveBeenCalledWith(7, 6500, 2); // clamped to max, manual flag
   expect(result).toEqual({ ok: true, mode: "manual", temperature: 6500 });
 });
 
-test("obsbot_white_balance auto uses the auto flag", async () => {
+test("obsbot_image_wb_auto uses the auto flag", async () => {
   const transport = makeFakeTransport();
   transport.procAmpRange = vi.fn(async () => ({ min: 2800, max: 6500 }));
   const tools = createTools(async () => transport, makeFakeMgr());
-  await tools.find((t) => t.name === "obsbot_white_balance")!.handler({ mode: "auto" });
+  const result = await tools.find((t) => t.name === "obsbot_image_wb_auto")!.handler({});
   expect(transport.procAmpSet).toHaveBeenCalledWith(7, 2800, 1);
+  expect(result).toEqual({ ok: true, mode: "auto" });
 });
 
 // --- UVC image controls (standard IAMVideoProcAmp) + exposure (IAMCameraControl) ---
@@ -424,22 +451,23 @@ test("obsbot_image_adjust rejects an unsupported control via zod", async () => {
   ).rejects.toThrow();
 });
 
-test("obsbot_exposure auto uses V3 frame protocol, not camCtrl", async () => {
+test("obsbot_image_exposure_auto uses V3 frame protocol, not camCtrl", async () => {
   const transport = makeFakeTransport();
   const tools = createTools(async () => transport, makeFakeMgr());
-  await tools.find((t) => t.name === "obsbot_exposure")!.handler({ mode: "auto" });
+  const result = await tools.find((t) => t.name === "obsbot_image_exposure_auto")!.handler({});
   // Exposure now uses vendor V3 frames (CAM_SET_EXPOSURE_MODE) not UVC camCtrl
   expect(transport.sendVendor).toHaveBeenCalledTimes(1);
   expect(transport.camCtrlSet).not.toHaveBeenCalled();
   expect(transport.camCtrlRange).not.toHaveBeenCalled();
+  expect(result).toEqual({ ok: true, mode: "auto" });
 });
 
-test("obsbot_exposure auto with priority:face sends the AE mode frame then a sel-6 face-AE write [03 01 01]", async () => {
+test("obsbot_image_exposure_auto with priority:face sends the AE mode frame then a sel-6 face-AE write [03 01 01]", async () => {
   const transport = makeFakeTransport();
   const tools = createTools(async () => transport, makeFakeMgr());
   const result = await tools
-    .find((t) => t.name === "obsbot_exposure")!
-    .handler({ mode: "auto", priority: "face" });
+    .find((t) => t.name === "obsbot_image_exposure_auto")!
+    .handler({ priority: "face" });
   expect(transport.sendVendor).toHaveBeenCalledTimes(1); // AE mode frame
   const [selector, data] = transport.xuRaw.mock.calls[0];
   expect(selector).toBe(6);
@@ -447,32 +475,32 @@ test("obsbot_exposure auto with priority:face sends the AE mode frame then a sel
   expect(result).toMatchObject({ ok: true, mode: "auto", priority: "face" });
 });
 
-test("obsbot_exposure auto with priority:global writes [03 01 00]", async () => {
+test("obsbot_image_exposure_auto with priority:global writes [03 01 00]", async () => {
   const transport = makeFakeTransport();
   const tools = createTools(async () => transport, makeFakeMgr());
   await tools
-    .find((t) => t.name === "obsbot_exposure")!
-    .handler({ mode: "auto", priority: "global" });
+    .find((t) => t.name === "obsbot_image_exposure_auto")!
+    .handler({ priority: "global" });
   const [, data] = transport.xuRaw.mock.calls[0];
   expect([...data.subarray(0, 3)]).toEqual([0x03, 0x01, 0x00]);
 });
 
-test("obsbot_exposure auto without priority does not write face-AE", async () => {
+test("obsbot_image_exposure_auto without priority does not write face-AE", async () => {
   const transport = makeFakeTransport();
   const tools = createTools(async () => transport, makeFakeMgr());
-  await tools.find((t) => t.name === "obsbot_exposure")!.handler({ mode: "auto" });
+  await tools.find((t) => t.name === "obsbot_image_exposure_auto")!.handler({});
   expect(transport.xuRaw).not.toHaveBeenCalled();
 });
 
-test("obsbot_exposure manual sends ONE V3 frame carrying mode and value", async () => {
+test("obsbot_image_exposure_manual sends ONE V3 frame carrying mode and value", async () => {
   const transport = makeFakeTransport();
   const tools = createTools(async () => transport, makeFakeMgr());
   const result = await tools
-    .find((t) => t.name === "obsbot_exposure")!
-    .handler({ mode: "manual", level: 25 });
-  // ONE sendVendor call. This test previously asserted two — a mode command
-  // followed by a value command — which encoded the bug: CAM_SET_EXPOSURE_MODE is
-  // inert on this device, and the 4-byte value payload was silently discarded, so
+    .find((t) => t.name === "obsbot_image_exposure_manual")!
+    .handler({ level: 25 });
+  // ONE sendVendor call. The combined tool previously asserted two — a mode
+  // command followed by a value command — which encoded the bug: CAM_SET_EXPOSURE_MODE
+  // is inert on this device, and the 4-byte value payload was silently discarded, so
   // neither call did anything. CAM_SET_EXPOSURE_TINY2 with a 5-byte [mode][value]
   // payload sets both at once. Hardware-verified 2026-07-20.
   expect(transport.sendVendor).toHaveBeenCalledTimes(1);
@@ -482,6 +510,15 @@ test("obsbot_exposure manual sends ONE V3 frame carrying mode and value", async 
   // from the Tiny4Linux reference and does not match this hardware; the device
   // reports its range as 1..2500 via CAM_GET_EXPOSURE_RANGE_TINY2.
   expect(result).toEqual({ ok: true, mode: "manual", level: 25, raw: 626 });
+});
+
+test("image_exposure_manual forwards its level; image_exposure_auto forwards priority", async () => {
+  const transport = makeFakeTransport();
+  const tools = createTools(async () => transport, makeFakeMgr());
+  await tools.find((t) => t.name === "obsbot_image_exposure_manual")!.handler({ level: 25 });
+  await tools.find((t) => t.name === "obsbot_image_exposure_auto")!.handler({ priority: "face" });
+  expect(transport.sendVendor).toHaveBeenCalled();
+  expect(transport.xuRaw).toHaveBeenCalled(); // face priority => uvcExt write
 });
 
 // --- String-encoded args from clients that ignore the advertised schema ----

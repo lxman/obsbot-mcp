@@ -65,7 +65,8 @@ With the installed binary, use `"command": "obsbot-mcp"` and `"args": ["--debug"
 | Tool | Parameters | Description |
 |------|------------|-------------|
 | `obsbot_devices` | — | List connected OBSBOT-compatible video capture devices. |
-| `obsbot_set_run_status` | `state`: `"run" \| "sleep"` | Wake (`"run"`) or sleep the camera/gimbal. |
+| `obsbot_wake` | — | Wake the camera/gimbal (sends `"run"`). |
+| `obsbot_sleep` | — | Sleep the camera/gimbal (sends `"sleep"`). |
 | `obsbot_status` | — | Read the live status block: `{ awake, hdr, aiMode, trackSpeed }`. Under `--debug`, also returns the raw 60-byte block as hex. |
 
 ### Gimbal (PTZ)
@@ -114,9 +115,12 @@ failure if the device didn't land the change.
 |------|------------|-------------|
 | `obsbot_image_fov` | `fov`: `"wide" \| "medium" \| "narrow"` | Set the field of view: wide (86°), medium (78°), narrow (65°). |
 | `obsbot_image_hdr` | `enabled` (bool) | Toggle HDR/WDR imaging on or off. |
-| `obsbot_focus` | `mode`: `"auto" \| "manual"`, `position` (`0`–`100`, default `50`) | `auto` = continuous autofocus; `manual` = set the focus motor to `position` (near→far). |
-| `obsbot_exposure` | `mode`: `"auto" \| "manual"`, `level` (`0`–`100`, default `50`), `priority` (`"global" \| "face"`, optional) | `auto` = auto-exposure (optional `priority` selects global vs face metering); `manual` = set `level` (0 darkest → 100 brightest). |
-| `obsbot_white_balance` | `mode`: `"auto" \| "manual"`, `temperature` (Kelvin, default `5000`) | `auto` = auto white balance; `manual` = set a colour temperature (clamped to device range). |
+| `obsbot_focus_auto` | — | Enable continuous autofocus. |
+| `obsbot_focus_manual` | `position` (`0`–`100`, default `50`) | Set the focus motor to `position` (near→far). |
+| `obsbot_image_exposure_auto` | `priority` (`"global" \| "face"`, optional) | Enable auto-exposure; optional `priority` selects global vs face metering. |
+| `obsbot_image_exposure_manual` | `level` (`0`–`100`, default `50`) | Set exposure `level` (0 darkest → 100 brightest). |
+| `obsbot_image_wb_auto` | — | Enable auto white balance. |
+| `obsbot_image_wb_manual` | `temperature` (Kelvin, default `5000`) | Set a colour temperature (clamped to device range). |
 | `obsbot_image_adjust` | `control`, `level` (`0`–`100`) | Adjust `brightness \| contrast \| hue \| saturation \| sharpness \| gain \| backlight-compensation`; `level` maps onto the device range. |
 
 ### Capture

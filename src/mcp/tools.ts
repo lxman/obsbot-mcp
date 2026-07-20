@@ -79,7 +79,8 @@ const bool = () =>
   );
 
 const listDevicesSchema = z.object({});
-const setRunStatusSchema = z.object({ state: z.enum(["run", "sleep"]) });
+const wakeSchema = z.object({});
+const sleepSchema = z.object({});
 const ptzMoveAngleSchema = z.object({
   yaw: num(),
   pitch: num(),
@@ -124,24 +125,23 @@ const probeSchema = z.object({
 });
 const fovSchema = z.object({ fov: z.enum(FOV_TYPES as [FovType, ...FovType[]]) });
 const hdrSchema = z.object({ enabled: bool() });
-const focusSchema = z.object({
-  mode: z.enum(["auto", "manual"]),
+const focusAutoSchema = z.object({});
+const focusManualSchema = z.object({
   position: num().pipe(z.number().min(0).max(100)).default(50),
 });
-const whiteBalanceSchema = z.object({
-  mode: z.enum(["auto", "manual"]),
-  temperature: num().default(5000),
-});
+const imageWbAutoSchema = z.object({});
+const imageWbManualSchema = z.object({ temperature: num().default(5000) });
 const imageControlSchema = z.object({
   control: z.enum(IMAGE_CONTROLS as [ImageControl, ...ImageControl[]]),
   level: num().pipe(z.number().min(0).max(100)),
 });
-const exposureSchema = z.object({
-  mode: z.enum(["auto", "manual"]),
-  level: num().pipe(z.number().min(0).max(100)).default(50),
-  // Auto-exposure metering priority: global (whole frame) or face. Only meaningful
-  // with mode 'auto'; ignored for manual. Optional so existing calls are unchanged.
+const imageExposureAutoSchema = z.object({
+  // Auto-exposure metering priority: global (whole frame) or face (meters for a
+  // detected face). Optional.
   priority: z.enum(["global", "face"]).optional(),
+});
+const imageExposureManualSchema = z.object({
+  level: num().pipe(z.number().min(0).max(100)).default(50),
 });
 const gimbalPositionSchema = z.object({});
 const presetListSchema = z.object({});
@@ -386,14 +386,25 @@ export function createTools(
       },
     },
     {
-      name: "obsbot_set_run_status",
-      description: "Wake (\"run\") or sleep the camera/gimbal.",
-      schema: setRunStatusSchema,
+      name: "obsbot_wake",
+      description: "Wake the camera/gimbal (sends \"run\").",
+      schema: wakeSchema,
       handler: async (args: unknown) => {
-        const { state } = setRunStatusSchema.parse(args);
+        wakeSchema.parse(args);
         const t = await getTransport();
-        await t.sendVendor(encodeSetRunStatus(state).buildFrame(t.nextSeq()));
-        return { ok: true, state };
+        await t.sendVendor(encodeSetRunStatus("run").buildFrame(t.nextSeq()));
+        return { ok: true, state: "run" };
+      },
+    },
+    {
+      name: "obsbot_sleep",
+      description: "Sleep the camera/gimbal (sends \"sleep\").",
+      schema: sleepSchema,
+      handler: async (args: unknown) => {
+        sleepSchema.parse(args);
+        const t = await getTransport();
+        await t.sendVendor(encodeSetRunStatus("sleep").buildFrame(t.nextSeq()));
+        return { ok: true, state: "sleep" };
       },
     },
     {
@@ -644,22 +655,28 @@ export function createTools(
       },
     },
     {
-      name: "obsbot_focus",
-      description:
-        "Set focus. mode 'auto' enables continuous autofocus; mode 'manual' sets the " +
-        "focus motor to position (0-100, near→far), mapped onto the device range.",
-      schema: focusSchema,
+      name: "obsbot_focus_auto",
+      description: "Enable continuous autofocus.",
+      schema: focusAutoSchema,
       handler: async (args: unknown) => {
-        const { mode, position } = focusSchema.parse(args);
+        focusAutoSchema.parse(args);
         const t = await getTransport();
-        if (mode === "auto") {
-          await t.camCtrlSet(CAMERA_CONTROL_FOCUS, 0, UVC_FLAG_AUTO);
-          return { ok: true, mode };
-        }
+        await t.camCtrlSet(CAMERA_CONTROL_FOCUS, 0, UVC_FLAG_AUTO);
+        return { ok: true, mode: "auto" };
+      },
+    },
+    {
+      name: "obsbot_focus_manual",
+      description:
+        "Set the focus motor to position (0-100, near→far), mapped onto the device range.",
+      schema: focusManualSchema,
+      handler: async (args: unknown) => {
+        const { position } = focusManualSchema.parse(args);
+        const t = await getTransport();
         const { min, max } = await t.camCtrlRange(CAMERA_CONTROL_FOCUS);
         const value = percentToRange(position, min, max);
         await t.camCtrlSet(CAMERA_CONTROL_FOCUS, value, UVC_FLAG_MANUAL);
-        return { ok: true, mode, position, value };
+        return { ok: true, mode: "manual", position, value };
       },
     },
     {
@@ -916,22 +933,30 @@ export function createTools(
       },
     },
     {
-      name: "obsbot_white_balance",
-      description:
-        "Set white balance. mode 'auto' enables auto white balance; mode 'manual' sets a " +
-        "colour temperature in Kelvin (clamped to the device's supported range).",
-      schema: whiteBalanceSchema,
+      name: "obsbot_image_wb_auto",
+      description: "Enable auto white balance.",
+      schema: imageWbAutoSchema,
       handler: async (args: unknown) => {
-        const { mode, temperature } = whiteBalanceSchema.parse(args);
+        imageWbAutoSchema.parse(args);
+        const t = await getTransport();
+        const { min } = await t.procAmpRange(VIDEO_PROCAMP_WHITE_BALANCE);
+        await t.procAmpSet(VIDEO_PROCAMP_WHITE_BALANCE, min, UVC_FLAG_AUTO);
+        return { ok: true, mode: "auto" };
+      },
+    },
+    {
+      name: "obsbot_image_wb_manual",
+      description:
+        "Set white balance to a colour temperature in Kelvin (clamped to the device's " +
+        "supported range).",
+      schema: imageWbManualSchema,
+      handler: async (args: unknown) => {
+        const { temperature } = imageWbManualSchema.parse(args);
         const t = await getTransport();
         const { min, max } = await t.procAmpRange(VIDEO_PROCAMP_WHITE_BALANCE);
-        if (mode === "auto") {
-          await t.procAmpSet(VIDEO_PROCAMP_WHITE_BALANCE, min, UVC_FLAG_AUTO);
-          return { ok: true, mode };
-        }
         const value = clamp(Math.round(temperature), min, max);
         await t.procAmpSet(VIDEO_PROCAMP_WHITE_BALANCE, value, UVC_FLAG_MANUAL);
-        return { ok: true, mode, temperature: value };
+        return { ok: true, mode: "manual", temperature: value };
       },
     },
     {
@@ -952,37 +977,54 @@ export function createTools(
       },
     },
     {
-      name: "obsbot_exposure",
+      name: "obsbot_image_exposure_auto",
       description:
-        "Set exposure. mode 'auto' enables auto-exposure; mode 'manual' sets level 0-100 " +
-        "(0 darkest → 100 brightest), mapped onto the device's exposure range. With auto, " +
-        "an optional priority 'global' | 'face' selects the metering region (face-priority " +
-        "meters for a detected face). " +
+        "Enable auto-exposure. Optional priority 'global' | 'face' selects the metering " +
+        "region (face-priority meters for a detected face). " +
         "Uses the proprietary V3 frame protocol (CAM_SET_EXPOSURE_TINY2, which carries mode " +
         "and value in one command) because the standard UVC/IAMCameraControl V4L2 path is a " +
         "stub on the Tiny 2.",
-      schema: exposureSchema,
+      schema: imageExposureAutoSchema,
       handler: async (args: unknown) => {
-        const { mode, level, priority } = exposureSchema.parse(args);
+        const { priority } = imageExposureAutoSchema.parse(args);
         const t = await getTransport();
         // Mode and value go in ONE command — CAM_SET_EXPOSURE_TINY2 with a 5-byte
         // [mode][value] payload. The separate CAM_SET_EXPOSURE_MODE command is inert
         // on this device, and a 4-byte value payload is silently discarded.
         // Device exposure range is 1..2500 (read from CAM_GET_EXPOSURE_RANGE_TINY2;
         // the previous 0..65535 figure came from the Tiny4Linux reference and does
+        // not match this hardware). This branch carries no `level` input, so the
+        // value byte mirrors the combined tool's pre-split default (50%) — the
+        // device only acts on it once manual mode is selected.
+        const raw = percentToRange(50, 1, 2500);
+        await t.sendVendor(encodeSetExposure(false, raw).buildFrame(t.nextSeq()));
+        // Face vs global metering is a sel-6 uvcExt write applied after auto-exposure
+        // is on (readback surfaces at status offset 0x07). See encodeFaceAe.
+        if (priority) {
+          await t.xuRaw(UVC_XU_SELECTOR, encodeFaceAe(priority === "face"));
+          return { ok: true, mode: "auto", priority };
+        }
+        return { ok: true, mode: "auto" };
+      },
+    },
+    {
+      name: "obsbot_image_exposure_manual",
+      description:
+        "Set exposure level 0-100 (0 darkest → 100 brightest), mapped onto the device's " +
+        "exposure range. " +
+        "Uses the proprietary V3 frame protocol (CAM_SET_EXPOSURE_TINY2, which carries mode " +
+        "and value in one command) because the standard UVC/IAMCameraControl V4L2 path is a " +
+        "stub on the Tiny 2.",
+      schema: imageExposureManualSchema,
+      handler: async (args: unknown) => {
+        const { level } = imageExposureManualSchema.parse(args);
+        const t = await getTransport();
+        // Device exposure range is 1..2500 (read from CAM_GET_EXPOSURE_RANGE_TINY2;
+        // the previous 0..65535 figure came from the Tiny4Linux reference and does
         // not match this hardware).
         const raw = percentToRange(level, 1, 2500);
-        await t.sendVendor(encodeSetExposure(mode === "manual", raw).buildFrame(t.nextSeq()));
-        if (mode === "auto") {
-          // Face vs global metering is a sel-6 uvcExt write applied after auto-exposure
-          // is on (readback surfaces at status offset 0x07). See encodeFaceAe.
-          if (priority) {
-            await t.xuRaw(UVC_XU_SELECTOR, encodeFaceAe(priority === "face"));
-            return { ok: true, mode, priority };
-          }
-          return { ok: true, mode };
-        }
-        return { ok: true, mode, level, raw };
+        await t.sendVendor(encodeSetExposure(true, raw).buildFrame(t.nextSeq()));
+        return { ok: true, mode: "manual", level, raw };
       },
     },
     {
@@ -992,7 +1034,7 @@ export function createTools(
         "and for framing/lighting/exposure checks). resolution is the longest edge in pixels, " +
         "256-1920, default 640 — larger images cost proportionally more tokens, so ask for " +
         "more only when you need the detail. NOTE: before calling, ensure the camera " +
-        "is focused (call obsbot_focus with mode:'auto' for autofocus) unless otherwise " +
+        "is focused (call obsbot_focus_auto for autofocus) unless otherwise " +
         "directed. source: device (default) | virtual | ndi. " +
         "If the camera is in use by another app, returns a message instead of an image.",
       schema: snapshotSchema,
@@ -1052,7 +1094,7 @@ export function createTools(
         "Start recording the camera to an MP4 (for the user). durationSec optional (open-ended " +
         "recordings auto-stop after 60 min); audio defaults to on (the OBSBOT mic); outputPath " +
         "optional (defaults under Videos\\\\OBSBOT). NOTE: before calling, ensure the camera " +
-        "is focused (call obsbot_focus with mode:'auto' for autofocus) unless otherwise " +
+        "is focused (call obsbot_focus_auto for autofocus) unless otherwise " +
         "directed. source: device|virtual|ndi. Returns a sessionId " +
         "for obsbot_capture_stop.",
       schema: recordStartSchema,
@@ -1073,7 +1115,7 @@ export function createTools(
       name: "obsbot_capture_preview",
       description:
         "Open a live preview window of the camera (for the user to watch). NOTE: before calling, " +
-        "ensure the camera is focused (call obsbot_focus with mode:'auto' for autofocus) unless " +
+        "ensure the camera is focused (call obsbot_focus_auto for autofocus) unless " +
         "otherwise directed. source: device|virtual|ndi. " +
         "Returns a sessionId for obsbot_capture_stop.",
       schema: previewStartSchema,
