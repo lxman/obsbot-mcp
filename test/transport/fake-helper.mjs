@@ -25,7 +25,7 @@ rl.on("line", (line) => {
     case "enumerate":
       return send({
         ok: true,
-        devices: [{ path: "p1", name: "OBSBOT Tiny 2" }],
+        devices: [{ path: "p1", name: "OBSBOT Tiny 2", locationId: 51511296 }],
       });
     case "open":
       return send({ ok: true, xuNode: 1 });

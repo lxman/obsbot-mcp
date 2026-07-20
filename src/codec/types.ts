@@ -10,4 +10,6 @@ export interface ZoomUnits {
 export interface DeviceInfo {
   path: string;
   name: string;
+  locationId?: number; // macOS: USB locationID; the handle used to correlate + open. NOT identity.
+  serial?: string;     // read on demand via UG_GET_SN; the stable per-unit identity.
 }
