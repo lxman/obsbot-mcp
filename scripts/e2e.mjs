@@ -41,7 +41,7 @@ async function main() {
   // closing it hangs the script forever and orphans the helper. That includes
   // the no-camera path — the most likely one to hit.
   try {
-    const mgr = new DeviceManager(helper);
+    const mgr = new DeviceManager(async () => helper);
 
     console.log("→ enumerating devices...");
     const devices = await mgr.list();

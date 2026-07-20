@@ -75,7 +75,7 @@ async function main() {
   let byName = null;
 
   try {
-    const mgr = new DeviceManager(helper);
+    const mgr = new DeviceManager(async () => helper);
     const transport = await mgr.openFirstObsbot();
     // debug=true exposes obsbot_probe (RE/diagnostics, filtered out otherwise), and a
     // CaptureManager is required or every capture tool returns 'not configured'.

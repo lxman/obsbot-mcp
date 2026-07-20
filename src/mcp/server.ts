@@ -14,9 +14,11 @@ import { renderToolResult } from "./render.js";
 import { CaptureManager } from "../capture/manager.js";
 
 export async function startServer(opts: { debug?: boolean } = {}): Promise<void> {
-  const helper = new HelperProcess();
-  await helper.start();
-  const mgr = new DeviceManager(helper);
+  const mgr = new DeviceManager(async () => {
+    const helper = new HelperProcess();
+    await helper.start();
+    return helper;
+  });
 
   // DeviceSession owns the connection lifecycle: lazy open, invalidate + re-open
   // on a mid-session disconnect (self-heal), and reconnect tracking.

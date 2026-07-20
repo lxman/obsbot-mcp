@@ -7,7 +7,7 @@ import { encodeSetRunStatus } from "../../dist/codec/commands.js";
 const helper = new HelperProcess();
 await helper.start();
 try {
-  const transport = await new DeviceManager(helper).openFirstObsbot();
+  const transport = await new DeviceManager(async () => helper).openFirstObsbot();
   console.log("keep-awake heartbeat running (200ms interval). Ctrl+C to stop.");
   while (true) {
     await transport.sendVendor(encodeSetRunStatus(true).buildFrame(transport.nextSeq()));

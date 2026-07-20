@@ -5,44 +5,261 @@ import { WindowsTransport } from "../transport/windows.js";
 import { LinuxTransport } from "../transport/linux.js";
 import { MacosTransport } from "../transport/macos.js";
 
-export class DeviceManager {
-  constructor(private helper: HelperProcess) {}
+const OBSBOT_NAME_RE = /obsbot/i;
 
-  private createTransport(): ObsbotTransport {
+/** Thrown by get() with no selector when more than one camera is attached. */
+export class AmbiguousCameraError extends Error {
+  readonly available: string[];
+  constructor(available: string[]) {
+    super(`multiple cameras attached; specify one of: ${available.join(", ")}`);
+    this.name = "AmbiguousCameraError";
+    this.available = available;
+  }
+}
+
+/** Thrown by get(serial) when no attached, bindable camera has that serial. */
+export class UnknownCameraError extends Error {
+  readonly available: string[];
+  constructor(serial: string, available: string[]) {
+    super(
+      `unknown camera "${serial}"; available: ${available.length ? available.join(", ") : "(none)"}`,
+    );
+    this.name = "UnknownCameraError";
+    this.available = available;
+  }
+}
+
+export interface CameraInfo {
+  /** Present only for cameras this process could open and identify. */
+  serial?: string;
+  /** macOS: USB locationID. A handle for correlation/display only — never identity. */
+  locationId?: number;
+  name: string;
+  status: "available" | "bound" | "busy";
+}
+
+interface RegistryEntry {
+  helper: HelperProcess;
+  transport: ObsbotTransport;
+  locationId?: number;
+  name: string;
+}
+
+interface ScanMatch {
+  transport: ObsbotTransport;
+  serial: string;
+  locationId?: number;
+  name: string;
+}
+
+/**
+ * Serial-keyed multi-camera registry. Identity is the serial (read via
+ * ObsbotTransport.readSerial() on a freshly-opened device); locationId is
+ * only ever a display/correlation hint, never persisted as truth for
+ * binding.
+ *
+ * Steady state is one HelperProcess per bound camera (Map<serial, {helper,
+ * transport, locationId}>), spawned lazily — nothing is spawned until a
+ * camera is actually needed (get() or listCameras()). While scanning for a
+ * camera to bind, candidates are tried on a single scratch helper reused
+ * across attempts, mirroring the native helper's own behaviour: `doOpen`
+ * unconditionally releases whatever device it previously held before
+ * opening the next one, so re-opening a different candidate on the same
+ * helper is exactly what one physical device-swap looks like to it. A
+ * scratch helper that turns out to be the winning candidate is promoted
+ * directly into the registry (no extra spawn); one that never opens a
+ * usable camera is kept around for the next scan instead of being spawned
+ * again. Consequently DeviceManager never closes a helper it did not spawn
+ * itself for a *losing* attempt — ownership of a bound camera's helper
+ * transfers to the registry, and callers that hand in an already-started,
+ * externally-owned helper (see the .mjs scripts) keep owning its shutdown.
+ *
+ * USB open is exclusive: a camera another process holds fails `open` with
+ * an exclusive-access error. Per multi-camera spec §4.3, ANY open failure
+ * during a scan is treated as "not mine, skip" — not fatal — because the
+ * helper does not currently surface a clean, stable way to distinguish
+ * exclusive-access from other open failures at this layer.
+ */
+export class DeviceManager {
+  private registry = new Map<string, RegistryEntry>();
+  /** Lazily spawned, reused across scans until promoted into the registry. */
+  private scanHelper?: HelperProcess;
+
+  constructor(private makeHelper: () => Promise<HelperProcess>) {}
+
+  private createTransport(helper: HelperProcess): ObsbotTransport {
     if (process.platform === "linux") {
-      return new LinuxTransport(this.helper);
+      return new LinuxTransport(helper);
     }
     if (process.platform === "darwin") {
-      return new MacosTransport(this.helper);
+      return new MacosTransport(helper);
     }
-    return new WindowsTransport(this.helper);
+    return new WindowsTransport(helper);
   }
 
+  private async getScanHelper(): Promise<HelperProcess> {
+    if (!this.scanHelper) {
+      this.scanHelper = await this.makeHelper();
+    }
+    return this.scanHelper;
+  }
+
+  /** Compat: raw enumerate() pass-through (unfiltered), used by obsbot_list_devices. */
   async list(): Promise<DeviceInfo[]> {
-    return this.helper.enumerate();
+    const helper = await this.getScanHelper();
+    return helper.enumerate();
   }
 
-  async openFirstObsbot(): Promise<ObsbotTransport> {
-    const devices = await this.list();
-    const obsbotDevices = devices.filter((d) => /obsbot/i.test(d.name));
-    if (obsbotDevices.length === 0) {
-      throw new Error("no OBSBOT Tiny 2 found");
-    }
-    // The OBSBOT exposes two /dev/videoN nodes: one is the video capture
-    // interface (has the vendor XU extension unit), the other is metadata/ISP
-    // (no XU). Try each in turn until we find one with an XU unit.
-    const errors: string[] = [];
-    for (const device of obsbotDevices) {
+  /**
+   * Scan attached candidates on the scratch helper for a camera to bind.
+   *
+   * - `wantSerial` given: stop at the first candidate whose serial matches;
+   *   throws UnknownCameraError (listing every identifiable serial seen)
+   *   if the scan exhausts without a match.
+   * - `wantSerial` omitted: every candidate must be probed so the full
+   *   fleet is known — a partial scan could under-report ambiguity or
+   *   silently pick the wrong "only" camera. Binds if exactly one distinct
+   *   serial turns up; throws AmbiguousCameraError (all distinct serials)
+   *   if more than one does; throws if none do.
+   */
+  private async bind(wantSerial?: string): Promise<{ transport: ObsbotTransport; serial: string }> {
+    const helper = await this.getScanHelper();
+    const devices = await helper.enumerate();
+    const candidates = devices.filter((d) => OBSBOT_NAME_RE.test(d.name));
+
+    const found = new Map<string, { locationId?: number; name: string }>();
+    let matched: ScanMatch | undefined;
+
+    for (const d of candidates) {
+      let xuNode: number;
       try {
-        const xuNode = await this.helper.open(device.path);
-        if (xuNode >= 0) return this.createTransport();
-        errors.push(`${device.path}: no XU unit`);
-      } catch (e) {
-        errors.push(`${device.path}: ${(e as Error).message}`);
+        xuNode = await helper.open(d.path);
+      } catch {
+        // ANY open failure (exclusive access or otherwise) — skip, not
+        // fatal. The next candidate's open() releases this attempt.
+        continue;
+      }
+      if (xuNode < 0) {
+        // Opened, but this node has no XU unit (e.g. the metadata/ISP node
+        // the Tiny 2 also exposes) — not a usable candidate.
+        continue;
+      }
+
+      const transport = this.createTransport(helper);
+      let serial: string;
+      try {
+        serial = await transport.readSerial();
+      } catch {
+        continue;
+      }
+
+      if (!found.has(serial)) found.set(serial, { locationId: d.locationId, name: d.name });
+      matched = { transport, serial, locationId: d.locationId, name: d.name };
+      if (wantSerial && serial === wantSerial) break;
+    }
+
+    if (wantSerial) {
+      if (matched && matched.serial === wantSerial) {
+        this.promote(matched);
+        return { transport: matched.transport, serial: matched.serial };
+      }
+      throw new UnknownCameraError(wantSerial, [...found.keys()]);
+    }
+    if (found.size === 0) {
+      throw new Error("no OBSBOT camera found");
+    }
+    if (found.size > 1) {
+      throw new AmbiguousCameraError([...found.keys()]);
+    }
+    // Exactly one distinct serial: `matched` is guaranteed bound to it
+    // (every successful candidate shared that one serial).
+    this.promote(matched!);
+    return { transport: matched!.transport, serial: matched!.serial };
+  }
+
+  /** Move the current scratch helper into the registry under `m.serial`. */
+  private promote(m: ScanMatch): void {
+    this.registry.set(m.serial, {
+      helper: this.scanHelper!,
+      transport: m.transport,
+      locationId: m.locationId,
+      name: m.name,
+    });
+    // This helper now belongs to the registry entry; the next scan needs
+    // its own (lazily spawned on next use).
+    this.scanHelper = undefined;
+  }
+
+  /**
+   * Resolve to a bound transport.
+   *   no serial + one camera attached  -> bind & return it
+   *   no serial + several attached     -> AmbiguousCameraError
+   *   serial given + match             -> bind (lazily) & return
+   *   serial given + no match          -> UnknownCameraError
+   * Already-bound cameras are returned directly from the registry without
+   * rescanning — "bind lazily" means once bound, stay bound.
+   */
+  async get(serial?: string): Promise<ObsbotTransport> {
+    if (serial) {
+      const existing = this.registry.get(serial);
+      if (existing) return existing.transport;
+      const { transport } = await this.bind(serial);
+      return transport;
+    }
+
+    if (this.registry.size === 1) {
+      return [...this.registry.values()][0]!.transport;
+    }
+    if (this.registry.size > 1) {
+      throw new AmbiguousCameraError([...this.registry.keys()]);
+    }
+    const { transport } = await this.bind();
+    return transport;
+  }
+
+  /** Compat shim for the single-camera API B1 retires. */
+  async openFirstObsbot(): Promise<ObsbotTransport> {
+    return this.get();
+  }
+
+  /**
+   * Per attached camera: serial (where obtainable), locationId, name, and
+   * status. A camera this process cannot open is reported `busy` WITHOUT a
+   * serial rather than omitted — it is enumerable but not identifiable.
+   * Already-bound cameras are reported from the registry without
+   * re-opening (avoids a pointless self-conflict against our own handle).
+   */
+  async listCameras(): Promise<CameraInfo[]> {
+    const results: CameraInfo[] = [];
+    const seenSerials = new Set<string>();
+    const boundLocationIds = new Set<number>();
+    for (const [serial, entry] of this.registry) {
+      results.push({ serial, locationId: entry.locationId, name: entry.name, status: "bound" });
+      seenSerials.add(serial);
+      if (entry.locationId !== undefined) boundLocationIds.add(entry.locationId);
+    }
+
+    const helper = await this.getScanHelper();
+    const devices = await helper.enumerate();
+    const candidates = devices.filter((d) => OBSBOT_NAME_RE.test(d.name));
+
+    for (const d of candidates) {
+      if (d.locationId !== undefined && boundLocationIds.has(d.locationId)) {
+        continue; // already reported as bound above
+      }
+      try {
+        const xuNode = await helper.open(d.path);
+        if (xuNode < 0) continue;
+        const transport = this.createTransport(helper);
+        const serial = await transport.readSerial();
+        if (seenSerials.has(serial)) continue; // duplicate node of an already-listed camera
+        seenSerials.add(serial);
+        results.push({ serial, locationId: d.locationId, name: d.name, status: "available" });
+      } catch {
+        results.push({ locationId: d.locationId, name: d.name, status: "busy" });
       }
     }
-    throw new Error(
-      `could not open any OBSBOT device:\n  ${errors.join("\n  ")}`,
-    );
+
+    return results;
   }
 }
