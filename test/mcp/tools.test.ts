@@ -439,18 +439,24 @@ test("obsbot_exposure auto without priority does not write face-AE", async () =>
   expect(transport.xuRaw).not.toHaveBeenCalled();
 });
 
-test("obsbot_exposure manual sends V3 frame mode + value", async () => {
+test("obsbot_exposure manual sends ONE V3 frame carrying mode and value", async () => {
   const transport = makeFakeTransport();
   const tools = createTools(async () => transport, makeFakeMgr());
   const result = await tools
     .find((t) => t.name === "obsbot_exposure")!
     .handler({ mode: "manual", level: 25 });
-  // Two sendVendor calls: mode switch + value set
-  expect(transport.sendVendor).toHaveBeenCalledTimes(2);
+  // ONE sendVendor call. This test previously asserted two — a mode command
+  // followed by a value command — which encoded the bug: CAM_SET_EXPOSURE_MODE is
+  // inert on this device, and the 4-byte value payload was silently discarded, so
+  // neither call did anything. CAM_SET_EXPOSURE_TINY2 with a 5-byte [mode][value]
+  // payload sets both at once. Hardware-verified 2026-07-20.
+  expect(transport.sendVendor).toHaveBeenCalledTimes(1);
   expect(transport.camCtrlRange).not.toHaveBeenCalled();
   expect(transport.camCtrlSet).not.toHaveBeenCalled();
-  // 25% of 0-65535 range => 16384
-  expect(result).toEqual({ ok: true, mode: "manual", level: 25, raw: 16384 });
+  // 25% of the device's real 1..2500 range => 626. The old 0..65535 figure came
+  // from the Tiny4Linux reference and does not match this hardware; the device
+  // reports its range as 1..2500 via CAM_GET_EXPOSURE_RANGE_TINY2.
+  expect(result).toEqual({ ok: true, mode: "manual", level: 25, raw: 626 });
 });
 
 // --- String-encoded args from clients that ignore the advertised schema ----

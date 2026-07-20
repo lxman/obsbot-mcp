@@ -146,11 +146,28 @@ export const encodeFaceFocus = (enable: boolean): VendorFrame =>
 //    - CAM_SET_EXPOSURE_MODE (0x2442): i32le(0=auto, 1=manual)
 //    - CAM_SET_EXPOSURE_TINY2  (0x2982): i32le(value) 0..65535
 // ---------------------------------------------------------------------------
-export const encodeSetExposureMode = (manual: boolean): VendorFrame =>
-  vendorOp("CAM_SET_EXPOSURE_MODE", i32le(manual ? 1 : 0));
-
-export const encodeSetExposureValue = (raw: number): VendorFrame =>
-  vendorOp("CAM_SET_EXPOSURE_TINY2", i32le(raw));
+/**
+ * Set exposure mode and value together.
+ *
+ * `CAM_SET_EXPOSURE_TINY2` takes a **5-byte** `[mode:u8][value:u32le]` payload and
+ * sets both fields at once. Payload width is load-bearing: the 4-byte `i32le`
+ * payload this previously shipped is SILENTLY DISCARDED — writing 500 left the
+ * readback at 330, while the 5-byte form landed immediately (verified 2026-07-20
+ * against `CAM_GET_EXPOSURE_TINY2`, which returns this same `[mode][value]` shape).
+ *
+ * The separate `CAM_SET_EXPOSURE_MODE` command is inert — writing 0 then 1 left the
+ * mode pinned — so it has been removed. Mode is only settable through this command.
+ *
+ * UNVERIFIED: which mode byte means auto and which means manual. Writing 0 reads
+ * back as 2; writing 1 reads back as 1, so the readback encoding is 1/2 rather than
+ * the 0/1 this code long assumed. Attempting to discriminate by observing whether a
+ * written value drifts was inconclusive, most likely because auto-exposure has no
+ * frames to meter while nothing is streaming. `manual` is therefore mapped to the
+ * byte the caller has always intended (1 = manual, 0 = auto) — which is at worst no
+ * worse than before, since previously neither field was written at all.
+ */
+export const encodeSetExposure = (manual: boolean, raw: number): VendorFrame =>
+  vendorOp("CAM_SET_EXPOSURE_TINY2", concat(Buffer.from([manual ? 1 : 0]), u32le(raw)));
 
 export const encodeGetExposureMode = (): VendorFrame =>
   vendorOp("CAM_GET_EXPOSURE_MODE", Buffer.alloc(0));

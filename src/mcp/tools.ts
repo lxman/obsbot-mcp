@@ -9,8 +9,7 @@ import {
   encodeVendorProbe,
   encodeZoomWithSpeed,
   encodeFaceFocus,
-  encodeSetExposureMode,
-  encodeSetExposureValue,
+  encodeSetExposure,
   encodeGetExposureRange,
   decodeExposureRange,
   decodeStatus,
@@ -651,8 +650,9 @@ export function createTools(
       name: "obsbot_gimbal_position",
       description:
         "Read the gimbal's current absolute yaw/pitch in degrees (positive yaw = camera's " +
-        "left, positive pitch = down) via the standard UVC Pan/Tilt controls. Reports the " +
-        "actual position, which may lag a move that is still in progress.",
+        "left, positive pitch = down) via the standard UVC Pan/Tilt controls. This is a live " +
+        "hardware readout accurate to ±1°: it is valid during a move as well as after one, " +
+        "and reflects motion the host did not command (speed moves, recenter, tracking).",
       schema: gimbalPositionSchema,
       handler: async (args: unknown) => {
         gimbalPositionSchema.parse(args);
@@ -942,14 +942,22 @@ export function createTools(
         "(0 darkest → 100 brightest), mapped onto the device's exposure range. With auto, " +
         "an optional priority 'global' | 'face' selects the metering region (face-priority " +
         "meters for a detected face). " +
-        "Uses proprietary V3 frame protocol (CAM_SET_EXPOSURE_MODE + CAM_SET_EXPOSURE_TINY2) " +
-        "because the standard UVC/IAMCameraControl V4L2 path is a stub on the Tiny 2.",
+        "Uses the proprietary V3 frame protocol (CAM_SET_EXPOSURE_TINY2, which carries mode " +
+        "and value in one command) because the standard UVC/IAMCameraControl V4L2 path is a " +
+        "stub on the Tiny 2.",
       schema: exposureSchema,
       handler: async (args: unknown) => {
         const { mode, level, priority } = exposureSchema.parse(args);
         const t = await getTransport();
+        // Mode and value go in ONE command — CAM_SET_EXPOSURE_TINY2 with a 5-byte
+        // [mode][value] payload. The separate CAM_SET_EXPOSURE_MODE command is inert
+        // on this device, and a 4-byte value payload is silently discarded.
+        // Device exposure range is 1..2500 (read from CAM_GET_EXPOSURE_RANGE_TINY2;
+        // the previous 0..65535 figure came from the Tiny4Linux reference and does
+        // not match this hardware).
+        const raw = percentToRange(level, 1, 2500);
+        await t.sendVendor(encodeSetExposure(mode === "manual", raw).buildFrame(t.nextSeq()));
         if (mode === "auto") {
-          await t.sendVendor(encodeSetExposureMode(false).buildFrame(t.nextSeq()));
           // Face vs global metering is a sel-6 uvcExt write applied after auto-exposure
           // is on (readback surfaces at status offset 0x07). See encodeFaceAe.
           if (priority) {
@@ -958,12 +966,6 @@ export function createTools(
           }
           return { ok: true, mode };
         }
-        // Switch to manual mode via V3 frame protocol (CAM_SET_EXPOSURE_MODE)
-        await t.sendVendor(encodeSetExposureMode(true).buildFrame(t.nextSeq()));
-        // Translate 0-100 percentage to raw 16-bit exposure value.
-        // Tiny 2 exposure range is 0-65535 (confirmed by Tiny4Linux reference).
-        const raw = percentToRange(level, 0, 65535);
-        await t.sendVendor(encodeSetExposureValue(raw).buildFrame(t.nextSeq()));
         return { ok: true, mode, level, raw };
       },
     },

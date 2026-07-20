@@ -314,6 +314,13 @@ Float32 values, verified:
 Measured: range **1 … 2500**, current **330**. Value 330 corresponds to 33 ms ≈ 1/30 s, and matches
 the UVC `CT_EXPOSURE_TIME_ABSOLUTE` read exactly — two independent channels agreeing.
 
+**Units are 0.1 ms**, so the 1…2500 range is 0.1 ms … 250 ms.
+
+**The device snaps to supported shutter values.** Verified: 250 → 250 (1/40 s), 500 → 500 (1/20 s),
+1000 → 1000 (1/10 s) and 2000 → 2000 (1/5 s) all land exactly, but **700 → 667** (1/15 s). A
+readback that differs from what was written is therefore not necessarily a failed write — check
+whether the returned value is a neighbouring standard shutter speed before concluding anything.
+
 Writes go through `CAM_SET_EXPOSURE_TINY2` with the **5-byte** `[mode:u8][value:u32le]` payload,
 which sets mode and value together. The separate `CAM_SET_EXPOSURE_MODE` command is inert.
 
