@@ -389,21 +389,55 @@ static IOReturn uvcGetMax(IOUSBDeviceInterface **intf,
 // ---------------------------------------------------------------------------
 // IAMCameraControl property → UVC selector/entity mapping
 // ---------------------------------------------------------------------------
+// Selectors are UVC 1.5 Table A-12 (Camera Terminal). Getting these wrong is
+// silent — undefined selectors on this firmware do not STALL, they return the
+// 60-byte vendor status block, so a mis-mapped control reads as plausible
+// garbage. Verified against the device 2026-07-20 (GET_LEN/GET_INFO survey).
 static uint8_t camctrlSel(long prop) {
   switch ((int)prop) {
-    case 0: case 1: return 0x0E; // CT_PANTILT_ABSOLUTE
-    case 4:          return 0x0D; // CT_EXPOSURE_TIME_ABSOLUTE
-    case 6:          return 0x10; // PU_FOCUS_ABSOLUTE
-    default:         return 0;
+    case 0: case 1: return 0x0D; // CT_PANTILT_ABSOLUTE
+    case 4:         return 0x04; // CT_EXPOSURE_TIME_ABSOLUTE
+    case 6:         return 0x06; // CT_FOCUS_ABSOLUTE
+    default:        return 0;
   }
 }
 
 static uint8_t camctrlEnt(long prop) {
   switch ((int)prop) {
-    case 0: case 1: case 4: return UVC_CT;
-    case 6:                 return UVC_PU;
-    default:                return 0;
+    case 0: case 1: case 4: case 6: return UVC_CT;
+    default:                        return 0;
   }
+}
+
+// Payload length of each control, per the spec and confirmed by GET_LEN on
+// this device. Issuing a request with the wrong wLength addresses the control
+// incorrectly, so every transfer sizes itself from here.
+static uint16_t camctrlLen(long prop) {
+  switch ((int)prop) {
+    case 0: case 1: return 8; // {int32 dwPanAbsolute, int32 dwTiltAbsolute}
+    case 4:         return 4;
+    case 6:         return 2;
+    default:        return 0;
+  }
+}
+
+// Decode a control payload to a signed host value. Pan/tilt is a two-field
+// struct — pick the axis the caller asked for. macOS is little-endian, matching
+// UVC's wire order, so the fields copy straight across.
+static int32_t camctrlDecode(long prop, const uint8_t *buf) {
+  if (prop == 0 || prop == 1) {
+    int32_t pt[2] = {0, 0};
+    memcpy(pt, buf, sizeof(pt));
+    return pt[prop == 0 ? 0 : 1]; // arc-seconds; the transport scales to degrees
+  }
+  if (camctrlLen(prop) == 2) {
+    uint16_t v = 0;
+    memcpy(&v, buf, sizeof(v));
+    return (int32_t)v; // CT_FOCUS_ABSOLUTE is unsigned
+  }
+  int32_t v = 0;
+  memcpy(&v, buf, sizeof(v));
+  return v;
 }
 
 // IAMVideoProcAmp property → UVC PU selector mapping
@@ -687,24 +721,23 @@ static void doCamCtrlSet(NSString *propStr, NSString *valStr, NSString *flagsStr
   long value = [valStr integerValue];
   uint8_t sel = camctrlSel(prop);
   uint8_t ent = camctrlEnt(prop);
+  uint16_t len = camctrlLen(prop);
   if (sel == 0) { err(@"camctrl_set: unsupported property"); return; }
 
+  // Pan/tilt writes are refused: SET_CUR on CT_PANTILT_ABSOLUTE has never been
+  // exercised on this device, and absolute moves already work through vendor V3
+  // frames. Writing an uncharacterized control that physically moves hardware is
+  // not worth the convenience.
   if (prop == 0 || prop == 1) {
-    // Pan/Tilt: two int16 values (0x0E selector).
-    int16_t buf[2] = {(int16_t)value, 0};
-    IOReturn kr = uvcSetCur(g_session.usbDevice, sel, ent, buf, sizeof(buf));
-    if (kr != kIOReturnSuccess) {
-      err([NSString stringWithFormat:@"camctrl_set: SET_CUR pan/tilt failed (0x%x)", kr]);
-      return;
-    }
-  } else {
-    // Focus/exposure: 4-byte int32 value.
-    int32_t v = (int32_t)value;
-    IOReturn kr = uvcSetCur(g_session.usbDevice, sel, ent, &v, sizeof(v));
-    if (kr != kIOReturnSuccess) {
-      err([NSString stringWithFormat:@"camctrl_set: SET_CUR failed (0x%x)", kr]);
-      return;
-    }
+    err(@"camctrl_set: pan/tilt writes are not supported — use the vendor gimbal path");
+    return;
+  }
+
+  int32_t v = (int32_t)value;
+  IOReturn kr = uvcSetCur(g_session.usbDevice, sel, ent, &v, len);
+  if (kr != kIOReturnSuccess) {
+    err([NSString stringWithFormat:@"camctrl_set: SET_CUR failed (0x%x)", kr]);
+    return;
   }
   ok(@"");
 }
@@ -714,17 +747,20 @@ static void doCamCtrlRange(NSString *propStr) {
   long prop = [propStr integerValue];
   uint8_t sel = camctrlSel(prop);
   uint8_t ent = camctrlEnt(prop);
+  uint16_t len = camctrlLen(prop);
   if (sel == 0) { err(@"camctrl_range: unsupported property"); return; }
 
-  int32_t min = 0, max = 0;
-  IOReturn kr = uvcGetMin(g_session.usbDevice, sel, ent, &min, sizeof(min));
+  uint8_t minBuf[8] = {0}, maxBuf[8] = {0};
+  IOReturn kr = uvcGetMin(g_session.usbDevice, sel, ent, minBuf, len);
   if (kr == kIOReturnSuccess)
-    kr = uvcGetMax(g_session.usbDevice, sel, ent, &max, sizeof(max));
+    kr = uvcGetMax(g_session.usbDevice, sel, ent, maxBuf, len);
   if (kr != kIOReturnSuccess) {
     err([NSString stringWithFormat:@"camctrl_range: GET_MIN/MAX failed (0x%x)", kr]);
     return;
   }
-  ok([NSString stringWithFormat:@",\"min\":%d,\"max\":%d", min, max]);
+  ok([NSString stringWithFormat:@",\"min\":%d,\"max\":%d",
+                                camctrlDecode(prop, minBuf),
+                                camctrlDecode(prop, maxBuf)]);
 }
 
 static void doCamCtrlGet(NSString *propStr) {
@@ -732,33 +768,20 @@ static void doCamCtrlGet(NSString *propStr) {
   long prop = [propStr integerValue];
   uint8_t sel = camctrlSel(prop);
   uint8_t ent = camctrlEnt(prop);
+  uint16_t len = camctrlLen(prop);
   if (sel == 0) { err(@"camctrl_get: unsupported property"); return; }
 
-  if (prop == 0 || prop == 1) {
-    // The Tiny 2's pan/tilt control (selector 0x0E) is a 4-byte pair of int16:
-    // pan at offset 0, tilt at offset 2 — the same layout doCamCtrlSet writes.
-    // The old code read the whole 4 bytes as one int32 and returned it for BOTH
-    // pan and tilt, so tilt never saw its own field and obsbot_gimbal_position
-    // reported pitch == -yaw. Confirmed on hardware: yaw moves the pan int16 and
-    // leaves the tilt int16 fixed, and vice-versa.
-    struct __attribute__((packed)) { int16_t pan; int16_t tilt; } pt = {0, 0};
-    IOReturn kr = uvcGetCur(g_session.usbDevice, sel, ent, &pt, sizeof(pt));
-    if (kr != kIOReturnSuccess) {
-      err([NSString stringWithFormat:@"camctrl_get: GET_CUR pan/tilt failed (0x%x)", kr]);
-      return;
-    }
-    int16_t value = (prop == 0) ? pt.pan : pt.tilt;
-    ok([NSString stringWithFormat:@",\"value\":%d,\"flags\":2", value]);
-    return;
-  }
-
-  int32_t value = 0;
-  IOReturn kr = uvcGetCur(g_session.usbDevice, sel, ent, &value, sizeof(value));
+  // Pan/tilt read CT_PANTILT_ABSOLUTE (0x0D), which this firmware keeps live
+  // during motion — 1° steps streamed throughout a slew, tracking vendor speed
+  // moves and recenters the host never wrote to this control. Arc-seconds out;
+  // the transport scales to degrees.
+  uint8_t buf[8] = {0};
+  IOReturn kr = uvcGetCur(g_session.usbDevice, sel, ent, buf, len);
   if (kr != kIOReturnSuccess) {
     err([NSString stringWithFormat:@"camctrl_get: GET_CUR failed (0x%x)", kr]);
     return;
   }
-  ok([NSString stringWithFormat:@",\"value\":%d,\"flags\":2", value]);
+  ok([NSString stringWithFormat:@",\"value\":%d,\"flags\":2", camctrlDecode(prop, buf)]);
 }
 
 // ---------------------------------------------------------------------------
