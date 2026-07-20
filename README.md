@@ -42,7 +42,7 @@ If you're running from a local checkout instead of an npm install, point `comman
 ### Debug / diagnostics tools
 
 By default the server advertises only the normal control surface. Pass `--debug` to additionally
-expose the diagnostics surface — the `obsbot_probe` tool (raw XU byte get/set/query) and the
+expose the diagnostics surface — the `obsbot_debug_probe` tool (raw XU byte get/set/query) and the
 `raw` 60-byte status block on `obsbot_status`:
 
 ```json
@@ -137,7 +137,7 @@ failure if the device didn't land the change.
 
 | Tool | Parameters | Description |
 |------|------------|-------------|
-| `obsbot_probe` | `mode`: `"get" \| "set" \| "query"`, plus `selector`, `length`, `hex`, `opcode`, `payloadHex` | RE/diagnostics only — raw XU byte get/set and framed table queries. Advertised only under `--debug`. |
+| `obsbot_debug_probe` | `mode`: `"get" \| "set" \| "query"`, plus `selector`, `length`, `hex`, `opcode`, `payloadHex` | RE/diagnostics only — raw XU byte get/set and framed table queries. Advertised only under `--debug`. |
 
 ¹ `record`/`preview` shell out to **ffmpeg**/**ffplay** (install: `winget install Gyan.FFmpeg`
 on Windows, `brew install ffmpeg` on macOS, `apt install ffmpeg` on Linux). `snapshot` does **not**

@@ -18,8 +18,8 @@ const vendorOp = (name: string, payload: Buffer, flags?: number): VendorFrame =>
 
 /**
  * RE/diagnostics: build ANY opcode-table entry as a V3 frame with an arbitrary
- * payload. Used by the obsbot_probe tool to exercise unmapped GET/query opcodes
- * (e.g. AI_GET_QUICK_STATUS) while reverse-engineering the feedback surface.
+ * payload. Used by the obsbot_debug_probe tool to exercise unmapped GET/query
+ * opcodes (e.g. AI_GET_QUICK_STATUS) while reverse-engineering the feedback surface.
  */
 export const encodeVendorProbe = (name: string, payload: Buffer): VendorFrame =>
   vendorOp(name, payload);

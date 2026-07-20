@@ -31,7 +31,7 @@ export async function startServer(opts: { debug?: boolean } = {}): Promise<void>
   };
 
   const capture = new CaptureManager();
-  // --debug exposes the RE/diagnostics surface (obsbot_probe tool + status raw block).
+  // --debug exposes the RE/diagnostics surface (obsbot_debug_probe tool + status raw block).
   const tools: ToolDef[] = createTools(getTransport, mgr, capture, reconnect, opts.debug ?? false);
 
   // Kill any recording/preview child processes when the server exits, so nothing orphans.

@@ -7,6 +7,7 @@ import {
   encodeAiMode,
   encodeFaceAe,
   encodeVendorProbe,
+  encodeVendorGet,
   encodeZoomWithSpeed,
   encodeFaceFocus,
   encodeSetExposure,
@@ -33,6 +34,7 @@ import {
 import type { AiTrackSpeed, AiFramingMode, AiSceneMode, AiModeStatus, FovType, ImageControl } from "../codec/commands.js";
 import { verifyFraming } from "./framing.js";
 import { parseFrame } from "../codec/frame.js";
+import { OP_BY_NAME } from "../codec/opcodes.js";
 import {
   decodePresetList,
   decodePresetEntry,
@@ -123,6 +125,16 @@ const probeSchema = z.object({
   opcode: z.string().optional(),     // table opcode name for mode "query"
   payloadHex: z.string().optional(), // nested payload for mode "query"
 });
+// Vendor XU selector: SET_CUR request AND GET_CUR reply mailbox. Protocol
+// constant, not platform-specific — same value as the per-transport
+// VENDOR_XU_SELECTOR (transport/{macos,linux,windows,read-serial}.ts), kept
+// local here rather than imported so this module doesn't need a transport-layer
+// dependency for one constant.
+const PROBE_VENDOR_SELECTOR = 0x02;
+// The reply mailbox retains the PREVIOUS reply until the new one lands, so a
+// single unvalidated read can return stale data — same hazard readSerialVia
+// (transport/read-serial.ts) polls around. Mirrors its POLL_ATTEMPTS.
+const PROBE_QUERY_POLL_ATTEMPTS = 8;
 const fovSchema = z.object({ fov: z.enum(FOV_TYPES as [FovType, ...FovType[]]) });
 const hdrSchema = z.object({ enabled: bool() });
 const focusAutoSchema = z.object({});
@@ -579,14 +591,16 @@ export function createTools(
       },
     },
     {
-      name: "obsbot_probe",
+      name: "obsbot_debug_probe",
       description:
         "RE/diagnostics only — generic XU byte access for reverse-engineering the feedback surface. " +
         "mode 'get': GET_CUR read `length` bytes from XU `selector` (default selector 6; use a large " +
         "length to probe the status block's true size, or sweep other selectors). " +
         "mode 'set': SET_CUR write raw `hex` bytes to XU `selector` (e.g. replay a captured frame). " +
-        "mode 'query': frame table `opcode` (default AI_GET_QUICK_STATUS) with optional `payloadHex`, " +
-        "send on the vendor selector, then read the reply frame. Returns raw hex. Not for normal use.",
+        "mode 'query': frame table `opcode` (default AI_GET_QUICK_STATUS) — a pure GET (no " +
+        "payloadHex) is framed header-only (flags 0x01, the only flavour this device answers for " +
+        "a GET); supplying `payloadHex` frames a SET/command instead (flags 0x25) — send on the " +
+        "vendor selector, then poll for the matching reply frame. Returns raw hex. Not for normal use.",
       schema: probeSchema,
       handler: async (args: unknown) => {
         const { mode, selector, length, hex, opcode, payloadHex } = probeSchema.parse(args);
@@ -604,28 +618,55 @@ export function createTools(
             await t.xuRaw(selector, Buffer.from(hex, "hex"));
             return { ok: true, selector, sent: hex };
           }
-          // mode "query": build a framed V3 command, send it, read the reply frame.
+          // mode "query": build a framed V3 command and poll the vendor reply mailbox
+          // until a valid, matching reply appears.
           const payload = payloadHex ? Buffer.from(payloadHex, "hex") : Buffer.alloc(0);
           const name = opcode ?? "AI_GET_QUICK_STATUS";
-          const frame = encodeVendorProbe(name, payload).buildFrame(t.nextSeq());
-          const reply = await t.recvVendor(frame, length ?? 60);
-          let parsed: object;
-          try {
-            const p = parseFrame(reply);
-            parsed = {
-              cmd: "0x" + p.cmd.toString(16).padStart(4, "0"),
-              receiver: p.receiver,
-              payloadHex: p.payload.toString("hex"),
-            };
-          } catch (e) {
-            parsed = { parseError: (e as Error).message };
+          const op = OP_BY_NAME.get(name);
+          if (!op || op.wireCmd === null || op.receiver === null) {
+            return { ok: false, error: `opcode "${name}" is not a sendable V3 command` };
+          }
+          // A pure GET (no nested payload) only gets an answer on this device when
+          // framed header-only (flags 0x01, encodeVendorGet) — encodeVendorProbe's
+          // SET flavour (flags 0x25) returns a stale echo instead of a real answer
+          // when there's no payload for the device to act on. A supplied payloadHex
+          // means an actual SET/command, so that keeps the 0x25 framing.
+          const seq = t.nextSeq();
+          const frame = (
+            payload.length === 0 ? encodeVendorGet(name) : encodeVendorProbe(name, payload)
+          ).buildFrame(seq);
+          await t.xuRaw(PROBE_VENDOR_SELECTOR, frame);
+
+          // The reply mailbox retains the PREVIOUS reply until the new one lands, so
+          // a single unvalidated read can return stale data. Trust a reply only once
+          // it parses cleanly AND both its cmd and seq match what was just sent (same
+          // validation readSerialVia does in transport/read-serial.ts).
+          const replyLen = length ?? 60;
+          for (let i = 0; i < PROBE_QUERY_POLL_ATTEMPTS; i++) {
+            const raw = await t.xuGetRaw(PROBE_VENDOR_SELECTOR, replyLen);
+            try {
+              const p = parseFrame(raw);
+              if (p.cmd === op.wireCmd && p.seq === seq) {
+                return {
+                  ok: true,
+                  opcode: name,
+                  sentFrame: frame.toString("hex"),
+                  replyHex: raw.toString("hex"),
+                  parsed: {
+                    cmd: "0x" + p.cmd.toString(16).padStart(4, "0"),
+                    receiver: p.receiver,
+                    payloadHex: p.payload.toString("hex"),
+                  },
+                };
+              }
+            } catch {
+              // Not our reply yet (stale mailbox, still in flight, or garbage) — keep polling.
+            }
           }
           return {
-            ok: true,
-            opcode: name,
+            ok: false,
+            error: `no valid reply for ${name} (seq ${seq}) after ${PROBE_QUERY_POLL_ATTEMPTS} attempts`,
             sentFrame: frame.toString("hex"),
-            replyHex: reply.toString("hex"),
-            parsed,
           };
         } catch (e) {
           return { ok: false, error: (e as Error).message };
@@ -1156,8 +1197,8 @@ export function createTools(
     },
   ];
 
-  // obsbot_probe is an RE/diagnostics-only tool (raw XU byte access); expose it only
-  // under --debug so normal deployments don't advertise it. get_status's raw block is
-  // gated the same way, inside its handler.
-  return debug ? toolDefs : toolDefs.filter((t) => t.name !== "obsbot_probe");
+  // obsbot_debug_probe is an RE/diagnostics-only tool (raw XU byte access); expose it
+  // only under --debug so normal deployments don't advertise it. get_status's raw
+  // block is gated the same way, inside its handler.
+  return debug ? toolDefs : toolDefs.filter((t) => t.name !== "obsbot_debug_probe");
 }

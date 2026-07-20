@@ -5,6 +5,7 @@ import { CameraBusyError } from "../../src/transport/transport.js";
 import type { DeviceManager } from "../../src/device/manager.js";
 import type { CaptureManager } from "../../src/capture/manager.js";
 import { CaptureError, FfmpegMissingError } from "../../src/capture/manager.js";
+import { buildFrame } from "../../src/codec/frame.js";
 
 // Real awake status block captured from the device (starts 0x25, byte[2]=0 → awake).
 const HEALTHY_STATUS_AWAKE = Buffer.from(
@@ -695,15 +696,24 @@ test("obsbot_status decodes awake+hdr from the status block", async () => {
   expect(result.raw.slice(0x06 * 2, 0x06 * 2 + 2)).toBe("01"); // byte 0x06 = hdr on
 });
 
-// --- Debug gating: obsbot_probe and status.raw are RE-only, behind --debug. ---
-test("createTools omits obsbot_probe unless debug is enabled", () => {
+// --- Debug gating: obsbot_debug_probe and status.raw are RE-only, behind --debug. ---
+test("createTools omits obsbot_debug_probe unless debug is enabled", () => {
   const tools = createTools(async () => makeFakeTransport(), makeFakeMgr());
-  expect(tools.find((t) => t.name === "obsbot_probe")).toBeUndefined();
+  expect(tools.find((t) => t.name === "obsbot_debug_probe")).toBeUndefined();
 });
 
-test("createTools includes obsbot_probe when debug is enabled", () => {
+test("createTools includes obsbot_debug_probe when debug is enabled", () => {
   const tools = createTools(async () => makeFakeTransport(), makeFakeMgr(), undefined, undefined, true);
-  expect(tools.find((t) => t.name === "obsbot_probe")).toBeDefined();
+  expect(tools.find((t) => t.name === "obsbot_debug_probe")).toBeDefined();
+});
+
+// Hard break: obsbot_probe was renamed obsbot_debug_probe with no alias — the old
+// name must never resolve, under --debug or otherwise.
+test("obsbot_probe is renamed obsbot_debug_probe (old name gone even under debug)", () => {
+  const names = createTools(async () => makeFakeTransport(), makeFakeMgr(), undefined, undefined, true)
+    .map((t) => t.name);
+  expect(names).toContain("obsbot_debug_probe");
+  expect(names).not.toContain("obsbot_probe");
 });
 
 test("obsbot_status omits the raw RE block unless debug is enabled", async () => {
@@ -727,32 +737,79 @@ test("obsbot_status includes the raw block when debug is enabled", async () => {
   expect(result.raw).toHaveLength(120);
 });
 
-test("obsbot_probe get reads the given selector/length via xuGetRaw", async () => {
+test("obsbot_debug_probe get reads the given selector/length via xuGetRaw", async () => {
   const transport = makeFakeTransport();
   transport.xuGetRaw = vi.fn(async () => Buffer.from("aabbcc", "hex"));
   const tools = createTools(async () => transport, makeFakeMgr(), undefined, undefined, true);
-  const tool = findTool(tools, "obsbot_probe");
+  const tool = findTool(tools, "obsbot_debug_probe");
   const result = await tool.handler({ mode: "get", selector: 6, length: 128 });
   expect(transport.xuGetRaw).toHaveBeenCalledWith(6, 128);
   expect(result).toMatchObject({ ok: true, selector: 6, len: 3, raw: "aabbcc" });
 });
 
-test("obsbot_probe set writes raw hex to the selector via xuRaw", async () => {
+test("obsbot_debug_probe set writes raw hex to the selector via xuRaw", async () => {
   const transport = makeFakeTransport();
   const tools = createTools(async () => transport, makeFakeMgr(), undefined, undefined, true);
-  const tool = findTool(tools, "obsbot_probe");
+  const tool = findTool(tools, "obsbot_debug_probe");
   const result = await tool.handler({ mode: "set", selector: 2, hex: "aa25" });
   expect(transport.xuRaw).toHaveBeenCalledWith(2, Buffer.from("aa25", "hex"));
   expect(result).toMatchObject({ ok: true, selector: 2, sent: "aa25" });
 });
 
-test("obsbot_probe query frames an opcode and reads the reply via recvVendor", async () => {
+// AI_GET_QUICK_STATUS wireCmd/receiver, from src/codec/opcodes.ts — used to build
+// fixture reply frames below.
+const AI_GET_QUICK_STATUS_CMD = 0x0104;
+const AI_GET_QUICK_STATUS_RECEIVER = 0x04;
+
+test("obsbot_debug_probe query with no payload sends the 0x01 GET flavour, not 0x25", async () => {
   const transport = makeFakeTransport();
   const tools = createTools(async () => transport, makeFakeMgr(), undefined, undefined, true);
-  const tool = findTool(tools, "obsbot_probe");
+  const tool = findTool(tools, "obsbot_debug_probe");
+  await tool.handler({ mode: "query", opcode: "AI_GET_QUICK_STATUS" });
+  expect(transport.xuRaw).toHaveBeenCalledTimes(1);
+  const sent: Buffer = (transport.xuRaw as ReturnType<typeof vi.fn>).mock.calls[0][1];
+  expect(sent[1]).toBe(0x01); // GET flavour (encodeVendorGet), not 0x25
+});
+
+test("obsbot_debug_probe query with a payloadHex sends the 0x25 SET flavour", async () => {
+  const transport = makeFakeTransport();
+  const tools = createTools(async () => transport, makeFakeMgr(), undefined, undefined, true);
+  const tool = findTool(tools, "obsbot_debug_probe");
+  await tool.handler({ mode: "query", opcode: "AI_GET_QUICK_STATUS", payloadHex: "01020304" });
+  const sent: Buffer = (transport.xuRaw as ReturnType<typeof vi.fn>).mock.calls[0][1];
+  expect(sent[1]).toBe(0x25); // SET flavour (encodeVendorProbe) — a real nested payload
+});
+
+test("obsbot_debug_probe query ignores a stale/mismatched reply and keeps polling until the matching one lands", async () => {
+  const transport = makeFakeTransport();
+  const staleReply = buildFrame({ seq: 999, cmd: AI_GET_QUICK_STATUS_CMD, receiver: AI_GET_QUICK_STATUS_RECEIVER, payload: Buffer.alloc(0) });
+  let call = 0;
+  transport.xuGetRaw = vi.fn(async () => {
+    call += 1;
+    if (call < 3) return staleReply; // wrong seq — the mailbox's previous reply
+    // seq 1 is what nextSeq() hands out on this transport's first call.
+    return buildFrame({ seq: 1, cmd: AI_GET_QUICK_STATUS_CMD, receiver: AI_GET_QUICK_STATUS_RECEIVER, payload: Buffer.from("aabb", "hex") });
+  });
+  const tools = createTools(async () => transport, makeFakeMgr(), undefined, undefined, true);
+  const tool = findTool(tools, "obsbot_debug_probe");
   const result = await tool.handler({ mode: "query", opcode: "AI_GET_QUICK_STATUS" });
-  expect(transport.recvVendor).toHaveBeenCalledTimes(1);
-  expect(result).toMatchObject({ ok: true, opcode: "AI_GET_QUICK_STATUS" });
+  expect(transport.xuGetRaw).toHaveBeenCalledTimes(3);
+  expect(result).toMatchObject({
+    ok: true,
+    opcode: "AI_GET_QUICK_STATUS",
+    parsed: { cmd: "0x0104", receiver: AI_GET_QUICK_STATUS_RECEIVER, payloadHex: "aabb" },
+  });
+});
+
+test("obsbot_debug_probe query returns ok:false when no valid reply arrives within the poll budget", async () => {
+  const transport = makeFakeTransport();
+  transport.xuGetRaw = vi.fn(async () => Buffer.alloc(60)); // never parses (bad magic)
+  const tools = createTools(async () => transport, makeFakeMgr(), undefined, undefined, true);
+  const tool = findTool(tools, "obsbot_debug_probe");
+  const result = await tool.handler({ mode: "query", opcode: "AI_GET_QUICK_STATUS" });
+  expect(result).toMatchObject({ ok: false, error: expect.stringMatching(/no valid reply/i) });
+  // Bounded retry, not a single read and not unbounded polling.
+  expect((transport.xuGetRaw as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(1);
 });
 
 // --- Preset read path: flat XU selectors 12 (list) + 13 (entry cursor). ---
