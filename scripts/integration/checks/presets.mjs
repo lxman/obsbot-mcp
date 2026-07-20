@@ -32,7 +32,7 @@ export const presetChecks = [
     timeoutMs: 40000,
     run: async (ctx) => {
       await clearAll(ctx);
-      await ctx.call("obsbot_ptz_move_angle", { yaw: 35, pitch: -18 });
+      await ctx.call("obsbot_gimbal_move", { yaw: 35, pitch: -18 });
       await ctx.sleep(3000);
       const live = await ctx.pos();
       const r = await ctx.call("obsbot_preset_save", { slot: 1 });
@@ -85,7 +85,7 @@ export const presetChecks = [
     tier: TIERS.VERIFIED,
     timeoutMs: 40000,
     run: async (ctx) => {
-      await ctx.call("obsbot_ptz_move_angle", { yaw: -30, pitch: 12 });
+      await ctx.call("obsbot_gimbal_move", { yaw: -30, pitch: 12 });
       await ctx.sleep(3000);
       const r = await ctx.call("obsbot_preset_update", { slot: 1 });
       if (r.ok === false) throw new Error(r.error);

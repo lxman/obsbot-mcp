@@ -12,9 +12,9 @@ export const transitionChecks = [
     run: async (ctx) => {
       // A position read that returns a cached value looks identical to a live one
       // at rest. Only sampling DURING travel can tell them apart.
-      await ctx.call("obsbot_ptz_move_angle", { yaw: -80, pitch: 0 });
+      await ctx.call("obsbot_gimbal_move", { yaw: -80, pitch: 0 });
       await ctx.sleep(3000);
-      await ctx.call("obsbot_ptz_move_angle", { yaw: 80, pitch: 0 });
+      await ctx.call("obsbot_gimbal_move", { yaw: 80, pitch: 0 });
       const samples = await ctx.samples(() => ctx.pos(), { count: 6, everyMs: 200 });
       const yaws = samples.map((s) => s.yaw);
       const distinct = new Set(yaws).size;
@@ -29,7 +29,7 @@ export const transitionChecks = [
 
   defineCheck({
     id: "transitions.T2.settling-profile",
-    tool: "obsbot_ptz_move_angle",
+    tool: "obsbot_gimbal_move",
     profile: "quick",
     tier: TIERS.VERIFIED,
     timeoutMs: 40000,
@@ -37,7 +37,7 @@ export const transitionChecks = [
       await ctx.call("obsbot_gimbal_recenter");
       await ctx.sleep(2500);
       const started = Date.now();
-      await ctx.call("obsbot_ptz_move_angle", { yaw: 60, pitch: -20 });
+      await ctx.call("obsbot_gimbal_move", { yaw: 60, pitch: -20 });
       const landed = await ctx.until(
         async () => {
           const p = await ctx.pos();
@@ -63,7 +63,7 @@ export const transitionChecks = [
       // must either return valid data or fail LOUDLY. A false EMPTY is the
       // dangerous direction, because EMPTY authorizes an irreversible
       // create-once ADD.
-      await ctx.call("obsbot_set_run_status", { state: "sleep" });
+      await ctx.call("obsbot_sleep", {});
       const observations = await ctx.samples(
         async () => {
           const r = await ctx.call("obsbot_preset_list");
@@ -71,7 +71,7 @@ export const transitionChecks = [
         },
         { count: 5, everyMs: 300 },
       );
-      await ctx.call("obsbot_set_run_status", { state: "run" });
+      await ctx.call("obsbot_wake", {});
       await ctx.until(async () => (await ctx.status()).awake === true);
       return {
         evidence: { observations },
@@ -86,7 +86,11 @@ export const transitionChecks = [
     id: "transitions.T5.gate-behaviour",
     // Observes sleep deliberately: the runner must not keep this one awake.
     managesSleep: true,
-    tool: "obsbot_set_run_status",
+    // NOTE: pairs with device.run-status.wake, which claims obsbot_wake coverage
+    // for the same underlying obsbot_set_run_status split. This check only ever
+    // calls obsbot_sleep directly — the wake half here is an implicit side effect
+    // of the gated obsbot_preset_list call below, not a direct obsbot_wake call.
+    tool: "obsbot_sleep",
     profile: "quick",
     tier: TIERS.VERIFIED,
     timeoutMs: 40000,
@@ -94,11 +98,11 @@ export const transitionChecks = [
       // The preceding check leaves the camera freshly woken, and a sleep issued
       // inside the post-wake settling window is ignored. Let it settle first.
       await ctx.sleep(2500);
-      await ctx.call("obsbot_set_run_status", { state: "sleep" });
+      await ctx.call("obsbot_sleep", {});
       await ctx.until(async () => (await ctx.status()).awake === false, { timeoutMs: 15000 });
-      // get_status must NOT gate — reading state should not change it.
+      // status must NOT gate — reading state should not change it.
       const stillAsleep = (await ctx.status()).awake;
-      if (stillAsleep !== false) throw new Error("obsbot_get_status woke the camera");
+      if (stillAsleep !== false) throw new Error("obsbot_status woke the camera");
       // A gated tool must auto-wake and succeed.
       const list = await ctx.call("obsbot_preset_list");
       if (list.ok === false) throw new Error(`gated call failed from asleep: ${list.error}`);
@@ -146,12 +150,12 @@ export const transitionChecks = [
       for (const s of list.slots.filter((x) => x.occupied)) {
         await ctx.call("obsbot_preset_delete", { slot: s.slot });
       }
-      await ctx.call("obsbot_ptz_move_angle", { yaw: 45, pitch: -20 });
+      await ctx.call("obsbot_gimbal_move", { yaw: 45, pitch: -20 });
       await ctx.sleep(3000);
       const saved = await ctx.pos();
       await ctx.call("obsbot_preset_save", { slot: 1 });
 
-      await ctx.call("obsbot_ptz_move_angle", { yaw: -60, pitch: 20 });
+      await ctx.call("obsbot_gimbal_move", { yaw: -60, pitch: 20 });
       await ctx.sleep(3500);
       const awayFrom = await ctx.pos();
 
@@ -179,22 +183,22 @@ export const transitionChecks = [
     id: "transitions.T3.wake-self-centering-window",
     // Observes sleep deliberately: the runner must not keep this one awake.
     managesSleep: true,
-    tool: "obsbot_ptz_move_angle",
+    tool: "obsbot_gimbal_move",
     profile: "deep",
     tier: TIERS.VERIFIED,
     timeoutMs: 60000,
     run: async (ctx) => {
       // The gimbal self-centers for ~1-2s after wake and overrides earlier moves.
       // Documented as a tested invariant rather than folklore.
-      await ctx.call("obsbot_set_run_status", { state: "sleep" });
+      await ctx.call("obsbot_sleep", {});
       await ctx.until(async () => (await ctx.status()).awake === false);
-      await ctx.call("obsbot_set_run_status", { state: "run" });
-      await ctx.call("obsbot_ptz_move_angle", { yaw: 60, pitch: 0 });
+      await ctx.call("obsbot_wake", {});
+      await ctx.call("obsbot_gimbal_move", { yaw: 60, pitch: 0 });
       await ctx.sleep(4000);
       const early = await ctx.pos();
 
       await ctx.sleep(1500);
-      await ctx.call("obsbot_ptz_move_angle", { yaw: 60, pitch: 0 });
+      await ctx.call("obsbot_gimbal_move", { yaw: 60, pitch: 0 });
       const late = await ctx.until(
         async () => {
           const p = await ctx.pos();
@@ -215,14 +219,14 @@ export const transitionChecks = [
 
   defineCheck({
     id: "transitions.T10.speed-autostop-timing",
-    tool: "obsbot_ptz_move_speed",
+    tool: "obsbot_gimbal_move_speed",
     profile: "deep",
     tier: TIERS.VERIFIED,
     timeoutMs: 40000,
     run: async (ctx) => {
       await ctx.call("obsbot_gimbal_recenter");
       await ctx.sleep(2500);
-      await ctx.call("obsbot_ptz_move_speed", { yaw: 25, pitch: 0, autoStopMs: 700 });
+      await ctx.call("obsbot_gimbal_move_speed", { yaw: 25, pitch: 0, autoStopMs: 700 });
       await ctx.sleep(2500);
       const first = await ctx.pos();
       await ctx.sleep(1500);
@@ -237,7 +241,7 @@ export const transitionChecks = [
 
   defineCheck({
     id: "transitions.T11.repeatability",
-    tool: "obsbot_ptz_move_angle",
+    tool: "obsbot_gimbal_move",
     profile: "deep",
     tier: TIERS.VERIFIED,
     timeoutMs: 60000,
@@ -245,7 +249,7 @@ export const transitionChecks = [
       const land = async () => {
         await ctx.call("obsbot_gimbal_recenter");
         await ctx.sleep(2500);
-        await ctx.call("obsbot_ptz_move_angle", { yaw: 55, pitch: -15 });
+        await ctx.call("obsbot_gimbal_move", { yaw: 55, pitch: -15 });
         return ctx.until(
           async () => {
             const p = await ctx.pos();
