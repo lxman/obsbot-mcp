@@ -12,6 +12,18 @@ const RESPONSE_SELECTOR = 0x02;
 const DEFAULT_REPLY_LEN = 60;
 const STATUS_SELECTOR = 0x06;
 const STATUS_BLOCK_LEN = 60;
+// UVC CT_PANTILT_ABSOLUTE (selector 0x0D) is expressed in arc-seconds. The
+// helper returns the raw per-axis value; the rest of the codebase works in
+// degrees (Windows DirectShow convention), so scale here — the same shape as
+// LinuxTransport's millidegree scaling. Hardware-measured range is ±468000
+// asec pan / ±324000 asec tilt, resolution 3600 asec = 1°.
+const ARCSEC_PER_DEG = 3600;
+const CAMCTRL_PAN = 0;
+const CAMCTRL_TILT = 1;
+
+function isGimbalAxis(property: number): boolean {
+  return property === CAMCTRL_PAN || property === CAMCTRL_TILT;
+}
 
 export class MacosTransport implements ObsbotTransport {
   private seq = 0;
@@ -52,15 +64,41 @@ export class MacosTransport implements ObsbotTransport {
   }
 
   async camCtrlSet(property: number, value: number, flags: number): Promise<void> {
+    // SET_CUR on CT_PANTILT_ABSOLUTE has never been exercised on this device —
+    // absolute moves go through vendor V3 frames instead. Refuse rather than
+    // issue an uncharacterized write.
+    if (isGimbalAxis(property)) {
+      throw new Error(
+        "camCtrlSet: pan/tilt writes are not supported on macOS — use gimbalSet (vendor V3 frames)",
+      );
+    }
     await this.helper.camCtrlSet(property, value, flags);
   }
 
   async camCtrlRange(property: number): Promise<{ min: number; max: number }> {
-    return this.helper.camCtrlRange(property);
+    const result = await this.helper.camCtrlRange(property);
+    if (isGimbalAxis(property)) {
+      result.min = Math.round(result.min / ARCSEC_PER_DEG);
+      result.max = Math.round(result.max / ARCSEC_PER_DEG);
+    }
+    return result;
   }
 
+  /**
+   * Read a camera-control property. Pan (0) and tilt (1) come from the standard
+   * UVC CT_PANTILT_ABSOLUTE control (selector 0x0D), which this firmware updates
+   * live during motion — including motion the host did not command (speed moves,
+   * recenter, tracking). Scaled arc-seconds → degrees.
+   *
+   * Sign convention: UVC pan positive = camera's left (matches our yaw sign);
+   * UVC tilt positive = up, which callers negate to get our +pitch = down.
+   */
   async camCtrlGet(property: number): Promise<{ value: number; flags: number }> {
-    return this.helper.camCtrlGet(property);
+    const result = await this.helper.camCtrlGet(property);
+    if (isGimbalAxis(property)) {
+      result.value = Math.round(result.value / ARCSEC_PER_DEG);
+    }
+    return result;
   }
 
   async procAmpSet(property: number, value: number, flags: number): Promise<void> {

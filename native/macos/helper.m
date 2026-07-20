@@ -278,6 +278,45 @@ static IOUSBDeviceInterface **openUsbDevice(io_service_t deviceService,
 
 // Enumerate IOUSB devices matching vendor/product ID.
 // Returns an array of io_service_t wrapped in NSNumber.
+// Read a USB service's locationID — the identifier that ties a USB device to its
+// AVFoundation camera.
+//
+// The Tiny 2 has NO USB serial string (iSerialNumber = 0), so kUSBSerialNumberString
+// is always nil and cannot be used to correlate the two. locationID encodes the
+// physical port path and is always present.
+//
+// Returns 0 on failure; a real locationID is never 0.
+static uint32_t usbLocationID(io_service_t svc) {
+  CFMutableDictionaryRef props = NULL;
+  uint32_t loc = 0;
+  if (IORegistryEntryCreateCFProperties(svc, &props, kCFAllocatorDefault, kNilOptions)
+      == kIOReturnSuccess && props) {
+    NSNumber *n = [(__bridge NSDictionary *)props objectForKey:@"locationID"];
+    if (n) loc = (uint32_t)[n unsignedIntValue];
+    CFRelease(props);
+  }
+  return loc;
+}
+
+// Does this AVFoundation uniqueID belong to the USB device at `loc`?
+//
+// macOS builds a UVC camera's uniqueID as "0x" + locationID(hex) + VID(4) + PID(4).
+// Verified on hardware: locationID 0x3120000 with VID 0x3564 / PID 0xfef8 yields
+// "0x31200003564fef8".
+//
+// The exact form is checked first. The substring fallback covers formatting
+// differences across macOS releases, which this format has only been confirmed
+// against one release — if that fallback ever starts mismatching cameras, this is
+// the first place to look.
+static BOOL uniqueIDMatchesLocation(NSString *uniqueID, uint32_t loc) {
+  if (!uniqueID || uniqueID.length == 0 || loc == 0) return NO;
+  NSString *exact = [NSString stringWithFormat:@"0x%x%04x%04x",
+                     loc, (unsigned)OBSBOT_VID, (unsigned)TINY2_PID];
+  if ([uniqueID caseInsensitiveCompare:exact] == NSOrderedSame) return YES;
+  NSString *locHex = [NSString stringWithFormat:@"%x", loc];
+  return [uniqueID localizedCaseInsensitiveContainsString:locHex];
+}
+
 static NSMutableArray *findUsbServices(uint16_t vid, uint16_t pid) {
   NSMutableArray *services = [NSMutableArray array];
   CFMutableDictionaryRef matching = IOServiceMatching(kIOUSBDeviceClassName);
@@ -389,21 +428,55 @@ static IOReturn uvcGetMax(IOUSBDeviceInterface **intf,
 // ---------------------------------------------------------------------------
 // IAMCameraControl property → UVC selector/entity mapping
 // ---------------------------------------------------------------------------
+// Selectors are UVC 1.5 Table A-12 (Camera Terminal). Getting these wrong is
+// silent — undefined selectors on this firmware do not STALL, they return the
+// 60-byte vendor status block, so a mis-mapped control reads as plausible
+// garbage. Verified against the device 2026-07-20 (GET_LEN/GET_INFO survey).
 static uint8_t camctrlSel(long prop) {
   switch ((int)prop) {
-    case 0: case 1: return 0x0E; // CT_PANTILT_ABSOLUTE
-    case 4:          return 0x0D; // CT_EXPOSURE_TIME_ABSOLUTE
-    case 6:          return 0x10; // PU_FOCUS_ABSOLUTE
-    default:         return 0;
+    case 0: case 1: return 0x0D; // CT_PANTILT_ABSOLUTE
+    case 4:         return 0x04; // CT_EXPOSURE_TIME_ABSOLUTE
+    case 6:         return 0x06; // CT_FOCUS_ABSOLUTE
+    default:        return 0;
   }
 }
 
 static uint8_t camctrlEnt(long prop) {
   switch ((int)prop) {
-    case 0: case 1: case 4: return UVC_CT;
-    case 6:                 return UVC_PU;
-    default:                return 0;
+    case 0: case 1: case 4: case 6: return UVC_CT;
+    default:                        return 0;
   }
+}
+
+// Payload length of each control, per the spec and confirmed by GET_LEN on
+// this device. Issuing a request with the wrong wLength addresses the control
+// incorrectly, so every transfer sizes itself from here.
+static uint16_t camctrlLen(long prop) {
+  switch ((int)prop) {
+    case 0: case 1: return 8; // {int32 dwPanAbsolute, int32 dwTiltAbsolute}
+    case 4:         return 4;
+    case 6:         return 2;
+    default:        return 0;
+  }
+}
+
+// Decode a control payload to a signed host value. Pan/tilt is a two-field
+// struct — pick the axis the caller asked for. macOS is little-endian, matching
+// UVC's wire order, so the fields copy straight across.
+static int32_t camctrlDecode(long prop, const uint8_t *buf) {
+  if (prop == 0 || prop == 1) {
+    int32_t pt[2] = {0, 0};
+    memcpy(pt, buf, sizeof(pt));
+    return pt[prop == 0 ? 0 : 1]; // arc-seconds; the transport scales to degrees
+  }
+  if (camctrlLen(prop) == 2) {
+    uint16_t v = 0;
+    memcpy(&v, buf, sizeof(v));
+    return (int32_t)v; // CT_FOCUS_ABSOLUTE is unsigned
+  }
+  int32_t v = 0;
+  memcpy(&v, buf, sizeof(v));
+  return v;
 }
 
 // IAMVideoProcAmp property → UVC PU selector mapping
@@ -477,43 +550,37 @@ static void doEnumerate(void) {
     for (NSNumber *svcNum in usbServices) {
       io_service_t service = (io_service_t)(uintptr_t)[svcNum unsignedLongValue];
 
-      // Read product name and serial from IORegistry properties directly
-      // (no need to open the device exclusively).
+      // Read the product name from IORegistry (no exclusive open needed), and the
+      // locationID that ties this USB device to its AVFoundation camera.
       CFMutableDictionaryRef props = NULL;
       NSString *product = nil;
-      NSString *serial  = nil;
       if (IORegistryEntryCreateCFProperties(service, &props,
                                             kCFAllocatorDefault, kNilOptions)
           == kIOReturnSuccess && props) {
-        NSDictionary *dict = (__bridge NSDictionary *)props;
-        product = [dict objectForKey:@"kUSBProductString"];
-        serial  = [dict objectForKey:@"kUSBSerialNumberString"];
+        product = [(__bridge NSDictionary *)props objectForKey:@"kUSBProductString"];
         CFRelease(props);
       }
-
       if (!product) product = @"OBSBOT Tiny 2";
 
-      NSString *avUniqueID = serial ?: @"";
+      uint32_t loc = usbLocationID(service);
+
+      // Correlate by locationID. This previously matched on the USB serial string
+      // and fell back to matching the PRODUCT NAME — but every Tiny 2 reports the
+      // same product name, so with two cameras attached the name fallback picked
+      // the SAME AVFoundation device for both USB services and enumerate returned
+      // duplicate paths. locationID is per-port and unique.
+      NSString *avUniqueID = @"";
       for (NSDictionary *avDev in avDevices) {
         NSString *uid = avDev[@"uniqueID"];
-        if (!uid || uid.length == 0) continue;
-        if (serial && [uid localizedCaseInsensitiveContainsString:serial]) {
-          avUniqueID = uid;
-          break;
-        }
-        // Some OBSBOT units have no USB serial descriptor (iSerialNumber = 0).
-        // Fall back to matching by product name against the AVFoundation name.
-        if (!serial) {
-          NSString *name = avDev[@"name"];
-          if (name && [name localizedCaseInsensitiveContainsString:product]) {
-            avUniqueID = uid;
-            break;
-          }
-        }
+        if (uniqueIDMatchesLocation(uid, loc)) { avUniqueID = uid; break; }
       }
+
+      // locationID is reported so callers can correlate without re-deriving it
+      // from the uniqueID string format.
       [deviceList addObject:@{
         @"path": avUniqueID ?: @"",
         @"name": product,
+        @"locationId": @(loc),
       }];
     }
   } else {
@@ -560,17 +627,15 @@ static void doOpen(NSString *path) {
     io_service_t svc = (io_service_t)(uintptr_t)[svcNum unsignedLongValue];
 
     if (!udev) {
-      // Read the serial number from IORegistry to match against AVFoundation UID.
-      CFMutableDictionaryRef props = NULL;
-      NSString *serial = nil;
-      if (IORegistryEntryCreateCFProperties(svc, &props,
-                                            kCFAllocatorDefault, kNilOptions)
-          == kIOReturnSuccess && props) {
-        serial = [(__bridge NSDictionary *)props objectForKey:@"kUSBSerialNumberString"];
-        CFRelease(props);
-      }
-      BOOL matches = (serial && [path localizedCaseInsensitiveContainsString:serial]) ||
-                     (services.count == 1);
+      // Match this USB service to the requested AVFoundation uniqueID by locationID.
+      //
+      // This previously matched on kUSBSerialNumberString, which is nil on every
+      // Tiny 2 (iSerialNumber = 0), so the only branch that ever fired was the
+      // `services.count == 1` fallback. With two or more cameras attached that
+      // fallback is false and nothing matched, so open failed for EVERY camera.
+      // The old fallback is deliberately gone: it masked this bug on single-camera
+      // setups and would keep masking a broken match.
+      BOOL matches = uniqueIDMatchesLocation(path, usbLocationID(svc));
 
       if (matches) {
         haveCtrlIf = findVideoControlInterfaceNumber(svc, &ctrlIfNum);
@@ -687,24 +752,23 @@ static void doCamCtrlSet(NSString *propStr, NSString *valStr, NSString *flagsStr
   long value = [valStr integerValue];
   uint8_t sel = camctrlSel(prop);
   uint8_t ent = camctrlEnt(prop);
+  uint16_t len = camctrlLen(prop);
   if (sel == 0) { err(@"camctrl_set: unsupported property"); return; }
 
+  // Pan/tilt writes are refused: SET_CUR on CT_PANTILT_ABSOLUTE has never been
+  // exercised on this device, and absolute moves already work through vendor V3
+  // frames. Writing an uncharacterized control that physically moves hardware is
+  // not worth the convenience.
   if (prop == 0 || prop == 1) {
-    // Pan/Tilt: two int16 values (0x0E selector).
-    int16_t buf[2] = {(int16_t)value, 0};
-    IOReturn kr = uvcSetCur(g_session.usbDevice, sel, ent, buf, sizeof(buf));
-    if (kr != kIOReturnSuccess) {
-      err([NSString stringWithFormat:@"camctrl_set: SET_CUR pan/tilt failed (0x%x)", kr]);
-      return;
-    }
-  } else {
-    // Focus/exposure: 4-byte int32 value.
-    int32_t v = (int32_t)value;
-    IOReturn kr = uvcSetCur(g_session.usbDevice, sel, ent, &v, sizeof(v));
-    if (kr != kIOReturnSuccess) {
-      err([NSString stringWithFormat:@"camctrl_set: SET_CUR failed (0x%x)", kr]);
-      return;
-    }
+    err(@"camctrl_set: pan/tilt writes are not supported — use the vendor gimbal path");
+    return;
+  }
+
+  int32_t v = (int32_t)value;
+  IOReturn kr = uvcSetCur(g_session.usbDevice, sel, ent, &v, len);
+  if (kr != kIOReturnSuccess) {
+    err([NSString stringWithFormat:@"camctrl_set: SET_CUR failed (0x%x)", kr]);
+    return;
   }
   ok(@"");
 }
@@ -714,17 +778,20 @@ static void doCamCtrlRange(NSString *propStr) {
   long prop = [propStr integerValue];
   uint8_t sel = camctrlSel(prop);
   uint8_t ent = camctrlEnt(prop);
+  uint16_t len = camctrlLen(prop);
   if (sel == 0) { err(@"camctrl_range: unsupported property"); return; }
 
-  int32_t min = 0, max = 0;
-  IOReturn kr = uvcGetMin(g_session.usbDevice, sel, ent, &min, sizeof(min));
+  uint8_t minBuf[8] = {0}, maxBuf[8] = {0};
+  IOReturn kr = uvcGetMin(g_session.usbDevice, sel, ent, minBuf, len);
   if (kr == kIOReturnSuccess)
-    kr = uvcGetMax(g_session.usbDevice, sel, ent, &max, sizeof(max));
+    kr = uvcGetMax(g_session.usbDevice, sel, ent, maxBuf, len);
   if (kr != kIOReturnSuccess) {
     err([NSString stringWithFormat:@"camctrl_range: GET_MIN/MAX failed (0x%x)", kr]);
     return;
   }
-  ok([NSString stringWithFormat:@",\"min\":%d,\"max\":%d", min, max]);
+  ok([NSString stringWithFormat:@",\"min\":%d,\"max\":%d",
+                                camctrlDecode(prop, minBuf),
+                                camctrlDecode(prop, maxBuf)]);
 }
 
 static void doCamCtrlGet(NSString *propStr) {
@@ -732,33 +799,20 @@ static void doCamCtrlGet(NSString *propStr) {
   long prop = [propStr integerValue];
   uint8_t sel = camctrlSel(prop);
   uint8_t ent = camctrlEnt(prop);
+  uint16_t len = camctrlLen(prop);
   if (sel == 0) { err(@"camctrl_get: unsupported property"); return; }
 
-  if (prop == 0 || prop == 1) {
-    // The Tiny 2's pan/tilt control (selector 0x0E) is a 4-byte pair of int16:
-    // pan at offset 0, tilt at offset 2 — the same layout doCamCtrlSet writes.
-    // The old code read the whole 4 bytes as one int32 and returned it for BOTH
-    // pan and tilt, so tilt never saw its own field and obsbot_gimbal_position
-    // reported pitch == -yaw. Confirmed on hardware: yaw moves the pan int16 and
-    // leaves the tilt int16 fixed, and vice-versa.
-    struct __attribute__((packed)) { int16_t pan; int16_t tilt; } pt = {0, 0};
-    IOReturn kr = uvcGetCur(g_session.usbDevice, sel, ent, &pt, sizeof(pt));
-    if (kr != kIOReturnSuccess) {
-      err([NSString stringWithFormat:@"camctrl_get: GET_CUR pan/tilt failed (0x%x)", kr]);
-      return;
-    }
-    int16_t value = (prop == 0) ? pt.pan : pt.tilt;
-    ok([NSString stringWithFormat:@",\"value\":%d,\"flags\":2", value]);
-    return;
-  }
-
-  int32_t value = 0;
-  IOReturn kr = uvcGetCur(g_session.usbDevice, sel, ent, &value, sizeof(value));
+  // Pan/tilt read CT_PANTILT_ABSOLUTE (0x0D), which this firmware keeps live
+  // during motion — 1° steps streamed throughout a slew, tracking vendor speed
+  // moves and recenters the host never wrote to this control. Arc-seconds out;
+  // the transport scales to degrees.
+  uint8_t buf[8] = {0};
+  IOReturn kr = uvcGetCur(g_session.usbDevice, sel, ent, buf, len);
   if (kr != kIOReturnSuccess) {
     err([NSString stringWithFormat:@"camctrl_get: GET_CUR failed (0x%x)", kr]);
     return;
   }
-  ok([NSString stringWithFormat:@",\"value\":%d,\"flags\":2", value]);
+  ok([NSString stringWithFormat:@",\"value\":%d,\"flags\":2", camctrlDecode(prop, buf)]);
 }
 
 // ---------------------------------------------------------------------------
@@ -832,6 +886,31 @@ static void doSnapshot(NSString *pathArg, long maxDim, long quality, long settle
   AVCapturePhotoOutput *output = [[AVCapturePhotoOutput alloc] init];
   if (![session canAddOutput:output]) { err(@"snapshot: cannot add photo output"); return; }
   [session addOutput:output];
+
+  // Choose the capture resolution from the requested size.
+  //
+  // This MUST happen after the input is attached. On an empty session
+  // canSetSessionPreset: answers YES for everything — there is no input yet to
+  // constrain it — and a preset set before addInput is renegotiated away when the
+  // input lands. Setting it here, inside a configuration transaction, is what
+  // actually sticks.
+  //
+  // Pin 1920x1080 explicitly rather than relying on the default.
+  //
+  // 4K is deliberately NOT attempted. The sensor offers 3840x2160 and the session
+  // will happily accept AVCaptureSessionPreset3840x2160 — but the capture stays at
+  // 1080p regardless, because device.activeFormat governs and remains 1920x1080.
+  // Reaching 4K means setting activeFormat under lockForConfiguration, which
+  // mutates shared device state another app streaming this camera would feel, and
+  // yields a ~1.5MB frame that is useless for the snapshot tool's purpose (an image
+  // base64'd into a tool response for a model to look at). The tool caps its
+  // `resolution` parameter at 1920 to match, so an over-large request is rejected
+  // rather than silently answered at 1080p.
+  [session beginConfiguration];
+  if ([session canSetSessionPreset:AVCaptureSessionPreset1920x1080]) {
+    session.sessionPreset = AVCaptureSessionPreset1920x1080;
+  }
+  [session commitConfiguration];
 
   [session startRunning];
 

@@ -217,17 +217,32 @@ export const assemblePresetSlots = (
 // (network) path, which had an extra zero byte at +0x04 and unaligned floats. We
 // mirror our own frame convention instead: u32 id, then four aligned floats.
 //
-// The discriminator is PHYSICAL, not a readback (our transport cannot read vendor
-// GET replies): set a boot pose, fire encodeGimBootPosTrigger, and watch where the
-// gimbal actually goes. Wrong layout => it moves somewhere other than commanded,
-// and encodeGimBootPosReset puts the device back either way.
+// RESOLVED 2026-07-20. The layout above is correct, and it is now confirmed by
+// readback rather than inference: AI_GET_GIM_BOOT_POS (0x3884) returns this exact
+// record, and the vendor GET path works once framed with frame[1] = 0x01 (the
+// header-only GET flavour). The old note here — that our transport cannot read
+// vendor GET replies — was wrong; GETs were being sent with the SET flags byte,
+// which the device does not answer.
+//
+// PAYLOAD WIDTH IS LOAD-BEARING: the device requires 24 bytes (six float32) and
+// SILENTLY DISCARDS a 20-byte payload — no error, no state change, readback
+// unchanged. This encoder shipped 20 bytes, so every boot-pose write it ever made
+// was thrown away. Proven by write -> physical replug -> read: writing
+// [0, -35, -20, 0, 1, 0] brought the camera up at yaw -34 / pitch -20.
+// See tiny2_specification.md section 6.1.
 export const encodeGimBootPosSet = (seq: number, pose: PresetPose): Buffer =>
   buildFrame({
     seq,
     cmd: CMD.GIM_BOOT_POS_SET,
     receiver: RECEIVER,
-    // id is 0: the boot pose is a single global setting, not one of the 3 slots.
-    payload: concat(u32le(0), f32le(pose.pan), f32le(pose.tilt), f32le(pose.roll), f32le(pose.zoom)),
+    // Slot 0 is 0: the boot pose is a single global setting, not one of the 3 slots.
+    // (u32le(0) is bit-identical to the float32 0.0 the device reports in slot 0.)
+    // The trailing float32 0.0 is REQUIRED — without it the write is discarded.
+    payload: concat(
+      u32le(0),
+      f32le(pose.pan), f32le(pose.tilt), f32le(pose.roll), f32le(pose.zoom),
+      f32le(0),
+    ),
   });
 
 export const encodeGimBootPosReset = (seq: number): Buffer =>

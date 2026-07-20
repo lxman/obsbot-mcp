@@ -81,6 +81,13 @@ $(X64_HELPER): helper.m
 run64: $(X64_HELPER)
 	@echo '{"op":"version"}' | $<
 
+# A helper built by hand in this directory (`clang -o obsbot-helper helper.m`,
+# without the -o path the targets above use) shadows nothing the Node stack
+# loads, but sits next to the source under an inviting name and goes stale
+# silently — running it directly tests whatever code it was built from. Sweep it.
+STRAY := obsbot-helper
+
 clean:
 	rm -f $(HELPER) $(X64_HELPER)
 	rm -f $(PROJ_ROOT)/native/prebuilt/darwin/obsbot-helper
+	rm -f $(STRAY)

@@ -3,7 +3,7 @@ import {
   encodeSetRunStatus, encodePtzMoveAngle, encodePtzMoveSpeed, encodeRecenter, zoomRatioToUnits,
   encodeAiTrackEnable, encodeAiTrackDisable, encodeAiGroupEnable, encodeAiTrackSpeed,
   encodeZoomWithSpeed, encodeFaceFocus, encodeGetFaceFocus, decodeFaceFocus, encodeFov, encodeHdr, encodeAiTracking, AI_FRAMING_MODES, percentToRange,
-  encodeAiMode, AI_WORK_MODES, encodeFaceAe,
+  encodeAiMode, AI_WORK_MODES, encodeFaceAe, encodeSetExposure,
 } from "../../src/codec/commands.js";
 import { decodeStatus } from "../../src/codec/commands.js";
 import { bufToHex } from "../../src/codec/encoding.js";
@@ -284,4 +284,29 @@ test.each([
   [7, 9, "unknown"],
 ])("decodeStatus maps AI-mode tuple (%i,%i) -> %s", (m, n, mode) => {
   expect(decodeStatus(statusBlock({ 0x18: m, 0x1c: n })).aiMode).toBe(mode);
+});
+
+// ---------------------------------------------------------------------------
+// Exposure — payload width is load-bearing.
+//
+// CAM_SET_EXPOSURE_TINY2 requires a 5-byte [mode:u8][value:u32le] payload and
+// sets mode AND value together. The 4-byte i32le payload this shipped with is
+// SILENTLY DISCARDED — verified on hardware 2026-07-20: writing 500 left the
+// readback at 330, while the 5-byte form landed immediately.
+//
+// The separate CAM_SET_EXPOSURE_MODE command is inert: writing 0 then 1 left the
+// mode pinned. Mode is only settable through the combined command above.
+// ---------------------------------------------------------------------------
+test("encodeSetExposure: 5-byte [mode][value] payload, manual", () => {
+  const f = bufToHex(encodeSetExposure(true, 500).buildFrame(1));
+  expect(f.slice(20, 24)).toBe("8229");                       // cmd 0x2982 LE
+  expect(parseInt(f.slice(26, 28) + f.slice(24, 26), 16)).toBe(5); // len2 = 5, not 4
+  expect(f.slice(32, 34)).toBe("01");                         // mode byte: manual
+  expect(f.slice(34, 42)).toBe("f4010000");                   // value 500 u32le
+});
+
+test("encodeSetExposure: mode byte 0 requests auto", () => {
+  const f = bufToHex(encodeSetExposure(false, 330).buildFrame(1));
+  expect(f.slice(32, 34)).toBe("00");
+  expect(f.slice(34, 42)).toBe("4a010000");                   // value 330 u32le
 });

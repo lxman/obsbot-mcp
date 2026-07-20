@@ -5,6 +5,13 @@ Device: USB VID `0x3564`, PID `0xFEF8` (composite: MI_00 UVC video / MI_02 UAC a
 A reference for controlling the camera over its standard UVC/USB interface. There are **two
 independent control channels**.
 
+> **See also [`tiny2_specification.md`](tiny2_specification.md)** — the consolidated,
+> hardware-verified device specification. Where the two disagree, the specification is newer and
+> takes precedence. It covers material this document does not: the framed-V3 GET flavour
+> (`frame[1] = 0x01`) that makes vendor replies readable, the rule that a SET payload must mirror
+> its GET counterpart's shape, the boot-pose family, device serial retrieval, and the command
+> hazards that can drop the device off the USB bus.
+
 ---
 
 ## Channel A — Zoom: STANDARD UVC (no vendor protocol)
@@ -26,6 +33,37 @@ units = round( min + (max - min) * (ratio - 1.0) + 0.001 )
 `min`/`max` = UVC `GET_MIN`/`GET_MAX` on selector 0x0B. Implement zoom via the OS standard
 camera-control API (Win `IAMCameraControl`; Linux `V4L2_CID_ZOOM_ABSOLUTE`; mac UVC) OR a raw
 `CT_ZOOM_ABSOLUTE` SET_CUR of the computed uint16 — identical on the wire.
+
+### Gimbal position readback — standard UVC `CT_PANTILT_ABSOLUTE`
+
+Live absolute pan/tilt is a plain Camera-Terminal control, readable unprivileged and
+concurrently with the OS camera stack.
+
+| field | value |
+|-------|-------|
+| Control Selector | `0x0D` = `CT_PANTILT_ABSOLUTE` |
+| Entity/Unit | `0x01` (camera terminal) |
+| Data | 8 bytes: `dwPanAbsolute` int32 LE, `dwTiltAbsolute` int32 LE — **arc-seconds** (÷3600 → degrees) |
+| Range | pan ±468000 asec (±130°), tilt ±324000 asec (±90°) |
+| GET_RES | 3600 asec (1°) — settle accuracy is ±1° |
+| GET_INFO | `0x03` (GET+SET); `GET_LEN` stalls, standard for CT controls |
+
+The firmware updates this control itself, live: polled at 50 ms it streams 1° steps throughout a
+slew, and it tracks motion the host never commanded through this control — vendor speed moves and
+recenters both read back correctly. It is not a setpoint echo.
+
+Sign convention: UVC pan positive = vendor yaw positive = camera's left. UVC tilt positive = up,
+which is the negation of the vendor/tool `pitch` convention (pitch positive = down).
+
+> Selector `0x0E` is `CT_PANTILT_RELATIVE` — a 4-byte
+> `{bPanRelative, bPanSpeed, bTiltRelative, bTiltSpeed}` direction/speed control, **not** position.
+> The speed bytes carry the live slew rate in °/s and the relative bytes read a constant `0x0B` on
+> this firmware, so reading it as position yields `0x000B` at every pose. This repo made exactly
+> that mistake; see `update.md` (2026-07-20).
+>
+> On Linux, note that uvcvideo serves `VIDIOC_G_CTRL` from a cache of values it has written for
+> controls without the AUTO_UPDATE quirk, so V4L2 pan/tilt readback echoes the setpoint rather than
+> reading the hardware. Reaching the raw `0x0D` register there needs its own route.
 
 ---
 
@@ -103,10 +141,20 @@ Notes:
 ## Gimbal presets (Channel B, flat selectors + V3 write commands)
 
 Three on-device preset slots (indices 0-2 on the wire, presented as slots 1-3). **Reads and writes
-use two different mechanisms** on this device — reads do NOT go through the framed V3 reply path
-(the vendor GET-reply path is non-functional for preset data: sending a framed GET command and
-reading the reply selector just returns the flat status block, never a V3 frame). Writes DO use
-framed V3 `SET_CUR` commands, same as gimbal/AI/wake commands above.
+use two different mechanisms** in the implementation below: reads go through flat XU selectors
+12/13, writes through framed V3 `SET_CUR` commands, same as gimbal/AI/wake commands above.
+
+> **Correction (2026-07-20).** This section previously justified the flat-selector read path by
+> asserting "the vendor GET-reply path is non-functional … just returns the flat status block,
+> never a V3 frame". **That is wrong.** The framed GET path works; it requires the header-only
+> flags byte `frame[1] = 0x01` instead of the SET flavour `0x25`. Framed GETs sent with `0x25` are
+> not answered, which is what produced the original conclusion. `AI_GET_GIMBAL_PRESET_LIST`
+> (`0x3b44`) does reply, returning an occupied-slot count.
+>
+> The flat-selector protocol below remains hardware-verified and is what the code ships, so it is
+> documented as-is. But it is no longer the *only* option, and the framed alternative has not been
+> fully explored — the per-entry lookups (`AI_GET_GIMBAL_PRESET_ID_VALUE`, `…_ID_NAME`) stay silent
+> on a header-only GET and probably need a payload index. See `tiny2_specification.md` §4.
 
 ### Read protocol: flat XU selectors 12 (list) + 13 (entry cursor)
 
@@ -144,19 +192,53 @@ no cmd field. Three-step read:
 | RECALL | `0x39c4` | `idx:u32LE` + four float32 `1.0` |
 | DELETE | `0x3984` | `idx:u32LE` only (4 bytes) |
 | SET_NAME (rename) | `0x3a84` | `idx:u32LE` + name, ASCII (write side — NOT base64; matches the captured OBSBOT Center frame, but not yet independently hardware-confirmed) |
-| BOOT_POSE ("as initial state" pose) | `0x3ec4` | `idx:u32LE` + pose (4× float32 LE) + trailing float32 `0.0` (NOT the `-1000` ADD/UPDATE sentinel) |
-| BOOT_FLAGS ("as initial state" flags) | `0x3e44` | 40-byte captured flag block, no slot index (the target slot is conveyed by the preceding BOOT_POSE frame); internal field meanings undecoded |
+| `AI_SET_BOOT_PRESET_UPDATE_ONLY` | `0x3ec4` | `idx:u32LE` + pose (4× float32 LE) + trailing float32 `0.0` (NOT the `-1000` ADD/UPDATE sentinel) |
+| `AI_SET_BOOT_PRESETS_ACTIONS` | `0x3e44` | 40-byte actions record, no slot index (the target slot is conveyed by the preceding frame) |
 
 Notes:
 - `idx` is always the 0-based slot index (`slot - 1`), little-endian `uint32`, matching selector
   12/13's slot indexing.
-- ADD/UPDATE/BOOT_POSE all carry the same 4-float pose (pan, tilt, roll, zoom) but differ in their
-  trailing sentinel float — do not merge their encoders.
-- `obsbot_preset_save`/`obsbot_preset_update` with `asInitialState:true` send BOOT_POSE then
-  BOOT_FLAGS as two additional frames after ADD/UPDATE.
+- The last two carry the same 4-float pose shape as ADD/UPDATE but differ in their trailing
+  sentinel float — do not merge their encoders.
+
+> **Corrections (2026-07-20).**
+>
+> **Names.** These two were previously called `BOOT_POSE` and `BOOT_FLAGS`. Those names were
+> invented and actively misleading. Their real firmware names are above: `0x3ec4` *binds an
+> existing preset* as the boot preset (hence Center's preset-identifying step before it), and
+> `0x3e44` writes a "boot presets actions" record. `src/codec/preset.ts` resolves both by real name
+> from the generated opcode table.
+>
+> **"Undecoded" is obsolete.** The 40-byte actions record is now readable via
+> `AI_GET_BOOT_PRESETS_ACTIONS` (`0x3e84`) with the `0x01` GET flavour. On this device it reads all
+> sentinel values (`-2, -1, -128, -1, 0, -1, 0…`) — i.e. **unset**.
+>
+> **This is not where the boot pose lives.** The active boot pose is in the `GIM_BOOT_POS` family
+> (`AI_SET_GIM_BOOT_POS` `0x3844` / `AI_GET_GIM_BOOT_POS` `0x3884`), proven by writing a distinct
+> pose, physically replugging, and observing the camera come up there. Its payload is 24 bytes —
+> six float32 — and the 20-byte payload the repo shipped was silently discarded. See
+> `tiny2_specification.md` §6.1.
 
 ---
 
-## Telemetry (Channel C, informational)
-The device pushes a continuous interrupt-IN stream (~70 msg/s, endpoint 0x81) carrying live gimbal / AI /
-zoom state — the ground-truth source for `get_status`. Decode deferred; not required to send commands.
+## Telemetry (Channel C) — no autonomous stream on this device
+
+Endpoint map from the full configuration descriptor:
+
+```
+if0 VideoControl   (0e/01): EP 0x84 interrupt IN, mps 16, interval 8   ← the only interrupt EP
+if1 VideoStreaming (0e/02): EP 0x81 BULK IN, mps 512                   ← video data, not telemetry
+if2 AudioControl   (01/01): no endpoints
+if3 AudioStreaming (01/02): alt1 EP 0x82 iso IN, mps 192
+```
+
+An earlier revision of this document described "a continuous interrupt-IN stream (~70 msg/s,
+endpoint 0x81) carrying live gimbal / AI / zoom state". Both halves are wrong: `0x81` is the bulk
+video endpoint, and the real interrupt endpoint `0x84` is silent. With the device captured and if0
+claimed, a blocking interrupt read across wake + recenter + yaw ±60 + pitch +20 + recenter (~24 s,
+motion proven concurrently over EP0) delivered **zero packets** — not even command ACKs. `GET_INFO`
+across all CT/PU/XU controls shows one AUTOUPDATE-capable control on the whole device, CT `0x0C`
+(`ZOOM_RELATIVE`), so nothing position-related can raise a status interrupt.
+
+If some host does receive that stream, whatever enables it was not identified. For live gimbal
+state, read `CT_PANTILT_ABSOLUTE` (Channel A) instead.

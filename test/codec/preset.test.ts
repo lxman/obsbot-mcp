@@ -172,19 +172,39 @@ test("assemblePresetSlots returns 3 slots, empties marked", () => {
 // The last of those is what our old "encodeBootPose" actually sent: it BINDS AN
 // EXISTING PRESET as the boot preset, which is why OBSBOT Center's sequence needs
 // a preset-identifying step. This family is the direct, reversible alternative.
+// PAYLOAD WIDTH IS LOAD-BEARING. The device requires 24 bytes — six float32.
+// A 20-byte payload (the shape this encoder shipped with) is SILENTLY DISCARDED:
+// no error, no state change, readback unchanged. Hardware-verified 2026-07-20 by
+// write -> physical replug -> read; see tiny2_specification.md section 6.1.
 test("encodeGimBootPosSet: cmd 0x3844 (AI_SET_GIM_BOOT_POS), yaw/pitch/roll/zoom", () => {
   const f = bufToHex(encodeGimBootPosSet(1, { pan: 30, tilt: -12, roll: 0, zoom: 1 }));
   expect(cmdOf(f)).toBe("4438"); // 0x3844 LE
+  expect(len2Of(f)).toBe(24);    // six float32 — NOT 20
   // Field ORDER is yaw, pitch, roll, zoom — read directly out of libdev's movss
   // stores (buf+0x05=yaw from [rbx+0xC], +0x09=pitch from [rbx+8], +0x0D=roll
   // from [rbx+4]). PresetPosInfo DECLARES roll,pitch,yaw — the vendor reorders on
-  // the way out, so the struct order is host-side only.
-  const p = payloadOf(f, 20);
-  expect(p.slice(0, 8)).toBe("00000000");   // id — boot pose is global, not slotted
+  // the way out, so the struct order is host-side only. Confirmed against the
+  // device's own AI_GET_GIM_BOOT_POS readback, which uses this exact layout.
+  const p = payloadOf(f, 24);
+  expect(p.slice(0, 8)).toBe("00000000");   // slot 0 — boot pose is global, not slotted
   expect(p.slice(8, 16)).toBe("0000f041");  // yaw   = 30.0
   expect(p.slice(16, 24)).toBe("000040c1"); // pitch = -12.0
   expect(p.slice(24, 32)).toBe("00000000"); // roll  = 0.0
   expect(p.slice(32, 40)).toBe("0000803f"); // zoom  = 1.0
+  expect(p.slice(40, 48)).toBe("00000000"); // trailing float32 0.0 — REQUIRED
+});
+
+test("encodeGimBootPosSet: round-trips the exact bytes the device reports", () => {
+  // Regression guard tied to a real measurement: the device returned this record
+  // for a boot pose of yaw 0.4, pitch 11.5, roll 0, zoom 1.0. Encoding the same
+  // pose must reproduce it byte for byte.
+  //
+  // NOTE: the byte comparison alone does NOT catch the 20-vs-24 defect — the frame
+  // is zero-padded and the trailing float is 0.0, so the bytes match either way.
+  // The len2 assertion is what discriminates, which is why it is here too.
+  const f = bufToHex(encodeGimBootPosSet(1, { pan: 0.4, tilt: 11.5, roll: 0, zoom: 1 }));
+  expect(len2Of(f)).toBe(24);
+  expect(payloadOf(f, 24)).toBe("00000000cdcccc3e00003841000000000000803f00000000");
 });
 
 test("encodeGimBootPosReset: cmd 0x38c4 (AI_RST_GIM_BOOT_POS), no payload", () => {
