@@ -11,6 +11,15 @@ const VENDOR_XU_SELECTOR = 0x02;
 const UG_GET_SN_CMD = 0x18c8;
 const REPLY_LEN = 60;
 const POLL_ATTEMPTS = 8;
+// The device does not populate the reply mailbox instantly — the framed reply
+// lands tens of ms after the request. Polling with NO delay drains all 8
+// attempts in ~7ms, before the reply arrives, and reads only the stale previous
+// frame → spurious "no reply". A short delay before each read gives the reply
+// time to land. Hardware-verified 2026-07-20: 0ms delay fails every rapid read;
+// 30ms is reliable. (Unit tests use a synchronous fake helper and never exercise
+// this latency, which is why the bug shipped past them.)
+const POLL_DELAY_MS = 30;
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 /**
  * The transport primitives readSerial needs. MacosTransport, LinuxTransport,
@@ -44,6 +53,7 @@ export async function readSerialVia(t: VendorReadPrimitives): Promise<string> {
   await t.xuRaw(VENDOR_XU_SELECTOR, req);
 
   for (let i = 0; i < POLL_ATTEMPTS; i++) {
+    await sleep(POLL_DELAY_MS); // let the reply land before reading the mailbox
     const raw = await t.xuGetRaw(VENDOR_XU_SELECTOR, REPLY_LEN);
     try {
       const f = parseFrame(raw);
