@@ -6,10 +6,10 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { zodToJsonSchema } from "zod-to-json-schema";
 import { DeviceManager } from "../device/manager.js";
-import { DeviceSession } from "../device/session.js";
 import { HelperProcess } from "../transport/helper-process.js";
 import { ObsbotTransport } from "../transport/transport.js";
 import { createTools, ToolDef } from "./tools.js";
+import type { ReconnectCtl } from "./ready.js";
 import { renderToolResult } from "./render.js";
 import { CaptureManager } from "../capture/manager.js";
 
@@ -20,14 +20,19 @@ export async function startServer(opts: { debug?: boolean } = {}): Promise<void>
     return helper;
   });
 
-  // DeviceSession owns the connection lifecycle: lazy open, invalidate + re-open
-  // on a mid-session disconnect (self-heal), and reconnect tracking.
-  const session = new DeviceSession(mgr);
-  const getTransport = (): Promise<ObsbotTransport> => session.get();
+  // DeviceManager now owns the connection lifecycle: lazy bind, invalidate +
+  // re-bind on a mid-session disconnect (self-heal), and per-camera reconnect
+  // tracking. Single camera, no selector yet (that's B1b) — every resolution is
+  // the single bound camera, so getTransport/reconnect target it with no serial.
+  const getTransport = (): Promise<ObsbotTransport> => mgr.get();
+  const reconnect: ReconnectCtl = {
+    invalidate: () => mgr.invalidate(),
+    takeReconnected: () => mgr.takeReconnected(),
+  };
 
   const capture = new CaptureManager();
   // --debug exposes the RE/diagnostics surface (obsbot_probe tool + get_status raw block).
-  const tools: ToolDef[] = createTools(getTransport, mgr, capture, session, opts.debug ?? false);
+  const tools: ToolDef[] = createTools(getTransport, mgr, capture, reconnect, opts.debug ?? false);
 
   // Kill any recording/preview child processes when the server exits, so nothing orphans.
   const shutdown = (): void => capture.stopAll();

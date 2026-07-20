@@ -1,8 +1,7 @@
 import { expect, test, vi } from "vitest";
 import { ensureReady } from "../../src/mcp/ready.js";
+import type { ReconnectCtl } from "../../src/mcp/ready.js";
 import type { ObsbotTransport } from "../../src/transport/transport.js";
-import { DeviceSession } from "../../src/device/session.js";
-import type { DeviceManager } from "../../src/device/manager.js";
 
 const awakeBlock = () => Buffer.alloc(60); // byte 0x02 = 0 → awake
 const asleepBlock = () => {
@@ -67,7 +66,7 @@ test("recvStatus throws with no session → unreachable", async () => {
   expect(r).toMatchObject({ ok: false, reason: "unreachable" });
 });
 
-test("recvStatus throws then a session re-opens to a live device → ok + reconnected", async () => {
+test("recvStatus throws then a reconnect controller re-resolves to a live device → ok + reconnected", async () => {
   const dead = fakeTransport({
     recvStatus: vi.fn(async () => {
       throw new Error("device gone");
@@ -75,12 +74,15 @@ test("recvStatus throws then a session re-opens to a live device → ok + reconn
   });
   const live = fakeTransport();
   const opens = [dead, live];
-  const openFirstObsbot = vi.fn(async () => opens.shift()!);
-  const invalidate = vi.fn(async () => {});
-  const session = new DeviceSession({ openFirstObsbot, invalidate } as unknown as DeviceManager);
-  const r = await ensureReady(() => session.get(), session, fast);
+  const getTransport = vi.fn(async () => opens.shift()!);
+  const reconnect: ReconnectCtl = {
+    invalidate: vi.fn(async () => {}),
+    takeReconnected: vi.fn(() => true),
+  };
+  const r = await ensureReady(getTransport, reconnect, fast);
   expect(r).toMatchObject({ ok: true, reconnected: true });
-  expect(openFirstObsbot).toHaveBeenCalledTimes(2);
+  expect(getTransport).toHaveBeenCalledTimes(2); // dead probe → invalidate → live re-resolve
+  expect(reconnect.invalidate).toHaveBeenCalledTimes(1);
 });
 
 test("getTransport throws (no device) → unreachable", async () => {

@@ -92,6 +92,18 @@ export class DeviceManager {
   private registry = new Map<string, RegistryEntry>();
   /** Lazily spawned, reused across scans until promoted into the registry. */
   private scanHelper?: HelperProcess;
+  /**
+   * Reconnect tracking, folded in from the retired DeviceSession. `everBound`
+   * records every serial this manager has bound at least once — deliberately
+   * SEPARATE from the registry Map so it survives invalidate() dropping a
+   * registry entry (the registry says "bound right now", this says "bound at
+   * some point"). A promote() of a serial already in `everBound` is therefore a
+   * RE-bind — a self-heal after a mid-session disconnect — and lands the serial
+   * in `reconnectedSerials`, which the readiness gate drains via
+   * takeReconnected() to surface `reconnected: true` on the next command.
+   */
+  private everBound = new Set<string>();
+  private reconnectedSerials = new Set<string>();
 
   /**
    * @param makeHelper Factory for a HelperProcess, invoked whenever a fresh
@@ -203,6 +215,14 @@ export class DeviceManager {
 
   /** Move the current scratch helper into the registry under `m.serial`. */
   private promote(m: ScanMatch): void {
+    // Reconnect bookkeeping BEFORE recording the bind: if we've bound this
+    // serial before, this promote is a re-bind (self-heal after a disconnect),
+    // so flag it reconnected. The very first bind of a serial is never a
+    // reconnect. everBound must NOT be gated on the registry (invalidate drops
+    // registry entries) — that's the whole point of tracking it separately.
+    if (this.everBound.has(m.serial)) this.reconnectedSerials.add(m.serial);
+    this.everBound.add(m.serial);
+
     this.registry.set(m.serial, {
       helper: this.scanHelper!,
       transport: m.transport,
@@ -213,6 +233,25 @@ export class DeviceManager {
     // This helper now belongs to the registry entry; the next scan needs
     // its own (lazily spawned on next use).
     this.scanHelper = undefined;
+  }
+
+  /**
+   * Whether the camera identified by `serial` (or, with no arg, the single
+   * bound camera) was RE-bound after a prior bind — i.e. self-healed across a
+   * mid-session disconnect — clearing that flag on read. Single-camera
+   * semantics (no serial): return true if ANY serial is pending-reconnected,
+   * draining them all. Preserves the exact contract the retired
+   * DeviceSession.takeReconnected() had.
+   */
+  takeReconnected(serial?: string): boolean {
+    if (serial !== undefined) {
+      const r = this.reconnectedSerials.has(serial);
+      this.reconnectedSerials.delete(serial);
+      return r;
+    }
+    if (this.reconnectedSerials.size === 0) return false;
+    this.reconnectedSerials.clear();
+    return true;
   }
 
   /**

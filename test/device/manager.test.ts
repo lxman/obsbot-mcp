@@ -289,6 +289,38 @@ test("invalidate() with no serial drops every bound camera", async () => {
   expect(cameras.every((c) => c.status !== "bound")).toBe(true);
 });
 
+// ---------------------------------------------------------------------------
+// takeReconnected() — per-camera reconnect tracking, folded in from the retired
+// DeviceSession. A first bind is NEVER a reconnect; a re-bind after invalidate()
+// IS. The flag must survive invalidate() dropping the registry entry (tracked
+// separately from the registry Map), and clears on read.
+// ---------------------------------------------------------------------------
+test("a first-ever get() is not a reconnect", async () => {
+  const mgr = new DeviceManager(fakeHelperFactory([{ serial: "AAA" }]));
+  await mgr.get();
+  expect(mgr.takeReconnected()).toBe(false);
+});
+
+test("get() → invalidate() → get() flags reconnected exactly once, then clears", async () => {
+  const mgr = new DeviceManager(fakeHelperFactory([{ serial: "AAA" }]));
+  await mgr.get();
+  await mgr.invalidate();
+  await mgr.get();
+  expect(mgr.takeReconnected()).toBe(true);
+  expect(mgr.takeReconnected()).toBe(false); // cleared after being taken
+});
+
+test("takeReconnected(serial) tracks and clears per camera; an un-rebound camera stays false", async () => {
+  const mgr = new DeviceManager(fakeHelperFactory([{ serial: "AAA" }, { serial: "BBB" }]));
+  await mgr.get("AAA");
+  await mgr.get("BBB");
+  await mgr.invalidate("AAA");
+  await mgr.get("AAA");
+  expect(mgr.takeReconnected("BBB")).toBe(false); // BBB was never re-bound
+  expect(mgr.takeReconnected("AAA")).toBe(true); // AAA was re-bound after invalidate
+  expect(mgr.takeReconnected("AAA")).toBe(false); // cleared after being taken
+});
+
 test("invalidate() swallows a helper whose close() throws (best-effort) and still drops the entry", async () => {
   const mgr = new DeviceManager(
     fakeHelperFactory([{ serial: "AAA" }]),

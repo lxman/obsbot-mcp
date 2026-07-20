@@ -47,9 +47,8 @@ import {
 import type { PresetSlot, PresetPose } from "../codec/preset.js";
 import { ObsbotTransport, CameraBusyError } from "../transport/transport.js";
 import { DeviceManager } from "../device/manager.js";
-import { DeviceSession } from "../device/session.js";
 import { ensureReady, msg } from "./ready.js";
-import type { ReadyResult } from "./ready.js";
+import type { ReadyResult, ReconnectCtl } from "./ready.js";
 import type { CaptureManager } from "../capture/manager.js";
 import { CaptureError } from "../capture/manager.js";
 
@@ -359,14 +358,14 @@ export function createTools(
   getTransport: () => Promise<ObsbotTransport>,
   mgr: DeviceManager,
   capture?: CaptureManager,
-  session?: DeviceSession,
+  reconnect?: ReconnectCtl,
   debug = false,
   presetRead: PresetReadOpts = {},
 ): ToolDef[] {
   // Readiness gate for gimbal/AI commands: probe presence + auto-wake if asleep,
   // self-heal (invalidate + re-open) on a mid-session disconnect. Returns the
   // ready transport or an { ok:false } error the handler passes straight through.
-  const gate = () => ensureReady(getTransport, session);
+  const gate = () => ensureReady(getTransport, reconnect);
   const needCapture = (): CaptureManager => {
     if (!capture) throw new Error("capture manager not configured");
     return capture;
