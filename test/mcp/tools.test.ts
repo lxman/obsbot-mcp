@@ -42,6 +42,7 @@ function makeFakeTransport() {
     gimbalSet: vi.fn(async (_yaw: number, _pitch: number, _roll?: number) => {}),
     gimbalSpeed: vi.fn(async (_yaw: number, _pitch: number, _roll: number, _autoStopMs: number) => {}),
     gimbalRecenter: vi.fn(async () => {}),
+    readSerial: vi.fn(async () => "FAKESERIAL0001"),
     nextSeq: vi.fn(() => ++seq),
     close: vi.fn(async () => {}),
   } satisfies ObsbotTransport;

@@ -25,6 +25,7 @@ function fakeTransport(over: Partial<ObsbotTransport> = {}): ObsbotTransport {
     camCtrlRange: vi.fn(async () => ({ min: 0, max: 0 })),
     procAmpSet: vi.fn(async () => {}),
     procAmpRange: vi.fn(async () => ({ min: 0, max: 0 })),
+    readSerial: vi.fn(async () => "FAKESERIAL0001"),
     nextSeq: vi.fn(() => 1),
     close: vi.fn(async () => {}),
     ...over,
