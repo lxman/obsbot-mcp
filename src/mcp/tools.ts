@@ -165,8 +165,21 @@ const presetDeleteSchema = presetSlotSchema;
 // frame whose payload region starts at offset 16 (see buildFrame). Max payload is
 // 60-16=44 bytes, so the name must fit in 44-4=40 bytes.
 const PRESET_NAME_MAX = 40;
+// `resolution` is the longest edge of the returned image, in pixels. It replaces
+// the old `maxDim`, and the default drops from 1024 to 640: the JPEG is base64'd
+// into a tool response that an LLM reads, so every pixel costs tokens. 640 is
+// enough to judge framing, lighting and exposure; a caller that needs detail asks
+// for it, and pays for it (640 -> ~86KB, 1920 -> ~413KB).
+//
+// Capped at 1920 even though the sensor offers 3840x2160. Reaching 4K needs an
+// explicit device activeFormat change (the session preset alone does not do it --
+// activeFormat governs and stays at 1080p), which mutates shared device state that
+// another app streaming the camera would feel. And a 4K frame is ~1.5MB, roughly
+// 2M base64 characters, which is far past a usable token budget for "let me look
+// at the shot". The cap is honest: asking for more than the ceiling is rejected
+// rather than silently answered with 1080p.
 const snapshotSchema = z.object({
-  maxDim: num().pipe(z.number().min(256).max(1920)).default(1024),
+  resolution: num().pipe(z.number().min(256).max(1920)).default(640),
   quality: num().pipe(z.number().min(1).max(100)).default(80),
   settleMs: num().pipe(z.number().min(0).max(5000)).default(600),
   source: z.enum(["device", "virtual", "ndi"]).default("device"),
@@ -973,13 +986,15 @@ export function createTools(
       name: "obsbot_snapshot",
       description:
         "Grab one still frame from the camera and return it as an image (for you to see " +
-        "and for framing/lighting/exposure checks). NOTE: before calling, ensure the camera " +
+        "and for framing/lighting/exposure checks). resolution is the longest edge in pixels, " +
+        "256-1920, default 640 — larger images cost proportionally more tokens, so ask for " +
+        "more only when you need the detail. NOTE: before calling, ensure the camera " +
         "is focused (call obsbot_focus with mode:'auto' for autofocus) unless otherwise " +
         "directed. source: device (default) | virtual | ndi. " +
         "If the camera is in use by another app, returns a message instead of an image.",
       schema: snapshotSchema,
       handler: async (args: unknown) => {
-        const { maxDim, quality, settleMs, source } = snapshotSchema.parse(args);
+        const { resolution, quality, settleMs, source } = snapshotSchema.parse(args);
         const t = await getTransport();
         let path: string | undefined;
         if (source !== "device") {
@@ -999,7 +1014,9 @@ export function createTools(
           path = match.path;
         }
         try {
-          const snap = await t.snapshot({ path, maxDim, quality, settleMs });
+          // The helper's wire field is still maxDim (shared with the Windows and
+          // Linux helpers); `resolution` is the tool-facing name.
+          const snap = await t.snapshot({ path, maxDim: resolution, quality, settleMs });
           return {
             content: [
               { type: "image", data: snap.base64, mimeType: snap.mime },

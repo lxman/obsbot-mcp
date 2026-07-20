@@ -1440,3 +1440,25 @@ test("retries are bounded — a persistently bad read fails loudly instead of sp
   expect(listReads).toBe(3); // exactly `attempts`, no runaway
   expect(transport.xuRaw).not.toHaveBeenCalled();
 });
+
+// --- snapshot resolution -----------------------------------------------------
+// `resolution` replaces the old `maxDim` and defaults to 640, not 1024. Snapshots
+// are base64'd into a tool response an LLM then reads, so the default is chosen to
+// keep token cost low; a caller that needs detail asks for it explicitly.
+test("obsbot_snapshot defaults to 640 and forwards it as maxDim", async () => {
+  const transport = makeFakeTransport();
+  const tools = createTools(async () => transport, makeFakeMgr());
+  await tools.find((t) => t.name === "obsbot_snapshot")!.handler({});
+  expect(transport.snapshot).toHaveBeenCalledWith(
+    expect.objectContaining({ maxDim: 640 }),
+  );
+});
+
+test("obsbot_snapshot honours an explicit resolution", async () => {
+  const transport = makeFakeTransport();
+  const tools = createTools(async () => transport, makeFakeMgr());
+  await tools.find((t) => t.name === "obsbot_snapshot")!.handler({ resolution: 1920 });
+  expect(transport.snapshot).toHaveBeenCalledWith(
+    expect.objectContaining({ maxDim: 1920 }),
+  );
+});

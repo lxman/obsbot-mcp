@@ -887,6 +887,31 @@ static void doSnapshot(NSString *pathArg, long maxDim, long quality, long settle
   if (![session canAddOutput:output]) { err(@"snapshot: cannot add photo output"); return; }
   [session addOutput:output];
 
+  // Choose the capture resolution from the requested size.
+  //
+  // This MUST happen after the input is attached. On an empty session
+  // canSetSessionPreset: answers YES for everything — there is no input yet to
+  // constrain it — and a preset set before addInput is renegotiated away when the
+  // input lands. Setting it here, inside a configuration transaction, is what
+  // actually sticks.
+  //
+  // Pin 1920x1080 explicitly rather than relying on the default.
+  //
+  // 4K is deliberately NOT attempted. The sensor offers 3840x2160 and the session
+  // will happily accept AVCaptureSessionPreset3840x2160 — but the capture stays at
+  // 1080p regardless, because device.activeFormat governs and remains 1920x1080.
+  // Reaching 4K means setting activeFormat under lockForConfiguration, which
+  // mutates shared device state another app streaming this camera would feel, and
+  // yields a ~1.5MB frame that is useless for the snapshot tool's purpose (an image
+  // base64'd into a tool response for a model to look at). The tool caps its
+  // `resolution` parameter at 1920 to match, so an over-large request is rejected
+  // rather than silently answered at 1080p.
+  [session beginConfiguration];
+  if ([session canSetSessionPreset:AVCaptureSessionPreset1920x1080]) {
+    session.sessionPreset = AVCaptureSessionPreset1920x1080;
+  }
+  [session commitConfiguration];
+
   [session startRunning];
 
   // Let the stream settle (pump, don't sleep — same reason as above).
