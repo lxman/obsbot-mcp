@@ -140,7 +140,11 @@ export class DeviceManager {
     return this.scanHelper;
   }
 
-  /** Compat: raw enumerate() pass-through (unfiltered), used by obsbot_devices. */
+  /**
+   * Compat: raw enumerate() pass-through (unfiltered, no serials). Used by
+   * obsbot_capture_snapshot's virtual/ndi source lookup, not by obsbot_devices
+   * (which reports the identified fleet via listCameras() instead).
+   */
   async list(): Promise<DeviceInfo[]> {
     const helper = await this.getScanHelper();
     return helper.enumerate();

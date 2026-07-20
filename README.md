@@ -80,17 +80,16 @@ Multi-camera support is new in v0.4.0. It's exercised by the unit test suite aga
 two physical Tiny 2s at once has not yet been hardware-verified (see
 [Known limitations](#known-limitations)).
 
-**Known gap:** `obsbot_devices` lists each connected device's `name`, `path`, and — where available
-— its USB `locationId`, but as of v0.4.0 it does **not** read or report each camera's serial (doing
-so requires briefly opening the device, which `obsbot_devices` does not do). With several cameras
-attached, the practical way to learn their serials today is to call any camera-addressing tool
-without `camera`: the resulting error lists every attached serial.
+`obsbot_devices` is the way to discover the serials you pass as `camera`: it reports each attached
+camera's `serial` (where obtainable — reading it requires briefly opening the camera), `name`, and
+`status` (`available` | `bound` | `busy`). A camera another process already holds comes back `busy`
+with no serial, since it can't be opened to read one.
 
 ### Device & power
 
 | Tool | Parameters | Description |
 |------|------------|-------------|
-| `obsbot_devices` | — | List connected OBSBOT-compatible video capture devices. |
+| `obsbot_devices` | — | List attached OBSBOT cameras with each one's serial (where obtainable), name, and status (`available`/`bound`/`busy`). A `busy` camera is held by another process. |
 | `obsbot_wake` | `camera`? | Wake the camera/gimbal (sends `"run"`). |
 | `obsbot_sleep` | `camera`? | Sleep the camera/gimbal (sends `"sleep"`). |
 | `obsbot_status` | `camera`? | Read the live status block: `{ awake, hdr, aiMode, trackSpeed }`. Under `--debug`, also returns the raw 60-byte block as hex. |

@@ -8,11 +8,11 @@ export const deviceChecks = [
     tier: TIERS.VERIFIED,
     run: async (ctx) => {
       const r = await ctx.call("obsbot_devices");
-      const devices = r.devices ?? [];
-      if (devices.length === 0) throw new Error("no OBSBOT device enumerated");
+      const cameras = r.cameras ?? [];
+      if (cameras.length === 0) throw new Error("no OBSBOT device enumerated");
       return {
-        evidence: { count: devices.length },
-        measurements: [measurement("devices", devices.length, "")],
+        evidence: { count: cameras.length },
+        measurements: [measurement("devices", cameras.length, "")],
       };
     },
   }),

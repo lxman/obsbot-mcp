@@ -56,14 +56,20 @@ function makeFakeTransport() {
 // / mgr.takeReconnected for the readiness gate's self-heal. The fake records the
 // `camera` arg on every get() so the selector tests can assert what was forwarded.
 // First arg is the transport get() should return (defaults to a fresh fake);
-// second is the enumerate() device list used by obsbot_devices / snapshot sources.
-function makeFakeMgr(transport?: ObsbotTransport, devices: unknown[] = []) {
+// second is the enumerate() device list used by obsbot_capture_snapshot's virtual/ndi
+// source lookup; third is the listCameras() result used by obsbot_devices.
+function makeFakeMgr(
+  transport?: ObsbotTransport,
+  devices: unknown[] = [],
+  cameras: unknown[] = [{ serial: "AAA", name: "OBSBOT Tiny 2", status: "available" }],
+) {
   const t = transport ?? makeFakeTransport();
   return {
     get: vi.fn(async (_camera?: string) => t),
     invalidate: vi.fn(async (_camera?: string) => {}),
     takeReconnected: vi.fn((_camera?: string) => false),
     list: vi.fn(async () => devices),
+    listCameras: vi.fn(async () => cameras),
     openFirstObsbot: vi.fn(async () => t),
   } as unknown as DeviceManager;
 }
@@ -396,16 +402,18 @@ test("gated command auto-wakes an asleep camera before acting", async () => {
   expect(result).toMatchObject({ ok: true, enabled: true });
 });
 
-test("obsbot_devices returns mgr.list()", async () => {
-  const devices = [{ path: "\\\\.\\usb1", name: "OBSBOT Tiny 2" }];
+test("obsbot_devices returns mgr.listCameras(), not mgr.list()", async () => {
+  const cameras = [{ serial: "AAA", name: "OBSBOT Tiny 2", status: "available" }];
   const transport = makeFakeTransport();
-  const mgr = makeFakeMgr(transport, devices);
+  const mgr = makeFakeMgr(transport, [], cameras);
   const tools = createTools(mgr);
   const tool = findTool(tools, "obsbot_devices");
 
   const result = await tool.handler({});
 
-  expect(result).toEqual({ devices });
+  expect(mgr.listCameras).toHaveBeenCalledTimes(1);
+  expect(mgr.list).not.toHaveBeenCalled();
+  expect(result).toEqual({ cameras });
 });
 
 test("obsbot_gimbal_move clamps yaw/pitch to conservative limits", async () => {
