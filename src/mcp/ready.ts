@@ -60,7 +60,7 @@ export async function ensureReady(
     if (!session) {
       return { ok: false, reason: "unreachable", error: `camera not reachable: ${msg(e)}` };
     }
-    session.invalidate();
+    await session.invalidate();
     try {
       t = await getTransport();
       awake = await readAwake(t);

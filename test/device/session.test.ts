@@ -5,7 +5,12 @@ import type { ObsbotTransport } from "../../src/transport/transport.js";
 
 function fakeMgr() {
   const openFirstObsbot = vi.fn(async () => ({}) as ObsbotTransport);
-  return { mgr: { openFirstObsbot } as unknown as DeviceManager, openFirstObsbot };
+  const invalidate = vi.fn(async () => {});
+  return {
+    mgr: { openFirstObsbot, invalidate } as unknown as DeviceManager,
+    openFirstObsbot,
+    invalidate,
+  };
 }
 
 test("get() opens the device once and caches the transport", async () => {
@@ -27,16 +32,24 @@ test("invalidate() drops the cache so the next get() re-opens", async () => {
   const { mgr, openFirstObsbot } = fakeMgr();
   const s = new DeviceSession(mgr);
   await s.get();
-  s.invalidate();
+  await s.invalidate();
   await s.get();
   expect(openFirstObsbot).toHaveBeenCalledTimes(2);
+});
+
+test("invalidate() calls through to the manager's invalidate() so the dead registry entry is dropped too", async () => {
+  const { mgr, invalidate } = fakeMgr();
+  const s = new DeviceSession(mgr);
+  await s.get();
+  await s.invalidate();
+  expect(invalidate).toHaveBeenCalledTimes(1);
 });
 
 test("a re-open after invalidate flags reconnected exactly once", async () => {
   const { mgr } = fakeMgr();
   const s = new DeviceSession(mgr);
   await s.get();
-  s.invalidate();
+  await s.invalidate();
   await s.get();
   expect(s.takeReconnected()).toBe(true);
   expect(s.takeReconnected()).toBe(false); // cleared after being taken

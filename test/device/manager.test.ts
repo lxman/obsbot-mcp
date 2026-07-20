@@ -18,6 +18,15 @@ import type { HelperProcess } from "../../src/transport/helper-process.js";
 //   real helper), one DeviceInfo per configured camera.
 // - open(path) matches by path; a `busy` camera throws an exclusive-access-
 //   style error (any open failure is treated as "skip" by the manager).
+// - Cross-helper exclusivity: real hardware only ever has one open handle
+//   per device. `heldBy` (shared across every helper instance this factory
+//   call spawns) tracks which helper instance currently holds which path;
+//   a DIFFERENT helper instance opening an already-held path throws
+//   exclusive-access, same as the real OS would against our own registry
+//   helper. Opening a new path on the SAME helper instance releases
+//   whatever it previously held first — mirrors native doOpen()'s
+//   unconditional releaseSession()-before-open, which is why one scratch
+//   helper can walk multiple candidates in a single scan.
 // - xuSet/xuGet implement just enough of the UG_GET_SN wire protocol (via the
 //   repo's real buildFrame, so CRCs are valid) for readSerial() to resolve to
 //   whichever camera this instance most recently opened — same pattern as
@@ -34,9 +43,12 @@ interface FakeCameraSpec {
 
 function fakeHelperFactory(cameras: FakeCameraSpec[]) {
   const pathFor = (serial: string) => `/dev/fake-${serial}`;
+  const heldBy = new Map<string, object>(); // path -> owning helper instance's identity token
 
   return async (): Promise<HelperProcess> => {
+    const identity = {}; // unique per helper instance
     let openedSerial: string | undefined;
+    let openedPath: string | undefined;
     let lastSeq = 0;
 
     const helper = {
@@ -54,6 +66,13 @@ function fakeHelperFactory(cameras: FakeCameraSpec[]) {
         if (cam.busy) {
           throw new Error("open failed: kIOReturnExclusiveAccess (0xe00002c5)");
         }
+        const holder = heldBy.get(path);
+        if (holder && holder !== identity) {
+          throw new Error("open failed: kIOReturnExclusiveAccess (0xe00002c5)");
+        }
+        if (openedPath) heldBy.delete(openedPath); // release what this helper previously held
+        heldBy.set(path, identity);
+        openedPath = path;
         openedSerial = cam.serial;
         return cam.noXu ? -1 : 1; // xuNode; -1 = opened, but no XU unit
       }),
@@ -69,7 +88,9 @@ function fakeHelperFactory(cameras: FakeCameraSpec[]) {
           payload: Buffer.from(openedSerial ?? "", "ascii"),
         }),
       ),
-      close: vi.fn(async () => {}),
+      close: vi.fn(async () => {
+        if (openedPath && heldBy.get(openedPath) === identity) heldBy.delete(openedPath);
+      }),
     } as unknown as HelperProcess;
 
     return helper;
@@ -195,4 +216,105 @@ test("listCameras() reports an already-bound camera as bound", async () => {
   expect(cameras).toEqual([
     expect.objectContaining({ serial: "AAA", status: "bound" }),
   ]);
+});
+
+test("listCameras() reports an already-bound camera exactly once even with no locationId (off-macOS)", async () => {
+  // locationId is macOS-only; Linux/Windows enumerate() leaves it undefined.
+  // Without a path-keyed dedup, the scan re-opens the bound camera's path
+  // against a fresh scratch helper, collides with the registry helper's own
+  // held-open handle (exclusive-access, modeled by the fake's `heldBy`
+  // tracking), and gets double-reported as a second, serial-less "busy"
+  // entry alongside the correct "bound" one.
+  const mgr = new DeviceManager(fakeHelperFactory([{ serial: "AAA" }]));
+  await mgr.get("AAA");
+  const cameras = await mgr.listCameras();
+  expect(cameras).toEqual([expect.objectContaining({ serial: "AAA", status: "bound" })]);
+});
+
+// ---------------------------------------------------------------------------
+// invalidate() — the reconnect/self-heal regression test. Without this,
+// mgr.get() with one registry entry always returns the SAME cached
+// transport, even after the physical device has re-enumerated behind a
+// fresh helper. This is the test that would have caught that regression;
+// the session/ready tests mock openFirstObsbot() directly and never
+// exercise the real DeviceManager registry here.
+// ---------------------------------------------------------------------------
+test("invalidate() closes the bound helper and drops it, so the next get() re-scans via a fresh helper", async () => {
+  const baseFactory = fakeHelperFactory([{ serial: "AAA" }]);
+  const helpers: HelperProcess[] = [];
+  const factory = async () => {
+    const h = await baseFactory();
+    helpers.push(h);
+    return h;
+  };
+  const mgr = new DeviceManager(factory);
+
+  const first = await mgr.get();
+  expect(helpers).toHaveLength(1);
+
+  await mgr.invalidate();
+  expect(helpers[0]!.close).toHaveBeenCalledTimes(1);
+
+  const second = await mgr.get();
+  expect(helpers).toHaveLength(2); // a fresh helper was spawned by the re-scan, not reused
+  expect(second).not.toBe(first); // the dead cached transport is not what get() returns
+});
+
+test("invalidate(serial) drops only that camera, leaving other bound cameras alone", async () => {
+  const mgr = new DeviceManager(
+    fakeHelperFactory([{ serial: "AAA" }, { serial: "BBB" }]),
+  );
+  await mgr.get("AAA");
+  await mgr.get("BBB");
+
+  await mgr.invalidate("AAA");
+
+  const cameras = await mgr.listCameras();
+  const bbb = cameras.find((c) => c.serial === "BBB");
+  expect(bbb?.status).toBe("bound");
+  const aaa = cameras.find((c) => c.serial === "AAA");
+  expect(aaa?.status).not.toBe("bound"); // AAA was dropped, so it's rescanned as available
+});
+
+test("invalidate() with no serial drops every bound camera", async () => {
+  const mgr = new DeviceManager(
+    fakeHelperFactory([{ serial: "AAA" }, { serial: "BBB" }]),
+  );
+  await mgr.get("AAA");
+  await mgr.get("BBB");
+
+  await mgr.invalidate();
+
+  const cameras = await mgr.listCameras();
+  expect(cameras.every((c) => c.status !== "bound")).toBe(true);
+});
+
+test("invalidate() swallows a helper whose close() throws (best-effort) and still drops the entry", async () => {
+  const mgr = new DeviceManager(
+    fakeHelperFactory([{ serial: "AAA" }]),
+  );
+  await mgr.get("AAA");
+  // Sabotage the bound helper's close() after the fact, simulating a
+  // helper that's already dead (e.g. its subprocess crashed on unplug).
+  const cameras = await mgr.listCameras();
+  expect(cameras[0]?.status).toBe("bound");
+
+  // Reach into the registry indirectly: rebind isn't possible without
+  // invalidate, so instead verify invalidate() itself never throws even
+  // when the underlying close() rejects — construct a manager whose sole
+  // helper's close() is poisoned.
+  const poisonFactory = async (): Promise<HelperProcess> => {
+    const h = await fakeHelperFactory([{ serial: "ZZZ" }])();
+    (h.close as unknown as { mockImplementation: (fn: () => Promise<void>) => void }).mockImplementation(
+      async () => {
+        throw new Error("helper already dead");
+      },
+    );
+    return h;
+  };
+  const poisonMgr = new DeviceManager(poisonFactory);
+  await poisonMgr.get("ZZZ");
+  await expect(poisonMgr.invalidate()).resolves.toBeUndefined();
+  const after = await poisonMgr.listCameras();
+  expect(after.find((c) => c.serial === "ZZZ")?.status).not.toBe("bound");
 });

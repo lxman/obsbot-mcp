@@ -76,7 +76,8 @@ test("recvStatus throws then a session re-opens to a live device → ok + reconn
   const live = fakeTransport();
   const opens = [dead, live];
   const openFirstObsbot = vi.fn(async () => opens.shift()!);
-  const session = new DeviceSession({ openFirstObsbot } as unknown as DeviceManager);
+  const invalidate = vi.fn(async () => {});
+  const session = new DeviceSession({ openFirstObsbot, invalidate } as unknown as DeviceManager);
   const r = await ensureReady(() => session.get(), session, fast);
   expect(r).toMatchObject({ ok: true, reconnected: true });
   expect(openFirstObsbot).toHaveBeenCalledTimes(2);

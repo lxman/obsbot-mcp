@@ -42,6 +42,8 @@ interface RegistryEntry {
   helper: HelperProcess;
   transport: ObsbotTransport;
   locationId?: number;
+  /** Device node path, populated on every platform — the cross-platform dedup key. */
+  path: string;
   name: string;
 }
 
@@ -49,6 +51,7 @@ interface ScanMatch {
   transport: ObsbotTransport;
   serial: string;
   locationId?: number;
+  path: string;
   name: string;
 }
 
@@ -79,12 +82,33 @@ interface ScanMatch {
  * during a scan is treated as "not mine, skip" — not fatal — because the
  * helper does not currently surface a clean, stable way to distinguish
  * exclusive-access from other open failures at this layer.
+ *
+ * invalidate() is the escape hatch out of "once bound, stay bound": it
+ * drops a registry entry (best-effort closing its helper first) so the
+ * next get()/bind() re-scans through a fresh helper instead of handing back
+ * a transport that may be talking to a device that already re-enumerated.
  */
 export class DeviceManager {
   private registry = new Map<string, RegistryEntry>();
   /** Lazily spawned, reused across scans until promoted into the registry. */
   private scanHelper?: HelperProcess;
 
+  /**
+   * @param makeHelper Factory for a HelperProcess, invoked whenever a fresh
+   *   scratch helper is needed (each scan, and each rebind after
+   *   invalidate()). CONTRACT: it MUST return a freshly-started,
+   *   exclusively-owned HelperProcess on every call — DeviceManager may call
+   *   it repeatedly across a session and always expects a clean handle, not
+   *   a shared one. A factory that instead returns the SAME already-started
+   *   helper on every call (as the single-camera `.mjs` scripts under
+   *   scripts/ do, to keep one native session alive for their whole run)
+   *   MUST NOT bind more than one serial through this manager: a second
+   *   scan would hand that same shared helper back and silently steal the
+   *   first bound camera's native session out from under it. No current
+   *   caller does this (all are single-camera); this is latent and not
+   *   guarded in code — the proper fix belongs to multi-camera .mjs/CLI
+   *   wiring, not to DeviceManager itself.
+   */
   constructor(private makeHelper: () => Promise<HelperProcess>) {}
 
   private createTransport(helper: HelperProcess): ObsbotTransport {
@@ -154,7 +178,7 @@ export class DeviceManager {
       }
 
       if (!found.has(serial)) found.set(serial, { locationId: d.locationId, name: d.name });
-      matched = { transport, serial, locationId: d.locationId, name: d.name };
+      matched = { transport, serial, locationId: d.locationId, path: d.path, name: d.name };
       if (wantSerial && serial === wantSerial) break;
     }
 
@@ -183,11 +207,42 @@ export class DeviceManager {
       helper: this.scanHelper!,
       transport: m.transport,
       locationId: m.locationId,
+      path: m.path,
       name: m.name,
     });
     // This helper now belongs to the registry entry; the next scan needs
     // its own (lazily spawned on next use).
     this.scanHelper = undefined;
+  }
+
+  /**
+   * Drop bound camera(s) from the registry so the next get()/bind() spawns a
+   * fresh scratch helper and re-scans from scratch — the correct move after
+   * a device has re-enumerated (e.g. unplug/replug), since a stale cached
+   * transport talks to a helper that may no longer own a live handle.
+   * Closing each dropped helper is best-effort: a helper whose native
+   * session already died (the common case right after a disconnect) can
+   * throw on close(), and that must not stop the entry from being dropped.
+   *
+   *   serial given -> drop just that camera (no-op if it isn't bound)
+   *   no serial    -> drop every bound camera
+   */
+  async invalidate(serial?: string): Promise<void> {
+    const drop = async (s: string, entry: RegistryEntry): Promise<void> => {
+      try {
+        await entry.helper.close();
+      } catch {
+        // best-effort — a dead/disconnected helper's close() may itself throw
+      }
+      this.registry.delete(s);
+    };
+
+    if (serial) {
+      const entry = this.registry.get(serial);
+      if (entry) await drop(serial, entry);
+      return;
+    }
+    await Promise.all([...this.registry].map(([s, entry]) => drop(s, entry)));
   }
 
   /**
@@ -233,10 +288,12 @@ export class DeviceManager {
     const results: CameraInfo[] = [];
     const seenSerials = new Set<string>();
     const boundLocationIds = new Set<number>();
+    const boundPaths = new Set<string>();
     for (const [serial, entry] of this.registry) {
       results.push({ serial, locationId: entry.locationId, name: entry.name, status: "bound" });
       seenSerials.add(serial);
       if (entry.locationId !== undefined) boundLocationIds.add(entry.locationId);
+      boundPaths.add(entry.path);
     }
 
     const helper = await this.getScanHelper();
@@ -244,6 +301,15 @@ export class DeviceManager {
     const candidates = devices.filter((d) => OBSBOT_NAME_RE.test(d.name));
 
     for (const d of candidates) {
+      // locationId is macOS-only (undefined on Linux/Windows); `path` is
+      // populated on every platform, so it's the dedup key that actually
+      // works cross-platform. Without it, a bound camera off-macOS gets
+      // re-opened here, collides with the registry helper's own held-open
+      // handle, and is double-reported a second time as a serial-less
+      // "busy" entry alongside its correct "bound" one.
+      if (boundPaths.has(d.path)) {
+        continue; // already reported as bound above
+      }
       if (d.locationId !== undefined && boundLocationIds.has(d.locationId)) {
         continue; // already reported as bound above
       }

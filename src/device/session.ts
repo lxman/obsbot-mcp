@@ -25,8 +25,15 @@ export class DeviceSession {
     return this.transport;
   }
 
-  /** Drop the cached transport (e.g. after a device error) so the next get() re-opens. */
-  invalidate(): void {
+  /**
+   * Drop the cached transport AND the manager's registry entry for it (e.g.
+   * after a device error), so the next get() re-scans and rebinds through a
+   * fresh helper instead of handing back the same possibly-dead transport —
+   * without dropping the registry entry too, mgr.get() would just return
+   * the cached (dead) transport again and self-heal could never happen.
+   */
+  async invalidate(): Promise<void> {
+    await this.mgr.invalidate();
     this.transport = undefined;
   }
 
