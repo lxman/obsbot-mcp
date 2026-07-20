@@ -278,6 +278,45 @@ static IOUSBDeviceInterface **openUsbDevice(io_service_t deviceService,
 
 // Enumerate IOUSB devices matching vendor/product ID.
 // Returns an array of io_service_t wrapped in NSNumber.
+// Read a USB service's locationID — the identifier that ties a USB device to its
+// AVFoundation camera.
+//
+// The Tiny 2 has NO USB serial string (iSerialNumber = 0), so kUSBSerialNumberString
+// is always nil and cannot be used to correlate the two. locationID encodes the
+// physical port path and is always present.
+//
+// Returns 0 on failure; a real locationID is never 0.
+static uint32_t usbLocationID(io_service_t svc) {
+  CFMutableDictionaryRef props = NULL;
+  uint32_t loc = 0;
+  if (IORegistryEntryCreateCFProperties(svc, &props, kCFAllocatorDefault, kNilOptions)
+      == kIOReturnSuccess && props) {
+    NSNumber *n = [(__bridge NSDictionary *)props objectForKey:@"locationID"];
+    if (n) loc = (uint32_t)[n unsignedIntValue];
+    CFRelease(props);
+  }
+  return loc;
+}
+
+// Does this AVFoundation uniqueID belong to the USB device at `loc`?
+//
+// macOS builds a UVC camera's uniqueID as "0x" + locationID(hex) + VID(4) + PID(4).
+// Verified on hardware: locationID 0x3120000 with VID 0x3564 / PID 0xfef8 yields
+// "0x31200003564fef8".
+//
+// The exact form is checked first. The substring fallback covers formatting
+// differences across macOS releases, which this format has only been confirmed
+// against one release — if that fallback ever starts mismatching cameras, this is
+// the first place to look.
+static BOOL uniqueIDMatchesLocation(NSString *uniqueID, uint32_t loc) {
+  if (!uniqueID || uniqueID.length == 0 || loc == 0) return NO;
+  NSString *exact = [NSString stringWithFormat:@"0x%x%04x%04x",
+                     loc, (unsigned)OBSBOT_VID, (unsigned)TINY2_PID];
+  if ([uniqueID caseInsensitiveCompare:exact] == NSOrderedSame) return YES;
+  NSString *locHex = [NSString stringWithFormat:@"%x", loc];
+  return [uniqueID localizedCaseInsensitiveContainsString:locHex];
+}
+
 static NSMutableArray *findUsbServices(uint16_t vid, uint16_t pid) {
   NSMutableArray *services = [NSMutableArray array];
   CFMutableDictionaryRef matching = IOServiceMatching(kIOUSBDeviceClassName);
@@ -511,43 +550,37 @@ static void doEnumerate(void) {
     for (NSNumber *svcNum in usbServices) {
       io_service_t service = (io_service_t)(uintptr_t)[svcNum unsignedLongValue];
 
-      // Read product name and serial from IORegistry properties directly
-      // (no need to open the device exclusively).
+      // Read the product name from IORegistry (no exclusive open needed), and the
+      // locationID that ties this USB device to its AVFoundation camera.
       CFMutableDictionaryRef props = NULL;
       NSString *product = nil;
-      NSString *serial  = nil;
       if (IORegistryEntryCreateCFProperties(service, &props,
                                             kCFAllocatorDefault, kNilOptions)
           == kIOReturnSuccess && props) {
-        NSDictionary *dict = (__bridge NSDictionary *)props;
-        product = [dict objectForKey:@"kUSBProductString"];
-        serial  = [dict objectForKey:@"kUSBSerialNumberString"];
+        product = [(__bridge NSDictionary *)props objectForKey:@"kUSBProductString"];
         CFRelease(props);
       }
-
       if (!product) product = @"OBSBOT Tiny 2";
 
-      NSString *avUniqueID = serial ?: @"";
+      uint32_t loc = usbLocationID(service);
+
+      // Correlate by locationID. This previously matched on the USB serial string
+      // and fell back to matching the PRODUCT NAME — but every Tiny 2 reports the
+      // same product name, so with two cameras attached the name fallback picked
+      // the SAME AVFoundation device for both USB services and enumerate returned
+      // duplicate paths. locationID is per-port and unique.
+      NSString *avUniqueID = @"";
       for (NSDictionary *avDev in avDevices) {
         NSString *uid = avDev[@"uniqueID"];
-        if (!uid || uid.length == 0) continue;
-        if (serial && [uid localizedCaseInsensitiveContainsString:serial]) {
-          avUniqueID = uid;
-          break;
-        }
-        // Some OBSBOT units have no USB serial descriptor (iSerialNumber = 0).
-        // Fall back to matching by product name against the AVFoundation name.
-        if (!serial) {
-          NSString *name = avDev[@"name"];
-          if (name && [name localizedCaseInsensitiveContainsString:product]) {
-            avUniqueID = uid;
-            break;
-          }
-        }
+        if (uniqueIDMatchesLocation(uid, loc)) { avUniqueID = uid; break; }
       }
+
+      // locationID is reported so callers can correlate without re-deriving it
+      // from the uniqueID string format.
       [deviceList addObject:@{
         @"path": avUniqueID ?: @"",
         @"name": product,
+        @"locationId": @(loc),
       }];
     }
   } else {
@@ -594,17 +627,15 @@ static void doOpen(NSString *path) {
     io_service_t svc = (io_service_t)(uintptr_t)[svcNum unsignedLongValue];
 
     if (!udev) {
-      // Read the serial number from IORegistry to match against AVFoundation UID.
-      CFMutableDictionaryRef props = NULL;
-      NSString *serial = nil;
-      if (IORegistryEntryCreateCFProperties(svc, &props,
-                                            kCFAllocatorDefault, kNilOptions)
-          == kIOReturnSuccess && props) {
-        serial = [(__bridge NSDictionary *)props objectForKey:@"kUSBSerialNumberString"];
-        CFRelease(props);
-      }
-      BOOL matches = (serial && [path localizedCaseInsensitiveContainsString:serial]) ||
-                     (services.count == 1);
+      // Match this USB service to the requested AVFoundation uniqueID by locationID.
+      //
+      // This previously matched on kUSBSerialNumberString, which is nil on every
+      // Tiny 2 (iSerialNumber = 0), so the only branch that ever fired was the
+      // `services.count == 1` fallback. With two or more cameras attached that
+      // fallback is false and nothing matched, so open failed for EVERY camera.
+      // The old fallback is deliberately gone: it masked this bug on single-camera
+      // setups and would keep masking a broken match.
+      BOOL matches = uniqueIDMatchesLocation(path, usbLocationID(svc));
 
       if (matches) {
         haveCtrlIf = findVideoControlInterfaceNumber(svc, &ctrlIfNum);
