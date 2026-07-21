@@ -1071,73 +1071,166 @@ static void doSnapshot(NSString *pathArg, long maxDim, long quality, long settle
 // Main — stdio JSON-RPC dispatch
 // ---------------------------------------------------------------------------
 
+// Handle one complete request line. Extracted from main()'s old blocking loop
+// unchanged, so ops still run serially on the main thread — the run loop below
+// changes only HOW bytes arrive, not what happens to them.
+static void handleLine(NSString *trimmed) {
+@try {
+    NSString *op = jsonField(trimmed, @"op");
+    if (!op) { err(@"missing op"); return; }
+
+    if ([op isEqualToString:@"version"]) {
+      doVersion();
+    } else if ([op isEqualToString:@"enumerate"]) {
+      doEnumerate();
+    } else if ([op isEqualToString:@"open"]) {
+      doOpen(jsonField(trimmed, @"path"));
+    } else if ([op isEqualToString:@"xu_set"]) {
+      doXuSet(jsonField(trimmed, @"selector"), jsonField(trimmed, @"hex"));
+    } else if ([op isEqualToString:@"xu_get"]) {
+      doXuGet(jsonField(trimmed, @"selector"), jsonField(trimmed, @"length"));
+    } else if ([op isEqualToString:@"zoom_range"]) {
+      doZoomRange();
+    } else if ([op isEqualToString:@"zoom_set"]) {
+      doZoomSet(jsonField(trimmed, @"units"));
+    } else if ([op isEqualToString:@"camctrl_set"]) {
+      doCamCtrlSet(jsonField(trimmed, @"property"),
+                   jsonField(trimmed, @"value"),
+                   jsonField(trimmed, @"flags"));
+    } else if ([op isEqualToString:@"camctrl_range"]) {
+      doCamCtrlRange(jsonField(trimmed, @"property"));
+    } else if ([op isEqualToString:@"camctrl_get"]) {
+      doCamCtrlGet(jsonField(trimmed, @"property"));
+    } else if ([op isEqualToString:@"procamp_set"]) {
+      doProcAmpSet(jsonField(trimmed, @"property"),
+                   jsonField(trimmed, @"value"),
+                   jsonField(trimmed, @"flags"));
+    } else if ([op isEqualToString:@"procamp_range"]) {
+      doProcAmpRange(jsonField(trimmed, @"property"));
+    } else if ([op isEqualToString:@"snapshot"]) {
+      doSnapshot(jsonField(trimmed, @"path"),
+                 [jsonField(trimmed, @"maxDim") integerValue],
+                 [jsonField(trimmed, @"quality") integerValue],
+                 [jsonField(trimmed, @"settleMs") integerValue]);
+    } else {
+      err([NSString stringWithFormat:@"unknown op: %@", op]);
+    }
+  } @catch (NSException *e) {
+    err([NSString stringWithFormat:@"exception: %@", e.reason]);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Camera arrival / removal push events
+// ---------------------------------------------------------------------------
+//
+// The Node side learns the camera changed only by an op FAILING, which costs a
+// failed call after every replug and leaves obsbot_devices reporting a phantom
+// bound entry for an unplugged camera. Pushing these events lets it react first.
+//
+// Emitted WITHOUT an "ok" field on purpose: HelperProcess ignores any JSON line
+// whose `ok` is not a boolean without shifting its response queue, so an event
+// landing mid-request cannot be mistaken for that request's reply. Responses
+// correlate by position, so that would desync every later call.
+//
+// AVFoundation, not IOKit: measured on hardware, IOKit's kIOMatchedNotification
+// fires ~96ms BEFORE AVFoundation can see the device, which is exactly the
+// window that produces "open: missing path". When the AVF notification lands,
+// deviceWithUniqueID already resolves.
+static void emitCameraEvent(NSString *kind, AVCaptureDevice *dev) {
+  // The Tiny 2 also registers a microphone; only cameras matter for binding.
+  if (![dev hasMediaType:AVMediaTypeVideo]) return;
+  respond([NSString stringWithFormat:
+      @"{\"event\":\"%@\",\"path\":\"%@\",\"name\":\"%@\"}",
+      kind, jsonEscape(dev.uniqueID ?: @""), jsonEscape(dev.localizedName ?: @"")]);
+}
+
+static void registerCameraNotifications(void) {
+  [[NSNotificationCenter defaultCenter]
+      addObserverForName:AVCaptureDeviceWasConnectedNotification
+                  object:nil queue:nil
+              usingBlock:^(NSNotification *n) {
+    emitCameraEvent(@"camera_arrived", n.object);
+  }];
+  [[NSNotificationCenter defaultCenter]
+      addObserverForName:AVCaptureDeviceWasDisconnectedNotification
+                  object:nil queue:nil
+              usingBlock:^(NSNotification *n) {
+    emitCameraEvent(@"camera_departed", n.object);
+  }];
+}
+
+// Buffered partial line between readable callbacks.
+static NSMutableData *gPending;
+
+// Drain complete lines from stdin and dispatch them.
+//
+// This is a RUN LOOP source callback, deliberately NOT a dispatch source on
+// dispatch_get_main_queue(). That distinction is load-bearing: the main queue is
+// serial, so a handler running on it OCCUPIES it, and doSnapshot -- which waits
+// by spinning the run loop for AVFoundation's photo completion -- then deadlocks
+// against its own caller and times out. Verified the hard way: the dispatch-source
+// version broke snapshot immediately. A run loop source is invoked BY the run
+// loop, leaving the main queue free to drain, so nested run loops still work.
+static void stdinReadable(CFFileDescriptorRef fdref, CFOptionFlags types, void *info) {
+  (void)types; (void)info;
+  @autoreleasepool {
+    char buf[8192];
+    ssize_t n = read(STDIN_FILENO, buf, sizeof(buf));
+    if (n <= 0) exit(0);                    // stdin closed: parent is gone
+    [gPending appendBytes:buf length:(NSUInteger)n];
+
+    // Requests are newline-delimited and may arrive split or coalesced, so
+    // consume only COMPLETE lines and keep any partial tail buffered.
+    while (true) {
+      const char *bytes = (const char *)gPending.bytes;
+      NSUInteger len = gPending.length, nl = NSNotFound;
+      for (NSUInteger i = 0; i < len; i++) if (bytes[i] == '\n') { nl = i; break; }
+      if (nl == NSNotFound) break;
+
+      NSString *line = [[NSString alloc] initWithBytes:bytes length:nl
+                                              encoding:NSUTF8StringEncoding];
+      [gPending replaceBytesInRange:NSMakeRange(0, nl + 1) withBytes:NULL length:0];
+
+      NSString *trimmed = [line stringByTrimmingCharactersInSet:
+                             [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+      if (trimmed.length > 0) handleLine(trimmed);
+    }
+    // CFFileDescriptor callbacks are one-shot; re-arm for the next chunk.
+    CFFileDescriptorEnableCallBacks(fdref, kCFFileDescriptorReadCallBack);
+  }
+}
+
 int main(int argc, const char *argv[]) {
   (void)argc; (void)argv;
   @autoreleasepool {
-    NSFileHandle *stdinHandle = [NSFileHandle fileHandleWithStandardInput];
-
     atexit_b(^{ releaseSession(); });
 
-    while (true) {
-      @autoreleasepool {
-        NSData *lineData = [stdinHandle availableData];
-        if (lineData.length == 0) break;
-        NSString *all = [[NSString alloc] initWithData:lineData encoding:NSUTF8StringEncoding];
-        if (!all || all.length == 0) continue;
+    // A run loop must be LIVE on the MAIN thread, not merely somewhere in the
+    // process. Verified on hardware 2026-07-21: with observers registered up
+    // front and CFRunLoopRun() on a SECONDARY thread, a real unplug/replug
+    // produced zero notifications and the main thread's device list stayed
+    // frozen on the stale camera. AVFoundation drives device-change detection
+    // off the main run loop, so if main() blocks in read() nothing is ever
+    // posted -- which is also why a long-lived helper's enumerate() went stale
+    // and binding needed a whole fresh process to recover.
+    //
+    // Ops still execute serially on the main thread exactly as before: only how
+    // bytes arrive has changed. No new concurrency, no locking.
+    registerCameraNotifications();
 
-        // NSFileHandle may return multiple lines in one chunk; split.
-        NSArray *lines = [all componentsSeparatedByString:@"\n"];
-        for (NSString *singleLine in lines) {
-          NSString *trimmed = [singleLine stringByTrimmingCharactersInSet:
-                                [NSCharacterSet whitespaceAndNewlineCharacterSet]];
-          if (trimmed.length == 0) continue;
+    gPending = [NSMutableData data];
 
-          @try {
-            NSString *op = jsonField(trimmed, @"op");
-            if (!op) { err(@"missing op"); continue; }
+    CFFileDescriptorContext ctx = {0, NULL, NULL, NULL, NULL};
+    CFFileDescriptorRef fdref = CFFileDescriptorCreate(
+        kCFAllocatorDefault, STDIN_FILENO, false, stdinReadable, &ctx);
+    CFRunLoopSourceRef rls = CFFileDescriptorCreateRunLoopSource(
+        kCFAllocatorDefault, fdref, 0);
+    CFRunLoopAddSource(CFRunLoopGetCurrent(), rls, kCFRunLoopDefaultMode);
+    CFRelease(rls);
+    CFFileDescriptorEnableCallBacks(fdref, kCFFileDescriptorReadCallBack);
 
-            if ([op isEqualToString:@"version"]) {
-              doVersion();
-            } else if ([op isEqualToString:@"enumerate"]) {
-              doEnumerate();
-            } else if ([op isEqualToString:@"open"]) {
-              doOpen(jsonField(trimmed, @"path"));
-            } else if ([op isEqualToString:@"xu_set"]) {
-              doXuSet(jsonField(trimmed, @"selector"), jsonField(trimmed, @"hex"));
-            } else if ([op isEqualToString:@"xu_get"]) {
-              doXuGet(jsonField(trimmed, @"selector"), jsonField(trimmed, @"length"));
-            } else if ([op isEqualToString:@"zoom_range"]) {
-              doZoomRange();
-            } else if ([op isEqualToString:@"zoom_set"]) {
-              doZoomSet(jsonField(trimmed, @"units"));
-            } else if ([op isEqualToString:@"camctrl_set"]) {
-              doCamCtrlSet(jsonField(trimmed, @"property"),
-                           jsonField(trimmed, @"value"),
-                           jsonField(trimmed, @"flags"));
-            } else if ([op isEqualToString:@"camctrl_range"]) {
-              doCamCtrlRange(jsonField(trimmed, @"property"));
-            } else if ([op isEqualToString:@"camctrl_get"]) {
-              doCamCtrlGet(jsonField(trimmed, @"property"));
-            } else if ([op isEqualToString:@"procamp_set"]) {
-              doProcAmpSet(jsonField(trimmed, @"property"),
-                           jsonField(trimmed, @"value"),
-                           jsonField(trimmed, @"flags"));
-            } else if ([op isEqualToString:@"procamp_range"]) {
-              doProcAmpRange(jsonField(trimmed, @"property"));
-            } else if ([op isEqualToString:@"snapshot"]) {
-              doSnapshot(jsonField(trimmed, @"path"),
-                         [jsonField(trimmed, @"maxDim") integerValue],
-                         [jsonField(trimmed, @"quality") integerValue],
-                         [jsonField(trimmed, @"settleMs") integerValue]);
-            } else {
-              err([NSString stringWithFormat:@"unknown op: %@", op]);
-            }
-          } @catch (NSException *e) {
-            err([NSString stringWithFormat:@"exception: %@", e.reason]);
-          }
-        }
-      }
-    }
+    CFRunLoopRun();
   }
   return 0;
 }

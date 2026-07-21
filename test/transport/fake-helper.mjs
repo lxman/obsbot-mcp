@@ -31,6 +31,17 @@ rl.on("line", (line) => {
       // Stay alive and never answer, simulating a helper wedged in the driver.
       // No 'exit' fires for this one, so only a timeout can unstick it.
       return;
+    case "emit_event":
+      // An unsolicited push line: no `ok` field, so the existing stray-line
+      // guard must ignore it for queue purposes while the event surfaces.
+      send({ event: req.event ?? "camera_departed", path: req.path ?? "p1", name: "OBSBOT Tiny 2" });
+      return;
+    case "event_then_reply":
+      // The interleaving case: a push line lands BETWEEN the request and its
+      // response. If the event were treated as a response, this reply would be
+      // handed to the wrong waiter and every later call would desync.
+      send({ event: "camera_departed", path: "p1", name: "OBSBOT Tiny 2" });
+      return send({ ok: true, marker: "real-reply" });
     case "device_gone":
       // Stay ALIVE but report the device as no longer attached — the exact
       // shape of an unplugged camera on macOS (kIOReturnNoDevice, 0xe00002c0).

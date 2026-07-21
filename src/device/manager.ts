@@ -467,6 +467,58 @@ export class DeviceManager {
     return transport;
   }
 
+  /**
+   * The OS reported a camera detached. Drop any binding on that path now,
+   * instead of waiting for a tool call to fail against a dead handle.
+   *
+   * Without this the registry stays authoritative until something errors, so
+   * `obsbot_devices` reports a phantom `bound` entry — serial and all — for a
+   * camera physically sitting on the desk. The prune is otherwise reactive:
+   * `deviceLost` is only set when an op fails, and listCameras() deliberately
+   * does not re-open bound entries to check.
+   *
+   * Closes the helper rather than merely forgetting it, for the same reason
+   * pruneDeadEntries() does: a helper left running still holds the device, so
+   * the replacement could never open it.
+   */
+  async handleCameraDeparted(e: { path: string }): Promise<void> {
+    for (const [serial, entry] of this.registry) {
+      if (entry.path !== e.path) continue;
+      try {
+        await entry.helper.close();
+      } catch {
+        // best-effort — a disconnected helper's close() may itself throw
+      }
+      this.registry.delete(serial);
+    }
+  }
+
+  /**
+   * The OS reported a camera attached. Re-establish a binding this process
+   * ALREADY held — a genuine self-heal after a replug — and nothing more.
+   *
+   * Deliberately does not bind a camera we never had. The Tiny 2 is a device
+   * Zoom, OBS and OBSBOT Center also want, and a server that grabbed it the
+   * moment it appeared would make it busy for them even if nobody ever used
+   * this server. `everBound` is the record of what was ours; it survives
+   * invalidate() precisely so a re-bind can be recognised as a reconnect.
+   *
+   * Never throws: the caller is a stdout line handler, and an unhandled
+   * rejection there would take down the reader and wedge every in-flight
+   * request. A failed re-bind just leaves the next tool call to bind normally.
+   */
+  async handleCameraArrived(_e: { path: string }): Promise<void> {
+    if (this.everBound.size === 0) return; // never ours — stay hands-off
+    // Something is already bound, so there is nothing to restore.
+    if (this.registry.size > 0) return;
+    try {
+      await this.bind();
+    } catch {
+      // Arrival is a hint, not a command. The device may still be settling
+      // (AVFoundation lags the USB bus); the next call binds normally.
+    }
+  }
+
   /** Compat shim for the single-camera API B1 retires. */
   async openFirstObsbot(): Promise<ObsbotTransport> {
     return this.get();

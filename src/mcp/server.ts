@@ -6,18 +6,17 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { zodToJsonSchema } from "zod-to-json-schema";
 import { DeviceManager } from "../device/manager.js";
-import { HelperProcess } from "../transport/helper-process.js";
+import { helperFactory } from "../device/helper-factory.js";
 import { createTools, ToolDef } from "./tools.js";
 import { renderToolResult } from "./render.js";
 import { CaptureManager } from "../capture/manager.js";
 import { Coordinator, serialize } from "../ipc/coordinator.js";
 
 export async function startServer(opts: { debug?: boolean } = {}): Promise<void> {
-  const mgr = new DeviceManager(async () => {
-    const helper = new HelperProcess();
-    await helper.start();
-    return helper;
-  });
+  // helperFactory subscribes every helper it spawns to the OS bus events, so
+  // the manager hears about a camera arriving or leaving instead of finding
+  // out by failing a call. See src/device/helper-factory.ts.
+  const mgr: DeviceManager = new DeviceManager(helperFactory(() => mgr));
 
   // DeviceManager now owns the connection lifecycle: lazy bind, invalidate +
   // re-bind on a mid-session disconnect (self-heal), and per-camera reconnect

@@ -59,6 +59,13 @@ const SNAPSHOT_RPC_TIMEOUT_MS = 30_000;
 // one outcome this list must never cause. Add it once it has been seen.
 const DEVICE_LOST_SIGNATURES = [/0xe00002c0/i, /No such device/i];
 
+/** A camera the OS reported as attached or detached, pushed by the helper. */
+export interface CameraEvent {
+  /** Device path (on macOS the AVFoundation uniqueID), as `enumerate` reports it. */
+  path: string;
+  name: string;
+}
+
 export class HelperProcess {
   private proc?: ChildProcessByStdio<Writable, Readable, null>;
   private rl?: Interface;
@@ -67,6 +74,9 @@ export class HelperProcess {
   private dead?: Error;
   /** Set once an op reports the DEVICE gone, even though the process lives on. */
   private lostDevice = false;
+  /** Listeners for unsolicited camera arrival/removal pushed by the helper. */
+  private arrivedListeners: Array<(e: CameraEvent) => void> = [];
+  private departedListeners: Array<(e: CameraEvent) => void> = [];
 
   constructor(private commandOverride?: string[]) {}
 
@@ -147,6 +157,13 @@ export class HelperProcess {
       ) {
         // Valid JSON but not a recognizable RPC response (missing/invalid
         // `ok` field). Treat as noise rather than desyncing the queue.
+        //
+        // Unsolicited push events ride exactly this lane: they carry `event`
+        // and no `ok`, so they reach listeners WITHOUT shifting the queue.
+        // Responses correlate by position, so an event consumed as a response
+        // would hand this request's reply to the next waiter and desync every
+        // later call — which is why events must never look like responses.
+        this.dispatchEvent(parsed as Record<string, unknown>);
         return;
       }
       const cb = this.queue.shift();
@@ -294,6 +311,40 @@ export class HelperProcess {
   async procAmpRange(property: number): Promise<{ min: number; max: number }> {
     const resp = await this.rpc({ op: "procamp_range", property });
     return { min: resp.min as number, max: resp.max as number };
+  }
+
+  /** Route a non-response line to the right listeners; ignore anything else. */
+  private dispatchEvent(msg: Record<string, unknown>): void {
+    const kind = msg.event;
+    if (kind !== "camera_arrived" && kind !== "camera_departed") return;
+    const e: CameraEvent = {
+      path: typeof msg.path === "string" ? msg.path : "",
+      name: typeof msg.name === "string" ? msg.name : "",
+    };
+    // A throwing listener must not take down the stdout reader — that would
+    // wedge every in-flight request for an unrelated reason.
+    for (const fn of kind === "camera_arrived" ? this.arrivedListeners : this.departedListeners) {
+      try {
+        fn(e);
+      } catch {
+        // listener errors are the listener's problem
+      }
+    }
+  }
+
+  /** Notified when the OS reports a camera attached. */
+  onCameraArrived(fn: (e: CameraEvent) => void): void {
+    this.arrivedListeners.push(fn);
+  }
+
+  /** Notified when the OS reports a camera detached. */
+  onCameraDeparted(fn: (e: CameraEvent) => void): void {
+    this.departedListeners.push(fn);
+  }
+
+  /** Fire-and-forget write, for driving the fake helper's event ops in tests. */
+  send(req: Record<string, unknown>): void {
+    this.proc?.stdin.write(JSON.stringify(req) + "\n");
   }
 
   /** True once the child has died (or close() was called) — see getScanHelper(). */
