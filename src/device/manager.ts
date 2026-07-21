@@ -23,6 +23,9 @@ const OBSBOT_MODEL_PIDS = new Map<number, Set<number>>([
 // binding — are correctly excluded.
 const OBSBOT_NAME_RE = /obsbot/i;
 
+/** Message text from an unknown thrown value, for diagnostics. */
+const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+
 /**
  * Is this enumerated device a controllable OBSBOT camera worth binding? On
  * Windows/macOS the helper reports USB vid/pid, so gate strictly on the Remo
@@ -65,6 +68,14 @@ export interface CameraInfo {
   locationId?: number;
   name: string;
   status: "available" | "bound" | "busy";
+  /**
+   * Why a `busy` camera could not be identified — the underlying open or
+   * readSerial error. Absent on cameras that bound fine. "busy" covers two very
+   * different situations (another process holds the device vs. the vendor
+   * mailbox went quiet) and without this they are indistinguishable from
+   * outside.
+   */
+  reason?: string;
 }
 
 interface RegistryEntry {
@@ -204,19 +215,27 @@ export class DeviceManager {
 
     const found = new Map<string, { locationId?: number; name: string }>();
     let matched: ScanMatch | undefined;
+    // Why each candidate was passed over. Every `continue` below is a silent
+    // rejection, and when they ALL reject the caller used to get a bare "no
+    // OBSBOT camera found" — the same message it gets with nothing plugged in.
+    // Carrying the reasons into the error is the difference between "no camera"
+    // and "the camera is right there but wouldn't answer".
+    const rejected: string[] = [];
 
     for (const d of candidates) {
       let xuNode: number;
       try {
         xuNode = await helper.open(d.path);
-      } catch {
+      } catch (e) {
         // ANY open failure (exclusive access or otherwise) — skip, not
         // fatal. The next candidate's open() releases this attempt.
+        rejected.push(`${d.path}: open failed: ${errText(e)}`);
         continue;
       }
       if (xuNode < 0) {
         // Opened, but this node has no XU unit (e.g. the metadata/ISP node
         // the Tiny 2 also exposes) — not a usable candidate.
+        rejected.push(`${d.path}: opened but has no XU unit`);
         continue;
       }
 
@@ -224,7 +243,8 @@ export class DeviceManager {
       let serial: string;
       try {
         serial = await transport.readSerial();
-      } catch {
+      } catch (e) {
+        rejected.push(`${d.path}: ${errText(e)}`);
         continue;
       }
 
@@ -241,7 +261,13 @@ export class DeviceManager {
       throw new UnknownCameraError(wantSerial, [...found.keys()]);
     }
     if (found.size === 0) {
-      throw new Error("no OBSBOT camera found");
+      // With nothing attached there is nothing to explain, so that message
+      // stays exactly as it was.
+      throw new Error(
+        rejected.length === 0
+          ? "no OBSBOT camera found"
+          : `no OBSBOT camera found — ${rejected.length} candidate(s) rejected: ${rejected.join("; ")}`,
+      );
     }
     if (found.size > 1) {
       throw new AmbiguousCameraError([...found.keys()]);
@@ -427,8 +453,13 @@ export class DeviceManager {
         if (seenSerials.has(serial)) continue; // duplicate node of an already-listed camera
         seenSerials.add(serial);
         results.push({ serial, locationId: d.locationId, name: d.name, status: "available" });
-      } catch {
-        results.push({ locationId: d.locationId, name: d.name, status: "busy" });
+      } catch (e) {
+        results.push({
+          locationId: d.locationId,
+          name: d.name,
+          status: "busy",
+          reason: errText(e),
+        });
       }
     }
 

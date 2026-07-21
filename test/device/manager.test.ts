@@ -45,6 +45,13 @@ interface FakeCameraSpec {
    * the hardware-identity gate must exclude it from binding.
    */
   virtual?: boolean;
+  /**
+   * Opens fine, but the vendor reply mailbox never produces a UG_GET_SN reply,
+   * so readSerial() throws. Models the hardware-verified 2026-07-21 macOS
+   * failure where selector 2 returned only our own echoed request frame: the
+   * camera enumerates and opens, but cannot be identified.
+   */
+  mute?: boolean;
 }
 
 function fakeHelperFactory(cameras: FakeCameraSpec[]) {
@@ -89,15 +96,19 @@ function fakeHelperFactory(cameras: FakeCameraSpec[]) {
       xuSet: vi.fn(async (_selector: number, data: Buffer) => {
         lastSeq = data.readUInt16LE(2);
       }),
-      xuGet: vi.fn(async (_selector: number, _length: number) =>
-        buildFrame({
+      xuGet: vi.fn(async (_selector: number, _length: number) => {
+        const cam = cameras.find((c) => c.serial === openedSerial);
+        // A `mute` camera's mailbox never yields a matching reply, so
+        // readSerialVia() exhausts its polls and throws.
+        if (cam?.mute) return Buffer.alloc(60);
+        return buildFrame({
           seq: lastSeq,
           cmd: 0x18c8,
           receiver: 0x0a,
           sender: 0x0d,
           payload: Buffer.from(openedSerial ?? "", "ascii"),
-        }),
-      ),
+        });
+      }),
       close: vi.fn(async () => {
         if (openedPath && heldBy.get(openedPath) === identity) heldBy.delete(openedPath);
       }),
@@ -151,6 +162,35 @@ test("a busy camera never appears in an error's available list", async () => {
 test("get() with no cameras attached throws", async () => {
   const mgr = new DeviceManager(fakeHelperFactory([]));
   await expect(mgr.get()).rejects.toThrow();
+});
+
+// A camera that enumerates and opens but cannot be identified used to be
+// indistinguishable from no camera at all: bind()'s bare `catch { continue }`
+// discarded the reason, and the caller saw the same bare "no OBSBOT camera
+// found" it gets when nothing is plugged in. That cost a full debugging
+// session on 2026-07-21 against real hardware whose vendor mailbox had gone
+// quiet. The rejection reason must survive into the error.
+test("a camera that opens but cannot be identified reports WHY, not just 'not found'", async () => {
+  const mgr = new DeviceManager(fakeHelperFactory([{ serial: "AAA", mute: true }]));
+  await expect(mgr.get()).rejects.toThrow(/UG_GET_SN|readSerial/i);
+});
+
+test("the unidentifiable camera's path appears in the error so it can be located", async () => {
+  const mgr = new DeviceManager(fakeHelperFactory([{ serial: "AAA", mute: true }]));
+  await expect(mgr.get()).rejects.toThrow(/fake-AAA/);
+});
+
+test("'no camera found' stays clean when genuinely nothing is attached", async () => {
+  // The diagnostic must not turn the empty case into a confusing message.
+  const mgr = new DeviceManager(fakeHelperFactory([]));
+  await expect(mgr.get()).rejects.toThrow(/no OBSBOT camera found$/);
+});
+
+test("listCameras() explains why an enumerable camera is unusable", async () => {
+  const mgr = new DeviceManager(fakeHelperFactory([{ serial: "AAA", mute: true }]));
+  const [cam] = await mgr.listCameras();
+  expect(cam.status).toBe("busy");
+  expect(cam.reason).toMatch(/UG_GET_SN|readSerial/i);
 });
 
 test("a second /dev node with no XU unit is skipped in favor of one that has it", async () => {
