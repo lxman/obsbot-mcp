@@ -144,6 +144,15 @@ const PROBE_VENDOR_SELECTOR = 0x02;
 // single unvalidated read can return stale data — same hazard readSerialVia
 // (transport/read-serial.ts) polls around. Mirrors its POLL_ATTEMPTS.
 const PROBE_QUERY_POLL_ATTEMPTS = 8;
+// ...and its POLL_DELAY_MS. The device does not populate the mailbox instantly, and
+// how long it takes depends on the opcode: cached state (AI_GET_QUICK_STATUS) comes
+// back sub-millisecond, but anything reading persistent storage (UG_GET_SN) is far
+// slower. An un-delayed loop spans only ~1-2ms end to end, so it polls entirely
+// within the gap and reports "no valid reply" for a command the device answered.
+// Measured on darwin-arm64 hardware 2026-07-21, UG_GET_SN over 25 trials:
+// no delay = 24 failures (96%), 30ms delay = 0. f27956f fixed exactly this in
+// read-serial.ts; the probe kept the un-delayed loop until 2026-07-21.
+const PROBE_QUERY_POLL_DELAY_MS = 30;
 const fovSchema = withCamera({ fov: z.enum(FOV_TYPES as [FovType, ...FovType[]]) });
 const hdrSchema = withCamera({ enabled: bool() });
 const focusAutoSchema = withCamera({});
@@ -668,6 +677,7 @@ export function createTools(
           // validation readSerialVia does in transport/read-serial.ts).
           const replyLen = length ?? 60;
           for (let i = 0; i < PROBE_QUERY_POLL_ATTEMPTS; i++) {
+            await napMs(PROBE_QUERY_POLL_DELAY_MS); // let the reply land before reading
             const raw = await t.xuGetRaw(PROBE_VENDOR_SELECTOR, replyLen);
             try {
               const p = parseFrame(raw);
