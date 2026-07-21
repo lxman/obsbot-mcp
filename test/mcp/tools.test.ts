@@ -807,6 +807,66 @@ test("obsbot_probe is renamed obsbot_debug_probe (old name gone even under debug
   expect(names).not.toContain("obsbot_probe");
 });
 
+// --- obsbot_debug_probe: the mailbox reply is not instant. ---
+// The device populates the reply mailbox tens of ms after the request; on real
+// hardware 2026-07-21 it landed 30-60ms out. A poll loop with NO delay between
+// reads drains all 8 attempts in ~7ms and reports "no valid reply" for a command
+// the device answered perfectly well. This is the same bug f27956f fixed in
+// transport/read-serial.ts, which was never backported to the probe.
+//
+// Every other probe test uses a fake that answers instantly, which is exactly why
+// the bug survived them — so this fake models the LATENCY, not just the protocol.
+function makeLatentProbeTransport(latencyMs: number, wireCmd = 0x0104) {
+  const t = makeFakeTransport();
+  let sentAt: number | undefined;
+  let sentSeq = 0;
+  t.xuRaw = vi.fn(async (_selector: number, data: Buffer) => {
+    sentSeq = data.readUInt16LE(2);
+    sentAt = Date.now();
+  });
+  t.xuGetRaw = vi.fn(async (_selector: number, _length: number) => {
+    // Before the reply lands the mailbox holds nothing useful.
+    if (sentAt === undefined || Date.now() - sentAt < latencyMs) return Buffer.alloc(60);
+    return buildFrame({
+      seq: sentSeq,
+      cmd: wireCmd,
+      receiver: 0x0a,
+      sender: 0x04,
+      payload: Buffer.from("beef", "hex"),
+    });
+  });
+  return t;
+}
+
+test("obsbot_debug_probe waits for a reply that arrives at the device's real latency", async () => {
+  const transport = makeLatentProbeTransport(50);
+  const tools = createTools(makeFakeMgr(transport), undefined, true);
+  const probe = tools.find((t) => t.name === "obsbot_debug_probe")!;
+
+  const result = (await probe.handler({
+    mode: "query",
+    opcode: "AI_GET_QUICK_STATUS",
+  })) as { ok: boolean; parsed?: { payloadHex: string } };
+
+  expect(result.ok).toBe(true);
+  expect(result.parsed?.payloadHex).toBe("beef");
+});
+
+test("obsbot_debug_probe still gives up when the device truly never answers", async () => {
+  // The delay must not turn a real "no reply" into a hang or a false positive.
+  const transport = makeLatentProbeTransport(60_000);
+  const tools = createTools(makeFakeMgr(transport), undefined, true);
+  const probe = tools.find((t) => t.name === "obsbot_debug_probe")!;
+
+  const result = (await probe.handler({
+    mode: "query",
+    opcode: "AI_GET_QUICK_STATUS",
+  })) as { ok: boolean; error?: string };
+
+  expect(result.ok).toBe(false);
+  expect(result.error).toMatch(/no valid reply/);
+});
+
 test("obsbot_status omits the raw RE block unless debug is enabled", async () => {
   const transport = makeFakeTransport();
   const block = Buffer.alloc(60);
