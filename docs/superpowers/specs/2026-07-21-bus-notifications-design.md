@@ -241,8 +241,19 @@ not ask was **why any process was alive to hear the arrival**. Answering that
 requires making ZERO manager calls between the unplug and a single final
 observation — otherwise the probe manufactures its own subscriber.
 
-Corrected accounting: helpers at rest are **registry + watcher**, with the
-scanner transient — not "registry + scan".
+Corrected accounting — the original "2 (registry + scan)" is wrong in both terms.
+Observed on the live server:
+
+| after | helpers | which |
+|---|---|---|
+| `obsbot_devices` on a fresh server | 1 | scanner only — no watcher, since `everBound` is empty and a server that never bound a camera stays hands-off |
+| `obsbot_status` (first bind) | 2 | registry (the promoted scanner) + watcher |
+| any later `obsbot_devices` | 3 | registry + watcher + a new scanner |
+
+The scanner is not transient: `getScanHelper()` caches it in `scanHelper`, and
+`listCameras()` never discards it, so once a listing call has run it stays until
+a failed bind discards it or a successful bind promotes it. Three at rest after
+a status-then-list sequence is expected, not a leak.
 
 ### Priming: a helper that has never enumerated receives nothing
 
