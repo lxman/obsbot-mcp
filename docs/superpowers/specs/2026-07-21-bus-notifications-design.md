@@ -1,7 +1,8 @@
 # Bus notifications: proactive camera arrival/removal — design
 
 **Date:** 2026-07-21
-**Status:** experimental (branch `experiment/bus-notifications`)
+**Status:** implemented and hardware-verified on macOS (see Result below).
+Linux and Windows still learn about changes only by failing.
 
 ## Goal
 
