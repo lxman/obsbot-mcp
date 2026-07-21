@@ -99,19 +99,26 @@ D-Bus, X11, and single-instance apps bootstrap.
 
 ### Where it plugs into the current code
 
-The seam is at **`HelperProcess`** (`src/transport/helper-process.ts`). Everything
-above it — `DeviceManager`, the per-platform transports, the codec — is
-unchanged. On start:
+The seam is at the **tool-dispatch** level, NOT at `HelperProcess`. (Correction
+found during implementation: forwarding raw helper ops would leave each client
+with its own `DeviceManager` driving the owner's single native helper, and two
+managers clobber the helper's one open-device session — client opens camera X
+while the owner's manager still believes it holds Y.) So the **owner holds the
+single `DeviceManager` + native helper**, and clients forward whole tool calls.
 
-- Try to become owner (bind the well-known name).
-- **Owner:** use the real `HelperProcess` exactly as today (talks to the native
-  helper). Additionally listen for client connections and service their forwarded
-  ops through the single helper.
-- **Client:** replace `HelperProcess` with a **proxy** that forwards each op over
-  the socket to the owner and returns the reply.
+On start (`src/mcp/server.ts`):
 
-Single-client behaviour must be **identical to today** (first instance = owner,
-talks to its own helper directly — no added latency, no behaviour change).
+- `elect()` the rendezvous endpoint.
+- **Owner:** build the real `DeviceManager` + helper + tool handlers as today;
+  additionally run `OwnerServer` (`src/ipc/owner.ts`), whose injected handler is
+  the same tool dispatch (`{tool, args} → result`), **serialized** across all
+  clients so camera ops never interleave on the wire.
+- **Client:** register MCP tool handlers that forward `{tool, args}` over the
+  socket to the owner and return its result — the client has NO `DeviceManager`
+  and never touches the device.
+
+Single-client behaviour is **identical to today** (first instance = owner, runs
+tools locally against its own helper; `OwnerServer` sits idle with no clients).
 
 ## Sharp edges = acceptance criteria
 
