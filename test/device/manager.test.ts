@@ -330,14 +330,21 @@ test("invalidate() closes the bound helper and drops it, so the next get() re-sc
   };
   const mgr = new DeviceManager(factory);
 
+  // A successful bind spawns TWO processes, not one: the scratch scanner that
+  // gets promoted into the registry, and the long-lived watcher that keeps a bus
+  // subscription alive across the departure that closes the registry helper
+  // (see ensureWatcher). The counts below encode that accounting.
   const first = await mgr.get();
-  expect(helpers).toHaveLength(1);
+  expect(helpers).toHaveLength(2); // [0] promoted into the registry, [1] the watcher
 
   await mgr.invalidate();
+  // invalidate() drops REGISTRY entries only — the watcher is neither in the
+  // registry nor the scan helper, which is the whole point of it.
   expect(helpers[0]!.close).toHaveBeenCalledTimes(1);
+  expect(helpers[1]!.close).not.toHaveBeenCalled();
 
   const second = await mgr.get();
-  expect(helpers).toHaveLength(2); // a fresh helper was spawned by the re-scan, not reused
+  expect(helpers).toHaveLength(3); // a fresh scanner for the re-scan; the watcher is reused
   expect(second).not.toBe(first); // the dead cached transport is not what get() returns
 });
 
@@ -505,7 +512,7 @@ test("get() re-binds after the bound helper loses its device, without the proces
   const mgr = new DeviceManager(factory);
 
   const first = await mgr.get();
-  expect(factory.spawned).toHaveLength(1);
+  expect(factory.spawned).toHaveLength(2); // [0] promoted into the registry, [1] the watcher
 
   // Cable pulled: the helper stays alive, its device does not.
   factory.spawned[0]!.deviceLost = true;

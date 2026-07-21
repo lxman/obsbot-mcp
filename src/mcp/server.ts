@@ -58,6 +58,19 @@ export async function startServer(opts: { debug?: boolean } = {}): Promise<void>
   const shutdown = (): void => {
     capture.stopAll();
     void coordinator.close();
+    // The manager holds a watcher process that is deliberately never closed by
+    // any operation, so nothing else would ever stop it.
+    //
+    // Belt-and-braces, and measured to be so: with this line commented out, a
+    // real server bound to hardware and sent SIGTERM still left zero orphaned
+    // helpers, because they exit on stdin EOF when we die (helper.m:1180). The
+    // SIGINT/SIGTERM handlers also process.exit(0) immediately after this, and
+    // it is fire-and-forget, so the close() very likely does not finish.
+    //
+    // Kept anyway: it costs nothing, it is the correct thing to call, and it
+    // covers an orderly stop that does NOT tear down our stdio. Do not mistake
+    // it for what reaps the helpers — that is the pipe.
+    void mgr.shutdown();
   };
   process.on("exit", shutdown);
   process.on("SIGINT", () => { shutdown(); process.exit(0); });
