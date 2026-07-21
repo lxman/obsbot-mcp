@@ -93,6 +93,8 @@ export class HelperProcess {
       path: String(d.path ?? ""),
       name: String(d.name ?? ""),
       locationId: typeof d.locationId === "number" ? d.locationId : undefined,
+      vid: typeof d.vid === "number" ? d.vid : undefined,
+      pid: typeof d.pid === "number" ? d.pid : undefined,
     }));
   }
 

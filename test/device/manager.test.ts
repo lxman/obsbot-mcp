@@ -39,6 +39,12 @@ interface FakeCameraSpec {
   busy?: boolean;
   /** Simulates the secondary (non-XU) /dev node a real OBSBOT also exposes. */
   noXu?: boolean;
+  /**
+   * Models a branded software source (e.g. the "OBSBOT Virtual Camera"
+   * DirectShow filter): its name matches OBSBOT, but it has no USB vid/pid, so
+   * the hardware-identity gate must exclude it from binding.
+   */
+  virtual?: boolean;
 }
 
 function fakeHelperFactory(cameras: FakeCameraSpec[]) {
@@ -58,6 +64,10 @@ function fakeHelperFactory(cameras: FakeCameraSpec[]) {
           path: pathFor(c.serial),
           name: c.name ?? "OBSBOT Tiny 2",
           locationId: c.locationId,
+          // Real OBSBOT hardware reports Remo's VID + the model PID; a `virtual`
+          // spec models a branded software source that reports neither.
+          vid: c.virtual ? undefined : 0x3564,
+          pid: c.virtual ? undefined : 0xfef8,
         })),
       ),
       open: vi.fn(async (path: string) => {
@@ -179,8 +189,39 @@ test("list() returns the raw enumerated devices", async () => {
   const mgr = new DeviceManager(fakeHelperFactory([{ serial: "AAA", name: "OBSBOT Tiny 2" }]));
   const devices = await mgr.list();
   expect(devices).toEqual([
-    { path: "/dev/fake-AAA", name: "OBSBOT Tiny 2", locationId: undefined },
+    {
+      path: "/dev/fake-AAA",
+      name: "OBSBOT Tiny 2",
+      locationId: undefined,
+      vid: 0x3564,
+      pid: 0xfef8,
+    },
   ]);
+});
+
+test("get() ignores a name-matching virtual camera and binds the real hardware", async () => {
+  // Regression: on Windows the OBSBOT-branded "OBSBOT Virtual Camera" DirectShow
+  // filter matched the old /obsbot/i candidacy, so a no-serial bind probed it on
+  // the shared scan helper and clobbered the real camera's session. With the
+  // hardware-identity gate it has no vid/pid and is never a candidate.
+  //
+  // Pin a non-Linux platform: the strict vid/pid gate applies on Windows/macOS,
+  // whose helpers report vid/pid. Linux still uses the name fallback (its helper
+  // does not report vid/pid yet), which is a documented, separate limitation.
+  const orig = process.platform;
+  Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+  try {
+    const mgr = new DeviceManager(
+      fakeHelperFactory([
+        { serial: "AAA", locationId: 1 },
+        { serial: "VIRT", name: "OBSBOT Virtual Camera", virtual: true },
+      ]),
+    );
+    const t = await mgr.get(); // no selector: must resolve unambiguously to the real one
+    expect(await t.readSerial()).toBe("AAA");
+  } finally {
+    Object.defineProperty(process, "platform", { value: orig, configurable: true });
+  }
 });
 
 test("listCameras() reports available cameras with their serial", async () => {

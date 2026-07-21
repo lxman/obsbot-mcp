@@ -5,7 +5,36 @@ import { WindowsTransport } from "../transport/windows.js";
 import { LinuxTransport } from "../transport/linux.js";
 import { MacosTransport } from "../transport/macos.js";
 
+// USB vendor ID 0x3564 is registered to **Remo Inc.** — the manufacturer. OBSBOT
+// is a Remo product brand, and Remo ships non-OBSBOT (and non-camera) devices
+// under the same VID, so candidacy must gate on VID **and** a known model PID —
+// never VID alone. Add a PID here (and mirror it in native/macos/helper.m's
+// OBSBOT_MODEL_PIDS) when a new OBSBOT camera model is verified on hardware.
+const REMO_VID = 0x3564;
+const OBSBOT_MODEL_PIDS = new Map<number, Set<number>>([
+  [REMO_VID, new Set<number>([0xfef8 /* Tiny 2 */])],
+]);
+
+// Legacy name match — used ONLY as a fallback on platforms whose helper does not
+// yet report USB vid/pid (Linux today: its /dev/videoN paths carry no USB
+// identity). Windows and macOS helpers report vid/pid, so there the gate is
+// strict and branded software sources — e.g. the "OBSBOT Virtual Camera"
+// DirectShow filter, which matched this regex and poisoned multi-candidate
+// binding — are correctly excluded.
 const OBSBOT_NAME_RE = /obsbot/i;
+
+/**
+ * Is this enumerated device a controllable OBSBOT camera worth binding? On
+ * Windows/macOS the helper reports USB vid/pid, so gate strictly on the Remo
+ * VID + known-model PID table (a software "OBSBOT Virtual Camera" has no vid/pid
+ * and is rejected). On Linux the helper does not report vid/pid yet, so fall
+ * back to the name match there until it does.
+ */
+function isObsbotCamera(d: DeviceInfo): boolean {
+  if (process.platform === "linux") return OBSBOT_NAME_RE.test(d.name);
+  if (d.vid === undefined || d.pid === undefined) return false;
+  return OBSBOT_MODEL_PIDS.get(d.vid)?.has(d.pid) ?? false;
+}
 
 /** Thrown by get() with no selector when more than one camera is attached. */
 export class AmbiguousCameraError extends Error {
@@ -165,7 +194,7 @@ export class DeviceManager {
   private async bind(wantSerial?: string): Promise<{ transport: ObsbotTransport; serial: string }> {
     const helper = await this.getScanHelper();
     const devices = await helper.enumerate();
-    const candidates = devices.filter((d) => OBSBOT_NAME_RE.test(d.name));
+    const candidates = devices.filter(isObsbotCamera);
 
     const found = new Map<string, { locationId?: number; name: string }>();
     let matched: ScanMatch | undefined;
@@ -341,7 +370,7 @@ export class DeviceManager {
 
     const helper = await this.getScanHelper();
     const devices = await helper.enumerate();
-    const candidates = devices.filter((d) => OBSBOT_NAME_RE.test(d.name));
+    const candidates = devices.filter(isObsbotCamera);
 
     for (const d of candidates) {
       // locationId is macOS-only (undefined on Linux/Windows); `path` is

@@ -43,6 +43,7 @@
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
+#include <cctype>
 
 #pragma comment(lib, "strmiids.lib")
 #pragma comment(lib, "ole32.lib")
@@ -151,6 +152,29 @@ static std::vector<BYTE> fromHex(const std::string& h) {
     b.push_back((BYTE)((hi << 4) | lo));
   }
   return b;
+}
+
+// Parse a 4-hex-digit value that immediately follows `key` (e.g. "vid_") in a
+// DirectShow moniker path, case-insensitively. Real USB devices carry
+// "usb#vid_XXXX&pid_XXXX..."; software/virtual sources (@device:sw:, NDI) do
+// not, so a hit here cleanly marks a hardware camera vs a branded virtual one
+// (the "OBSBOT Virtual Camera" filter has no vid/pid). Returns -1 when the key
+// or its four hex digits are absent.
+static int parseHexAfter(const std::string& s, const std::string& key) {
+  std::string ls;
+  ls.reserve(s.size());
+  for (char c : s) ls += (char)tolower((unsigned char)c);
+  size_t pos = ls.find(key);
+  if (pos == std::string::npos) return -1;
+  pos += key.size();
+  if (pos + 4 > ls.size()) return -1;
+  int val = 0;
+  for (int i = 0; i < 4; ++i) {
+    int n = hexNibble(ls[pos + i]);
+    if (n < 0) return -1;
+    val = (val << 4) | n;
+  }
+  return val;
 }
 
 // Escape a string for embedding as a JSON string value (device names /
@@ -314,7 +338,15 @@ static void doEnumerate() {
     std::string path = wto(disp);
     if (!first) out << ",";
     first = false;
-    out << "{\"path\":\"" << jsonEscape(path) << "\",\"name\":\"" << jsonEscape(name) << "\"}";
+    // USB VID/PID live in the pnp moniker ("usb#vid_XXXX&pid_XXXX..."). Emit
+    // them so the manager can gate camera candidacy on hardware identity rather
+    // than name; software/virtual sources have no vid/pid and are skipped.
+    int vid = parseHexAfter(path, "vid_");
+    int pid = parseHexAfter(path, "pid_");
+    out << "{\"path\":\"" << jsonEscape(path) << "\",\"name\":\"" << jsonEscape(name) << "\"";
+    if (vid >= 0) out << ",\"vid\":" << vid;
+    if (pid >= 0) out << ",\"pid\":" << pid;
+    out << "}";
     if (bag) bag->Release();
     if (disp) CoTaskMemFree(disp);
     VariantClear(&vName);

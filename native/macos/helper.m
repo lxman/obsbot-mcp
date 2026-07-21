@@ -49,9 +49,14 @@
 // Constants
 // ---------------------------------------------------------------------------
 
-// OBSBOT Tiny 2 USB identifiers
-static const uint16_t OBSBOT_VID = 0x3564;
-static const uint16_t TINY2_PID  = 0xFEF8;
+// USB vendor ID 0x3564 is registered to Remo Inc. — OBSBOT's manufacturer. Remo
+// ships non-OBSBOT devices under this VID, so gate on VID + a known model PID,
+// never VID alone. Mirror OBSBOT_MODEL_PIDS with OBSBOT_MODEL_PIDS in
+// src/device/manager.ts when a new OBSBOT camera model is verified on hardware.
+static const uint16_t REMO_VID = 0x3564;
+static const uint16_t OBSBOT_MODEL_PIDS[] = { 0xFEF8 /* Tiny 2 */ };
+static const size_t OBSBOT_MODEL_COUNT =
+    sizeof(OBSBOT_MODEL_PIDS) / sizeof(OBSBOT_MODEL_PIDS[0]);
 
 // UVC entity IDs (from PROTOCOL.md — confirmed on hardware)
 static const uint8_t  UVC_CT       = 0x01;  // Camera Terminal: zoom, exposure
@@ -298,6 +303,20 @@ static uint32_t usbLocationID(io_service_t svc) {
   return loc;
 }
 
+// Read a USB service's idProduct (the model PID). Reported up to the manager so
+// it can gate camera candidacy on hardware identity. Returns 0 on failure.
+static uint16_t usbProductID(io_service_t svc) {
+  CFMutableDictionaryRef props = NULL;
+  uint16_t pid = 0;
+  if (IORegistryEntryCreateCFProperties(svc, &props, kCFAllocatorDefault, kNilOptions)
+      == kIOReturnSuccess && props) {
+    NSNumber *n = [(__bridge NSDictionary *)props objectForKey:@"idProduct"];
+    if (n) pid = (uint16_t)[n unsignedShortValue];
+    CFRelease(props);
+  }
+  return pid;
+}
+
 // Does this AVFoundation uniqueID belong to the USB device at `loc`?
 //
 // macOS builds a UVC camera's uniqueID as "0x" + locationID(hex) + VID(4) + PID(4).
@@ -310,9 +329,11 @@ static uint32_t usbLocationID(io_service_t svc) {
 // the first place to look.
 static BOOL uniqueIDMatchesLocation(NSString *uniqueID, uint32_t loc) {
   if (!uniqueID || uniqueID.length == 0 || loc == 0) return NO;
-  NSString *exact = [NSString stringWithFormat:@"0x%x%04x%04x",
-                     loc, (unsigned)OBSBOT_VID, (unsigned)TINY2_PID];
-  if ([uniqueID caseInsensitiveCompare:exact] == NSOrderedSame) return YES;
+  for (size_t i = 0; i < OBSBOT_MODEL_COUNT; i++) {
+    NSString *exact = [NSString stringWithFormat:@"0x%x%04x%04x",
+                       loc, (unsigned)REMO_VID, (unsigned)OBSBOT_MODEL_PIDS[i]];
+    if ([uniqueID caseInsensitiveCompare:exact] == NSOrderedSame) return YES;
+  }
   NSString *locHex = [NSString stringWithFormat:@"%x", loc];
   return [uniqueID localizedCaseInsensitiveContainsString:locHex];
 }
@@ -543,7 +564,9 @@ static void doVersion(void) {
 
 static void doEnumerate(void) {
   NSArray *avDevices = avfEnumerateCameras();
-  NSArray *usbServices = findUsbServices(OBSBOT_VID, TINY2_PID);
+  NSMutableArray *usbServices = [NSMutableArray array];
+  for (size_t i = 0; i < OBSBOT_MODEL_COUNT; i++)
+    [usbServices addObjectsFromArray:findUsbServices(REMO_VID, OBSBOT_MODEL_PIDS[i])];
   NSMutableArray *deviceList = [NSMutableArray array];
 
   if (usbServices.count > 0) {
@@ -576,11 +599,14 @@ static void doEnumerate(void) {
       }
 
       // locationID is reported so callers can correlate without re-deriving it
-      // from the uniqueID string format.
+      // from the uniqueID string format. vid/pid let the manager gate camera
+      // candidacy on hardware identity, matching the Windows/Linux helpers.
       [deviceList addObject:@{
         @"path": avUniqueID ?: @"",
         @"name": product,
         @"locationId": @(loc),
+        @"vid": @(REMO_VID),
+        @"pid": @(usbProductID(service)),
       }];
     }
   } else {
@@ -617,7 +643,9 @@ static void doOpen(NSString *path) {
   // Find the matching USB device service, read its VideoControl interface
   // number, and open the *device* (not the interface — UVCAssistant owns that)
   // for control transfers on the default control endpoint.
-  NSArray *services = findUsbServices(OBSBOT_VID, TINY2_PID);
+  NSMutableArray *services = [NSMutableArray array];
+  for (size_t i = 0; i < OBSBOT_MODEL_COUNT; i++)
+    [services addObjectsFromArray:findUsbServices(REMO_VID, OBSBOT_MODEL_PIDS[i])];
   IOUSBDeviceInterface **udev = NULL;
   uint8_t ctrlIfNum = 0;
   BOOL haveCtrlIf = NO;
