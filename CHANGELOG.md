@@ -30,10 +30,24 @@
   Priming failure is non-fatal — it runs after `promote()`, so throwing would escape `bind()` with
   the camera already registered.
 
-  Verified end to end on hardware with the real `DeviceManager` and zero tool calls between the
-  unplug and the observation: departure closes the registry helper, the watcher alone hears the
-  arrival, and the camera re-binds itself. Also verified with the watcher `SIGKILL`ed mid-session,
-  where the departure rebuilds it.
+  Verified end to end on **both platforms**, with the real `DeviceManager` and zero tool calls
+  between the unplug and the observation — a helper spawned to check the state would itself
+  enumerate, become an eligible receiver, and make the result meaningless.
+
+  Recovery behaviour now differs by platform, deliberately, and every cell is hardware-measured:
+
+  | scenario | macOS | Windows |
+  |---|---|---|
+  | same-port replug | proactive re-bind | proactive re-bind |
+  | different-port replug | proactive re-bind | recovers on the next tool call |
+  | watcher dies mid-absence | recovers proactively | recovers on the next tool call |
+
+  The Windows rows follow from the `g_knownPaths` gate, which is not a defect to be removed: it is
+  what filters the Tiny 2's `MI_02` audio interface, which registers under `KSCATEGORY_CAPTURE`
+  with an identical VID/PID and otherwise fires a phantom second camera. macOS filters on
+  `hasMediaType:AVMediaTypeVideo` and has no equivalent problem, and its re-bind is keyed to the
+  camera's **serial** rather than its path, so a changed port is invisible to it. Both Windows rows
+  degrade to the pre-fix behaviour — one extra call — rather than stranding anything.
 
 - Mid-session device-loss recovery now works on **Windows**. `DEVICE_LOST_SIGNATURES` had entries
   for macOS and Linux but none for Windows, because the DirectShow removal code had never been

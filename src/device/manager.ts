@@ -264,16 +264,30 @@ export class DeviceManager {
    * it. macOS has no such constraint: an arm primed during an absence received
    * the arrival in the same millisecond as one primed while present.
    *
+   * Both halves are now MEASURED, one platform each, same three-arm experiment:
+   *
+   *            primed-present   never-primed   primed-during-absence
+   *   macOS         yes              NO                 yes
+   *   Windows       yes              NO                 NO
+   *
+   * The Windows run logged its own mechanism rather than inferring it — the
+   * absent-camera enumerate recorded "Tiny 2 in its list = false", so there was
+   * no path to cache and the arrival died at helper.cpp:1022.
+   *
    * PRIMING REPEATS ON EVERY CALL, and that is Windows insurance specifically.
    * macOS does NOT need it — measured across two full replug cycles, a watcher
    * primed once at startup kept delivering (arrived=2, departed=2), identical
    * to one that re-primed after every departure. The prime is a one-time
-   * activation there, not a lease. But on Windows a watcher whose predecessor
-   * DIED during an absence gets replaced while the camera is gone, never caches
-   * the path, and never self-corrects, because the guard below would otherwise
-   * early-return on a watcher that is alive and useless. Re-priming means the
-   * next successful bind — camera present by definition — repairs it. That
-   * reasoning is read from helper.cpp and is NOT verified on hardware.
+   * activation there, not a lease. On Windows a watcher whose predecessor DIED
+   * during an absence gets replaced while the camera is gone, never caches the
+   * path, and never self-corrects, because the guard below would otherwise
+   * early-return on a watcher that is alive and useless. Hardware-confirmed on
+   * Windows: that scenario ends `available`, never `bound`, with no arrival ever
+   * seen — where the same code on macOS recovers.
+   *
+   * So the repeat only helps at a moment the camera is PRESENT. Re-priming
+   * during an absence is a no-op on Windows; only the next successful bind can
+   * cure a deaf watcher there.
    *
    * Costs one idle process once a camera has been bound. It opens nothing, so
    * it holds no exclusive USB handle and the camera stays available to Zoom,

@@ -213,7 +213,11 @@ test("a watcher replaced while the camera is away is re-primed by the next bind"
   // macOS does not need this — measured across two full replug cycles, a single
   // prime at startup kept delivering (arrived=2 departed=2, identical to an arm
   // that re-primed after every departure). It is here for the Windows path,
-  // which is read from helper.cpp and NOT verified on hardware.
+  // which is now hardware-confirmed on that platform: watcher SIGKILLed while
+  // bound, cable out, replacement born during the absence, cable back in — no
+  // arrival was ever seen and the camera read `available`, never `bound`. The
+  // identical run on macOS recovers proactively. This test therefore encodes a
+  // real Windows failure, not a hypothetical one.
   const bus = fakeBus();
   const mgr = managerOn(bus);
 
