@@ -68,16 +68,29 @@ async function main() {
   const jsonFlag = process.argv.indexOf("--json");
   const startedAt = new Date().toISOString();
 
-  const helper = new HelperProcess(process.env.OBSBOT_HELPER_CMD?.split(" "));
-  await helper.start();
+  // A fresh, independently-started process per call — matches production's
+  // helperFactory contract (src/device/helper-factory.ts). A single shared
+  // instance corrupts the bound session as soon as anything scans a second
+  // time: this camera exposes two V4L2 nodes on Linux (one with the vendor
+  // XU, one without), and obsbot_devices's listCameras() probes the unbound
+  // sibling node via getScanHelper() to report it available/busy. With a
+  // shared helper that probe reopens the SAME process on the other node,
+  // silently switching its fd out from under the already-bound registry
+  // entry — every call after that fails with "no XU unit found". Reproduced
+  // 2026-07-21.
+  const makeHelper = async () => {
+    const h = new HelperProcess(process.env.OBSBOT_HELPER_CMD?.split(" "));
+    await h.start();
+    return h;
+  };
 
-  // Hoisted so the finally block can reuse the SAME open transport. Opening a
-  // second one during teardown risks failing exactly when the run has already
-  // gone wrong, which is when leaving the camera asleep matters most.
+  // Hoisted so the finally block can tear down whatever the factory spawned
+  // (registry helper, scratch scanner, bus watcher) even if setup fails early.
+  let mgr = null;
   let byName = null;
 
   try {
-    const mgr = new DeviceManager(async () => helper);
+    mgr = new DeviceManager(makeHelper);
     // Bind the single camera eagerly; createTools resolves per-camera via mgr.get()
     // inside each handler (no `camera` selector => this one bound camera).
     await mgr.openFirstObsbot();
@@ -185,10 +198,13 @@ async function main() {
     } catch {
       /* teardown is best-effort; never mask the original failure */
     }
-    // close(), not stop(): the child process keeps Node's event loop alive, so a
-    // wrong method name here makes the script hang after its work is done. This
-    // is the same rough edge documented for scripts/e2e.mjs.
-    await helper.close();
+    // shutdown(), not a single close(): the factory now spawns one process per
+    // scan/watch call (registry helper, scratch scanner, bus watcher), and each
+    // must be closed explicitly or it leaks — mgr.shutdown() owns all of them.
+    // close(), not stop(), underneath: the child process keeps Node's event
+    // loop alive, so a wrong method name here makes the script hang after its
+    // work is done. This is the same rough edge documented for scripts/e2e.mjs.
+    await mgr?.shutdown();
   }
 }
 
