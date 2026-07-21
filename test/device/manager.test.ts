@@ -449,15 +449,19 @@ test("invalidate() swallows a helper whose close() throws (best-effort) and stil
 /** Fake helper whose device can be yanked mid-session while the process lives. */
 function yankableHelperFactory(serial: string) {
   const spawned: { deviceLost: boolean }[] = [];
+  // Set true to make the next scan find nothing, so a bind attempt fails.
+  const state = { failNextBind: false };
   const factory = async (): Promise<HelperProcess> => {
     let lastSeq = 0;
     const self = {
       deviceLost: false,
       isDead: false,
       start: vi.fn(async () => {}),
-      enumerate: vi.fn(async () => [
-        { path: "/dev/yank", name: "OBSBOT Tiny 2", locationId: 7, vid: 0x3564, pid: 0xfef8 },
-      ]),
+      enumerate: vi.fn(async () =>
+        state.failNextBind
+          ? []
+          : [{ path: "/dev/yank", name: "OBSBOT Tiny 2", locationId: 7, vid: 0x3564, pid: 0xfef8 }],
+      ),
       open: vi.fn(async () => 1),
       xuSet: vi.fn(async (_s: number, data: Buffer) => {
         lastSeq = data.readUInt16LE(2);
@@ -471,7 +475,11 @@ function yankableHelperFactory(serial: string) {
     spawned.push(self);
     return self as unknown as HelperProcess;
   };
-  return Object.assign(factory, { spawned });
+  return Object.assign(factory, {
+    spawned,
+    get failNextBind() { return state.failNextBind; },
+    set failNextBind(v: boolean) { state.failNextBind = v; },
+  });
 }
 
 test("get() re-binds after the bound helper loses its device, without the process dying", async () => {
@@ -651,4 +659,137 @@ test("a rejected candidate DOES discard the scan helper", async () => {
   const mgr = new DeviceManager(factory);
   await expect(mgr.get()).rejects.toThrow();
   expect((factory.spawned[0] as unknown as { close: ReturnType<typeof vi.fn> }).close).toHaveBeenCalled();
+});
+
+// ---------------------------------------------------------------------------
+//  Reacting to pushed camera events.
+//
+//  Today the manager only learns the camera changed by an op FAILING, which is
+//  why obsbot_devices reports a phantom `bound` entry with a serial for a camera
+//  sitting unplugged on the desk until something else fails first. With the
+//  helper running a run loop it can push arrival/removal, so the manager can
+//  react before anyone calls a tool.
+//
+//  Arrival deliberately re-binds ONLY a camera this process already held. A
+//  server that never bound anything stays hands-off, because the Tiny 2 is a
+//  device Zoom / OBS / OBSBOT Center also want and grabbing it unasked would
+//  make it busy for them.
+// ---------------------------------------------------------------------------
+
+test("a departure event drops the binding without waiting for a call to fail", async () => {
+  const factory = yankableHelperFactory("AAA");
+  const mgr = new DeviceManager(factory);
+  await mgr.get();
+  expect((await mgr.listCameras()).some((c) => c.status === "bound")).toBe(true);
+
+  await mgr.handleCameraDeparted({ path: "/dev/yank", name: "OBSBOT Tiny 2" });
+
+  expect((await mgr.listCameras()).some((c) => c.status === "bound")).toBe(false);
+});
+
+test("a departure closes the helper rather than leaking it", async () => {
+  // Same reason pruneDeadEntries closes: a helper left running keeps holding the
+  // device, so the replacement can never open it.
+  const factory = yankableHelperFactory("AAA");
+  const mgr = new DeviceManager(factory);
+  await mgr.get();
+  const stale = factory.spawned[0]! as unknown as { close: ReturnType<typeof vi.fn> };
+
+  await mgr.handleCameraDeparted({ path: "/dev/yank", name: "OBSBOT Tiny 2" });
+
+  expect(stale.close).toHaveBeenCalled();
+});
+
+test("a departure for a path we never bound leaves the binding alone", async () => {
+  const factory = yankableHelperFactory("AAA");
+  const mgr = new DeviceManager(factory);
+  await mgr.get();
+
+  await mgr.handleCameraDeparted({ path: "/dev/someone-elses", name: "Other Cam" });
+
+  expect((await mgr.listCameras()).some((c) => c.status === "bound")).toBe(true);
+});
+
+test("an arrival re-binds a camera this process previously held", async () => {
+  const factory = yankableHelperFactory("AAA");
+  const mgr = new DeviceManager(factory);
+  await mgr.get();                                     // everBound now has AAA
+  await mgr.handleCameraDeparted({ path: "/dev/yank", name: "OBSBOT Tiny 2" });
+  expect((await mgr.listCameras()).some((c) => c.status === "bound")).toBe(false);
+
+  await mgr.handleCameraArrived({ path: "/dev/yank", name: "OBSBOT Tiny 2" });
+
+  expect((await mgr.listCameras()).some((c) => c.status === "bound")).toBe(true);
+});
+
+test("an arrival does NOT bind a camera this process never held", async () => {
+  // Never grab a camera unasked.
+  const factory = yankableHelperFactory("AAA");
+  const mgr = new DeviceManager(factory);
+
+  await mgr.handleCameraArrived({ path: "/dev/yank", name: "OBSBOT Tiny 2" });
+
+  expect(factory.spawned).toHaveLength(0);             // arrival opened nothing
+  // The camera is attached, so listCameras() rightly offers it as `available`.
+  // The property under test is that WE did not take it.
+  const cams = await mgr.listCameras();
+  expect(cams.some((c) => c.status === "bound")).toBe(false);
+});
+
+test("an arrival while already bound does not rebind or spawn another helper", async () => {
+  const factory = yankableHelperFactory("AAA");
+  const mgr = new DeviceManager(factory);
+  await mgr.get();
+  const spawnedBefore = factory.spawned.length;
+
+  await mgr.handleCameraArrived({ path: "/dev/yank", name: "OBSBOT Tiny 2" });
+
+  expect(factory.spawned.length).toBe(spawnedBefore);
+});
+
+test("a failed re-bind on arrival is swallowed, not thrown at the event source", async () => {
+  // The caller is a stdout line handler; an unhandled rejection there would take
+  // down the reader and wedge every in-flight request.
+  const factory = yankableHelperFactory("AAA");
+  const mgr = new DeviceManager(factory);
+  await mgr.get();
+  await mgr.handleCameraDeparted({ path: "/dev/yank", name: "OBSBOT Tiny 2" });
+  factory.failNextBind = true;
+
+  await expect(
+    mgr.handleCameraArrived({ path: "/dev/yank", name: "OBSBOT Tiny 2" }),
+  ).resolves.toBeUndefined();
+});
+
+test("duplicate departure events are idempotent", async () => {
+  // Observed on hardware: EVERY live helper has its own run loop and observers,
+  // so a single unplug produced one event per helper (registry + scan). Rather
+  // than dedupe, the handlers are required to be safely repeatable.
+  const factory = yankableHelperFactory("AAA");
+  const mgr = new DeviceManager(factory);
+  await mgr.get();
+
+  await mgr.handleCameraDeparted({ path: "/dev/yank", name: "OBSBOT Tiny 2" });
+  await mgr.handleCameraDeparted({ path: "/dev/yank", name: "OBSBOT Tiny 2" });
+  await mgr.handleCameraDeparted({ path: "/dev/yank", name: "OBSBOT Tiny 2" });
+
+  expect((await mgr.listCameras()).some((c) => c.status === "bound")).toBe(false);
+});
+
+test("duplicate arrival events do not stack up bindings or helpers", async () => {
+  const factory = yankableHelperFactory("AAA");
+  const mgr = new DeviceManager(factory);
+  await mgr.get();
+  await mgr.handleCameraDeparted({ path: "/dev/yank", name: "OBSBOT Tiny 2" });
+  const before = factory.spawned.length;
+
+  await mgr.handleCameraArrived({ path: "/dev/yank", name: "OBSBOT Tiny 2" });
+  const afterFirst = factory.spawned.length;
+  await mgr.handleCameraArrived({ path: "/dev/yank", name: "OBSBOT Tiny 2" });
+  await mgr.handleCameraArrived({ path: "/dev/yank", name: "OBSBOT Tiny 2" });
+
+  expect(factory.spawned.length).toBe(afterFirst);   // later arrivals are no-ops
+  expect(afterFirst).toBeGreaterThan(before);        // the first one did re-bind
+  const bound = (await mgr.listCameras()).filter((c) => c.status === "bound");
+  expect(bound).toHaveLength(1);
 });
