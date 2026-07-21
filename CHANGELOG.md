@@ -18,6 +18,26 @@
 - The MCP server handshake and all three native helpers reported version `0.1.0` while the package
   was at `0.4.0`. All four now report the real version.
 
+- A helper process that died or wedged hung the server indefinitely instead of failing. `rpcRaw()`
+  built a resolve-only promise and `HelperProcess` registered no `exit`/`error` handler, so a
+  request sent to a dead helper could never settle — the tool call simply never returned, with no
+  error and no timeout. Requests now reject when the child dies, and a per-request timeout (10s
+  default; 30s plus the caller's `settleMs` for `snapshot`) covers the other shape, a helper that
+  stays alive but stops answering — the likelier form of a driver-level fault, which no death
+  handler can catch. On timeout the queue slot is kept as a tombstone, since responses correlate by
+  position and dropping it would desync every later call.
+
+  This also restores automatic recovery. `ensureReady()` already self-heals on a thrown error
+  (`invalidate()` → re-bind → fresh helper), so a hang was silently disabling the respawn path that
+  already existed. Verified on hardware: killing the helper mid-session now recovers in ~800 ms with
+  `reconnected: true`. Recovery stays bounded — `ensureReady` self-heals exactly once per call, so a
+  permanently broken helper costs one spawn attempt per call (measured: ~60 ms, always
+  `reason: "unreachable"`) rather than looping.
+
+- `DeviceManager` no longer hands out a cached scan helper whose process has died. `invalidate()`
+  drops only registry entries, so a helper that died mid-scan — before `promote()` moved it into the
+  registry — stayed cached and every later scan talked to a dead process.
+
 ### Internal
 
 - Added `test/mcp/framing-seam.test.ts`, which drives raw 60-byte status blocks through the real
