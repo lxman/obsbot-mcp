@@ -51,6 +51,28 @@
   what to do next ("the connection resets automatically — retry this call") instead of surfacing bare
   internals like `helper process exited (code 1, signal none)`.
 
+- A camera that enumerates and opens but cannot be identified no longer reports as no camera at all.
+  `DeviceManager.bind()` and `listCameras()` discarded every candidate failure in a bare
+  `catch { continue }`, so a device whose `readSerial()` failed produced the same
+  `no OBSBOT camera found` a caller gets with nothing plugged in, plus a `status: "busy"` entry with
+  no indication of which of two very different causes applied — another process holding the device,
+  or the vendor mailbox going quiet. Rejection reasons now aggregate into the thrown error
+  (`no OBSBOT camera found — 1 candidate(s) rejected: <path>: readSerial: no valid UG_GET_SN reply`)
+  and into an optional `reason` on each `busy` entry from `obsbot_devices`. The genuinely-empty case
+  still throws the bare message, pinned by a test. Found while debugging exactly this situation on
+  macOS hardware, where recovering the reason the code already had and threw away cost most of a
+  session.
+
+- `obsbot_debug_probe`'s `mode: "query"` polled the vendor reply mailbox with no delay between
+  attempts — the same defect `read-serial.ts` was fixed for earlier, never backported. All eight
+  attempts complete in roughly 1–2 ms, so for any command the device does not answer almost
+  immediately the loop finishes inside the reply gap and reports `no valid reply` for a command
+  that was in fact answered correctly. The impact is opcode-dependent, which is why it went
+  unnoticed: cached state such as `AI_GET_QUICK_STATUS` came back fast enough that even the
+  un-delayed loop caught it (3 of 3 attempts), while anything reading persistent storage is slower.
+  Measured on `darwin-arm64` hardware over 25 trials of `UG_GET_SN`: 24 failures (96%) without the
+  delay, 0 with it. The loop now waits 30 ms before each read, matching `read-serial.ts`.
+
 ### Internal
 
 - Added `test/mcp/framing-seam.test.ts`, which drives raw 60-byte status blocks through the real
@@ -63,6 +85,18 @@
   any of the three native helpers drifts from `package.json`. The helpers compile separately and
   `src/` cannot import `package.json` (`rootDir: "src"`), so the string has to be duplicated — this
   makes the duplication safe rather than silent.
+
+- The `obsbot_debug_probe` tests now model the device's *latency*, not just its wire protocol. Every
+  existing probe test used a fake that answers instantly, which is precisely why none of them caught
+  the missing poll delay above; a fake that replies only after a set interval fails against the old
+  loop and passes against the new one. A companion test pins that a device which never answers still
+  gives up rather than hanging, so the delay cannot turn a real timeout into a stall.
+
+- `darwin-arm64` is now hardware-verified for USB vid/pid candidacy, serial readback and the
+  serial-keyed bind path, single-owner IPC coordination over the Unix socket, and transparent
+  helper-death recovery — none of which had been executed on a Mac before. The IORegistry vid/pid
+  emission in `native/macos/helper.m` had been written on Windows and never compiled on macOS; it
+  proved correct as written. See the README's platform table for the current state.
 
 ## [0.4.0] — 2026-07-20
 
