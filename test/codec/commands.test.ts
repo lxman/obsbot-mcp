@@ -279,11 +279,25 @@ test.each([
   [5, 0, "desk"],
   [4, 0, "whiteboard"],
   [3, 0, "hand"],
-  [6, 0, "hand"],
   [1, 0, "group"],
   [7, 9, "unknown"],
 ])("decodeStatus maps AI-mode tuple (%i,%i) -> %s", (m, n, mode) => {
   expect(decodeStatus(statusBlock({ 0x18: m, 0x1c: n })).aiMode).toBe(mode);
+});
+
+// m=6 is the MID-SWITCH TRANSIENT on this firmware, not a framing. It must decode
+// to "unknown" so verifyFraming() keeps polling through it (src/mcp/framing.ts
+// treats "unknown" as "not settled yet"). Mapping it to "hand" — as the
+// Tiny4Linux reference implies — makes every framing switch early-exit with a
+// false-negative `verified:"hand", matched:false` on a write that succeeded.
+//
+// Caught on hardware 2026-07-21, polling XU sel 6 at 60 ms across normal->upper-body:
+//   +   1ms  m=2 n=0   (before)
+//   +1948ms  m=6 n=0   (transient, ~200 ms wide)
+//   +2146ms  m=2 n=1   (landed)
+// Hand is m=3 on this firmware (HW-verified 2026-07-18), covered above.
+test("decodeStatus maps the m=6 mid-switch transient to 'unknown', not 'hand'", () => {
+  expect(decodeStatus(statusBlock({ 0x18: 6, 0x1c: 0 })).aiMode).toBe("unknown");
 });
 
 // ---------------------------------------------------------------------------

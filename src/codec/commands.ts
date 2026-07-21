@@ -421,10 +421,17 @@ const AI_MODE_TABLE: Record<string, AiModeStatus> = {
   "5,0": "desk",
   "4,0": "whiteboard",
   // Hand shows up as m=3 (= AiWorkModeType Hand) on the live Tiny 2 firmware
-  // (verified 2026-07-18); the Tiny4Linux reference lists m=6. Map both so the
-  // readback decodes on either.
+  // (verified 2026-07-18); the Tiny4Linux reference lists m=6.
+  //
+  // Do NOT also map "6,0" to "hand" to cover the reference's numbering. On this
+  // firmware m=6 is the MID-SWITCH TRANSIENT the device parks at while changing
+  // framing, so it must fall through to "unknown" — verifyFraming() (src/mcp/framing.ts)
+  // relies on "unknown" meaning "not settled yet" and keeps polling. Decoding the
+  // transient as a real framing made every switch early-exit with a false-negative
+  // `verified:"hand", matched:false` on a write that had actually succeeded.
+  // Wire evidence (2026-07-21, XU sel 6 @ 60 ms, normal->upper-body):
+  //   m=2,n=0 (before) -> m=6,n=0 (~200 ms transient) -> m=2,n=1 (landed).
   "3,0": "hand",
-  "6,0": "hand",
   "1,0": "group",
 };
 
