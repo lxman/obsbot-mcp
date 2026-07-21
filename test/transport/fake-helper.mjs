@@ -31,6 +31,15 @@ rl.on("line", (line) => {
       // Stay alive and never answer, simulating a helper wedged in the driver.
       // No 'exit' fires for this one, so only a timeout can unstick it.
       return;
+    case "device_gone":
+      // Stay ALIVE but report the device as no longer attached — the exact
+      // shape of an unplugged camera on macOS (kIOReturnNoDevice, 0xe00002c0).
+      // Hardware-observed 2026-07-21 after a cable pull.
+      return send({ ok: false, error: "xu_get: USB control request failed (0xe00002c0)" });
+    case "some_other_error":
+      // An ordinary failure that says nothing about the device being attached.
+      // Must NOT condemn a working binding.
+      return send({ ok: false, error: "xu_get: invalid hex" });
     case "enumerate":
       return send({
         ok: true,

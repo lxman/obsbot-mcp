@@ -37,12 +37,36 @@ const SUPPORTED: Record<string, string> = {
 const DEFAULT_RPC_TIMEOUT_MS = 10_000;
 const SNAPSHOT_RPC_TIMEOUT_MS = 30_000;
 
+// Errors that mean "the camera is no longer attached", as opposed to any other
+// operation failure. A helper stays ALIVE when its device is unplugged — only
+// the USB handle dies — so process death cannot detect this, and without a
+// separate signal the binding is stranded until the process is killed.
+//
+// Deliberately NARROW. Condemning a binding on any random error would be worse
+// than the bug it fixes: one bad argument would drop a healthy camera. Anything
+// not listed here leaves the binding alone.
+//
+//  - darwin: kIOReturnNoDevice. Hardware-observed 2026-07-21 on an unplug —
+//    every op returned "USB control request failed (0xe00002c0)". The adjacent
+//    0xe00002c5 is kIOReturnExclusiveAccess, already referenced elsewhere in
+//    this repo, which anchors the numbering.
+//  - linux: the helper formats errno via strerror(), so ENODEV is exactly
+//    "No such device".
+//
+// Windows is deliberately ABSENT: its helper reports DirectShow HRESULTs and
+// the device-removal code has not been observed on hardware. Guessing one risks
+// matching an unrelated failure and dropping a working binding, which is the
+// one outcome this list must never cause. Add it once it has been seen.
+const DEVICE_LOST_SIGNATURES = [/0xe00002c0/i, /No such device/i];
+
 export class HelperProcess {
   private proc?: ChildProcessByStdio<Writable, Readable, null>;
   private rl?: Interface;
   private queue: Array<{ resolve: (r: RpcResponse) => void; reject: (e: Error) => void }> = [];
   /** Set once the child is gone; every later request fails with this. */
   private dead?: Error;
+  /** Set once an op reports the DEVICE gone, even though the process lives on. */
+  private lostDevice = false;
 
   constructor(private commandOverride?: string[]) {}
 
@@ -176,7 +200,15 @@ export class HelperProcess {
 
   private async rpc(req: Record<string, unknown>, timeoutMs?: number): Promise<RpcResponse> {
     const resp = await this.rpcRaw(req, timeoutMs);
-    if (!resp.ok) throw new Error(resp.error ?? "helper error (no message)");
+    if (!resp.ok) {
+      const message = resp.error ?? "helper error (no message)";
+      // Flag BEFORE throwing, so this is recorded even for callers that swallow
+      // the error into their own { ok: false } result (obsbot_status does), and
+      // for every tool regardless of whether it routes through the readiness
+      // gate. DeviceManager drops flagged helpers on the next resolve.
+      if (DEVICE_LOST_SIGNATURES.some((re) => re.test(message))) this.lostDevice = true;
+      throw new Error(message);
+    }
     return resp;
   }
 
@@ -267,6 +299,16 @@ export class HelperProcess {
   /** True once the child has died (or close() was called) — see getScanHelper(). */
   get isDead(): boolean {
     return this.dead !== undefined;
+  }
+
+  /**
+   * True once an operation reported the camera as no longer attached, while
+   * this helper's PROCESS is still perfectly alive — the unplug case. Callers
+   * treat it exactly like isDead: the handle is unusable and the binding must
+   * be re-established, even though there is no corpse to notice.
+   */
+  get deviceLost(): boolean {
+    return this.lostDevice;
   }
 
   async close(): Promise<void> {

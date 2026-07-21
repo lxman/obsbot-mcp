@@ -103,3 +103,45 @@ test("close() is idempotent and does not wedge", async () => {
   await h.close();
   await mustSettle(h.close());
 });
+
+// ---------------------------------------------------------------------------
+//  A LIVE helper whose DEVICE went away.
+//
+//  Field test 2026-07-21 (macOS, unplug/replug on the same port): the old
+//  ~2-minute hang was gone -- calls failed in seconds -- but the binding never
+//  came back. Every later call kept failing, forever, because recovery keys on
+//  helper PROCESS death and this helper was perfectly alive; only its USB
+//  handle was dead. `pkill obsbot-helper` fixed it, which is what pinned the
+//  cause: the handled path works, the device-loss path did not exist.
+//
+//  Marking the helper lets the ALREADY-PROVEN prune-and-rebind path do the
+//  rest, and it sits below the tool layer, so it also covers tools that
+//  swallow their errors into { ok: false } instead of throwing.
+// ---------------------------------------------------------------------------
+
+test("a live helper reporting kIOReturnNoDevice is flagged as having lost its device", async () => {
+  const h = spawnFake();
+  await h.start();
+  await expect(mustSettle(rpcOf(h)({ op: "device_gone" }))).rejects.toThrow(/e00002c0/);
+  expect(h.deviceLost).toBe(true);
+  expect(h.isDead).toBe(false); // the PROCESS is fine -- that's the whole point
+  await h.close();
+});
+
+test("an ordinary helper error does NOT flag the device as lost", async () => {
+  // Condemning a working binding on any random failure would be worse than the
+  // bug: one bad argument would drop a healthy camera.
+  const h = spawnFake();
+  await h.start();
+  await expect(mustSettle(rpcOf(h)({ op: "some_other_error" }))).rejects.toThrow(/invalid hex/);
+  expect(h.deviceLost).toBe(false);
+  await h.close();
+});
+
+test("a healthy helper never reports a lost device", async () => {
+  const h = spawnFake();
+  await h.start();
+  await mustSettle(h.version());
+  expect(h.deviceLost).toBe(false);
+  await h.close();
+});
