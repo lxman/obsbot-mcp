@@ -43,6 +43,10 @@ export async function startServer(opts: { debug?: boolean } = {}): Promise<void>
   });
   const coordinator = new Coordinator(runLocal);
   await coordinator.start();
+  // Report the coordination role on STDERR (never stdout — that's the JSON-RPC
+  // channel). Useful for ops ("am I the owner or a client?") and observed by the
+  // ipc-hw-smoke harness to confirm a client really forwards to the owner.
+  console.error(`obsbot-mcp: ipc role=${coordinator.roleName}`);
 
   // Kill any recording/preview child processes when the server exits, so nothing
   // orphans, and drop the IPC endpoint / owner connection.
