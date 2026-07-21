@@ -161,7 +161,31 @@ export class DeviceManager {
    *   guarded in code — the proper fix belongs to multi-camera .mjs/CLI
    *   wiring, not to DeviceManager itself.
    */
-  constructor(private makeHelper: () => Promise<HelperProcess>) {}
+  /** True while an arrival re-bind ladder is running (see handleCameraArrived). */
+  private rebinding = false;
+
+  /**
+   * Delays before each arrival re-bind attempt, in order — so four attempts
+   * spanning ~4.5s, the first immediate.
+   *
+   * Sized from hardware, 2026-07-21: for many seconds after a USB
+   * re-enumeration the Tiny 2's vendor mailbox is intermittently not-ready
+   * (the reply slot reads back with its magic byte zeroed), and readSerial's
+   * own 8 x 30ms poll is too short to ride it out. Measured 22 failures in 80
+   * attempts across the first 14s after a replug, against 0 in 120 in steady
+   * state — so a single attempt on arrival is roughly a 1-in-4 coin flip, and
+   * losing it silently leaves the camera unbound until the user's next call.
+   * Four spread attempts make a lost re-bind unlikely without retrying forever
+   * at a camera that is simply not answering.
+   */
+  private arrivalBackoffMs: number[];
+
+  constructor(
+    private makeHelper: () => Promise<HelperProcess>,
+    opts: { arrivalBackoffMs?: number[] } = {},
+  ) {
+    this.arrivalBackoffMs = opts.arrivalBackoffMs ?? [0, 400, 1200, 3000];
+  }
 
   private createTransport(helper: HelperProcess): ObsbotTransport {
     if (process.platform === "linux") {
@@ -511,11 +535,27 @@ export class DeviceManager {
     if (this.everBound.size === 0) return; // never ours — stay hands-off
     // Something is already bound, so there is nothing to restore.
     if (this.registry.size > 0) return;
+    // One ladder at a time. Two would double the helper spawns and race two
+    // binds into promote(), which assumes the scratch helper is still there.
+    if (this.rebinding) return;
+
+    this.rebinding = true;
     try {
-      await this.bind();
-    } catch {
-      // Arrival is a hint, not a command. The device may still be settling
-      // (AVFoundation lags the USB bus); the next call binds normally.
+      for (const delay of this.arrivalBackoffMs) {
+        if (delay > 0) await new Promise((r) => setTimeout(r, delay));
+        // A tool call may have bound it while we waited — it got there first.
+        if (this.registry.size > 0) return;
+        try {
+          await this.bind();
+          return;
+        } catch {
+          // Keep trying: see the backoff's own comment for why one attempt is
+          // a coin flip. Arrival is still only a hint — if the ladder runs out
+          // the next tool call binds normally.
+        }
+      }
+    } finally {
+      this.rebinding = false;
     }
   }
 

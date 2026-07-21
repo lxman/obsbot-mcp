@@ -449,8 +449,16 @@ test("invalidate() swallows a helper whose close() throws (best-effort) and stil
 /** Fake helper whose device can be yanked mid-session while the process lives. */
 function yankableHelperFactory(serial: string) {
   const spawned: { deviceLost: boolean }[] = [];
-  // Set true to make the next scan find nothing, so a bind attempt fails.
-  const state = { failNextBind: false };
+  // failNextBind: hold every scan empty until cleared.
+  // failBinds: fail exactly N scans, then answer — the post-replug camera,
+  // whose vendor mailbox is mute for the first attempt or two and then fine.
+  // A counter rather than a timer keeps the retry tests deterministic.
+  const state = { failNextBind: false, failBinds: 0 };
+  const scanFails = (): boolean => {
+    if (state.failNextBind) return true;
+    if (state.failBinds > 0) { state.failBinds--; return true; }
+    return false;
+  };
   const factory = async (): Promise<HelperProcess> => {
     let lastSeq = 0;
     const self = {
@@ -458,7 +466,7 @@ function yankableHelperFactory(serial: string) {
       isDead: false,
       start: vi.fn(async () => {}),
       enumerate: vi.fn(async () =>
-        state.failNextBind
+        scanFails()
           ? []
           : [{ path: "/dev/yank", name: "OBSBOT Tiny 2", locationId: 7, vid: 0x3564, pid: 0xfef8 }],
       ),
@@ -475,11 +483,21 @@ function yankableHelperFactory(serial: string) {
     spawned.push(self);
     return self as unknown as HelperProcess;
   };
-  return Object.assign(factory, {
-    spawned,
-    get failNextBind() { return state.failNextBind; },
-    set failNextBind(v: boolean) { state.failNextBind = v; },
+  const f = Object.assign(factory, { spawned, failNextBind: false, failBinds: 0 });
+  // Object.assign copies a getter's VALUE, not the accessor. Declaring these as
+  // get/set in the object literal above therefore produced a plain `false`
+  // property: every `factory.failNextBind = true` wrote to that property,
+  // `state` never changed, and the fault injection was inert — so the tests
+  // that set it were binding successfully and passing for the wrong reason.
+  Object.defineProperty(f, "failNextBind", {
+    get: () => state.failNextBind,
+    set: (v: boolean) => { state.failNextBind = v; },
   });
+  Object.defineProperty(f, "failBinds", {
+    get: () => state.failBinds,
+    set: (v: number) => { state.failBinds = v; },
+  });
+  return f;
 }
 
 test("get() re-binds after the bound helper loses its device, without the process dying", async () => {
@@ -792,4 +810,84 @@ test("duplicate arrival events do not stack up bindings or helpers", async () =>
   expect(afterFirst).toBeGreaterThan(before);        // the first one did re-bind
   const bound = (await mgr.listCameras()).filter((c) => c.status === "bound");
   expect(bound).toHaveLength(1);
+});
+
+// ---------------------------------------------------------------------------
+//  Retrying the arrival re-bind.
+//
+//  Hardware, 2026-07-21: for many seconds after a USB re-enumeration the Tiny 2's
+//  vendor mailbox is intermittently not-ready — 22 of 80 readSerial attempts
+//  failed across the first 14s after a replug, against 0 of 120 in steady state.
+//  A single bind attempt on arrival is therefore a coin flip, and losing it was
+//  silent: the camera stayed unbound until the user's next tool call.
+//
+//  The retry is bounded and gives up: arrival is a hint, and a camera that never
+//  answers must not spawn helpers forever.
+// ---------------------------------------------------------------------------
+
+test("an arrival re-bind that loses the first attempt succeeds on a retry", async () => {
+  const factory = yankableHelperFactory("AAA");
+  const mgr = new DeviceManager(factory, { arrivalBackoffMs: [0, 0, 0] });
+  await mgr.get();
+  await mgr.handleCameraDeparted({ path: "/dev/yank", name: "OBSBOT Tiny 2" });
+
+  factory.failBinds = 1;   // the mute-mailbox attempt, then the device answers
+
+  await mgr.handleCameraArrived({ path: "/dev/yank", name: "OBSBOT Tiny 2" });
+
+  expect((await mgr.listCameras()).some((c) => c.status === "bound")).toBe(true);
+});
+
+test("the arrival re-bind gives up instead of retrying forever", async () => {
+  const factory = yankableHelperFactory("AAA");
+  const mgr = new DeviceManager(factory, { arrivalBackoffMs: [0, 0, 0] });
+  await mgr.get();
+  await mgr.handleCameraDeparted({ path: "/dev/yank", name: "OBSBOT Tiny 2" });
+  const spawnedBefore = factory.spawned.length;
+
+  factory.failNextBind = true;                       // never answers
+  await mgr.handleCameraArrived({ path: "/dev/yank", name: "OBSBOT Tiny 2" });
+
+  // Counted before listCameras(), which spawns a scan helper of its own and
+  // would otherwise be charged to the ladder.
+  const laddersSpawns = factory.spawned.length - spawnedBefore;
+  expect((await mgr.listCameras()).some((c) => c.status === "bound")).toBe(false);
+  // One spawn per attempt (a failed bind discards the scratch helper), bounded
+  // by the ladder — not an unbounded fork loop.
+  expect(laddersSpawns).toBe(3);
+});
+
+test("the arrival re-bind stops early once something else binds the camera", async () => {
+  // A tool call racing the ladder wins; the ladder must not bind a second time
+  // on top of it.
+  const factory = yankableHelperFactory("AAA");
+  const mgr = new DeviceManager(factory, { arrivalBackoffMs: [0, 0, 0] });
+  await mgr.get();
+  await mgr.handleCameraDeparted({ path: "/dev/yank", name: "OBSBOT Tiny 2" });
+
+  factory.failNextBind = true;
+  const ladder = mgr.handleCameraArrived({ path: "/dev/yank", name: "OBSBOT Tiny 2" });
+  factory.failNextBind = false;
+  await mgr.get();                                   // the tool call binds first
+  const spawnedAfterBind = factory.spawned.length;
+  await ladder;
+
+  expect(factory.spawned.length).toBe(spawnedAfterBind); // ladder spawned nothing more
+});
+
+test("a second arrival while a ladder is running does not start another", async () => {
+  const factory = yankableHelperFactory("AAA");
+  const mgr = new DeviceManager(factory, { arrivalBackoffMs: [0, 0, 0] });
+  await mgr.get();
+  await mgr.handleCameraDeparted({ path: "/dev/yank", name: "OBSBOT Tiny 2" });
+  const spawnedBefore = factory.spawned.length;
+
+  factory.failNextBind = true;
+  const first = mgr.handleCameraArrived({ path: "/dev/yank", name: "OBSBOT Tiny 2" });
+  const second = mgr.handleCameraArrived({ path: "/dev/yank", name: "OBSBOT Tiny 2" });
+  await Promise.all([first, second]);
+
+  // Two concurrent ladders would double the spawns and race two binds into
+  // promote(), which asserts on the scratch helper being present.
+  expect(factory.spawned.length - spawnedBefore).toBeLessThanOrEqual(3);
 });

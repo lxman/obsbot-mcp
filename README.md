@@ -265,19 +265,29 @@ What has actually been exercised against hardware, and what hasn't:
   helper does not report vid/pid yet, so a different OBSBOT may be *found* there — but the vendor
   command set is Tiny 2 specific either way. (On macOS the virtual camera cannot appear at all: the
   helper enumerates USB devices through the IORegistry, which a software camera never enters.)
-- **One macOS bind failure has been seen once and never reproduced.** On 2026-07-21 a Tiny 2
-  entered a state where the vendor reply mailbox (XU selector 2) returned only the host's own
-  echoed request frame — magic byte `0xaa` cleared to `0x00`, every other byte identical — for a
-  continuous 3.2 s of polling. `readSerial()` therefore threw, `bind()` found no serial, and every
-  tool that needs a bound camera failed with "no OBSBOT camera found" while the device was plainly
-  healthy: it enumerated with the correct vid/pid, opened, returned XU node 2, and kept serving a
-  live status block on selector 6. It has not recurred in roughly fifty subsequent trials, and the
-  trigger is unknown. Ruled out: reply latency (polled 3.2 s), the wrong extension unit (the
-  VideoControl interface exposes exactly one, `bUnitID 2`), the wrong `wLength` (every XU selector
-  is 60 bytes by `GET_LEN`), the reply arriving on another selector (1–19 swept), camera sleep
-  state, and contention from OBSBOT Center. If you hit it, the symptom is a mailbox read equal to
-  the frame you just sent with byte 0 zeroed; the bind error now names the rejected candidate and
-  the reason rather than reporting an absent camera.
+- **The vendor reply mailbox is unreliable for several seconds after a replug.** On 2026-07-21 a
+  Tiny 2 was seen returning only the host's own echoed request frame from the vendor reply mailbox
+  (XU selector 2) — magic byte `0xaa` cleared to `0x00`, every other byte identical — for a
+  continuous 3.2 s. `readSerial()` threw, `bind()` found no serial, and every tool needing a bound
+  camera failed with "no OBSBOT camera found" while the device was plainly healthy: correct
+  vid/pid, opened fine, XU node 2, live status block on selector 6.
+
+  That was unexplained for a while. It is now reproducible: **immediately after a USB
+  re-enumeration**. Polling `readSerial` every 50 ms across a replug failed 22 times in 80 attempts
+  spread over the first 14 s, against 0 in 120 in steady state; the first read after arrival showed
+  exactly the echoed-request signature above, and later failures showed the reply slot populated
+  but with its magic byte still zeroed. Ruled out as causes: stale per-process device state (the
+  same long-lived helper read a brand-new uniqueID cleanly at t+49 ms), re-opening the device
+  (0/40 either way), and the per-transport sequence counter restarting at 1 (0/80).
+
+  Consequence for callers: a bind attempted in the first seconds after a replug can fail even
+  though the camera is fine. Retrying works. The arrival-driven re-bind now retries on a bounded
+  ladder for this reason, and a `readSerial` failure reports what the mailbox actually held
+  (echoed request / unparseable / a reply to another request) rather than only "no valid reply".
+  Ruled out earlier and still ruled out: reply latency (polled 3.2 s), the wrong extension unit
+  (the VideoControl interface exposes exactly one, `bUnitID 2`), the wrong `wLength` (every XU
+  selector is 60 bytes by `GET_LEN`), the reply arriving on another selector (1–19 swept), camera
+  sleep state, and contention from OBSBOT Center.
 - **Two-camera operation is not yet hardware-verified.** The `camera` selector and the
   per-camera device registry are covered by the unit test suite against fake transports; running
   two physical Tiny 2s attached at once has not been confirmed on real hardware (a second unit

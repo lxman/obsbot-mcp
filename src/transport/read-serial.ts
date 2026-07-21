@@ -52,9 +52,14 @@ export async function readSerialVia(t: VendorReadPrimitives): Promise<string> {
   const req = encodeVendorGet("UG_GET_SN").buildFrame(seq);
   await t.xuRaw(VENDOR_XU_SELECTOR, req);
 
+  const seen = new Set<string>();
+  let last: Buffer = Buffer.alloc(0);
+
   for (let i = 0; i < POLL_ATTEMPTS; i++) {
     await sleep(POLL_DELAY_MS); // let the reply land before reading the mailbox
     const raw = await t.xuGetRaw(VENDOR_XU_SELECTOR, REPLY_LEN);
+    last = raw;
+    seen.add(raw.toString("hex"));
     try {
       const f = parseFrame(raw);
       if (f.cmd === UG_GET_SN_CMD && f.seq === seq && f.payload.length > 0) {
@@ -65,5 +70,38 @@ export async function readSerialVia(t: VendorReadPrimitives): Promise<string> {
       // keep polling.
     }
   }
-  throw new Error("readSerial: no valid UG_GET_SN reply");
+
+  // Report what the mailbox actually held. "No valid reply" alone cannot
+  // distinguish a mute device from one answering somebody else's request, and
+  // that ambiguity is why the 3.2s vendor-path outage of 2026-07-21 was never
+  // explained: the identifying datum was read eight times and discarded eight
+  // times. Reproduced since after a different-port replug, where the mailbox
+  // stays mute for the whole poll and answers ~420ms later.
+  const churn = seen.size === 1 ? "unchanged" : `${seen.size} distinct`;
+  throw new Error(
+    `readSerial: no valid UG_GET_SN reply — ${POLL_ATTEMPTS} reads, ${churn}; ` +
+      `mailbox ${describeMailbox(last, req, seq)}`,
+  );
+}
+
+/** One short phrase naming what a non-reply actually was. */
+function describeMailbox(raw: Buffer, req: Buffer, wantSeq: number): string {
+  // The signature of the 2026-07-21 outage: our own request handed straight
+  // back with the magic byte zeroed.
+  if (
+    raw.length === req.length &&
+    raw[0] === 0x00 &&
+    req[0] === 0xaa &&
+    raw.subarray(1).equals(req.subarray(1))
+  ) {
+    return "was our own request echoed back with the magic byte zeroed";
+  }
+  try {
+    const f = parseFrame(raw);
+    const empty = f.payload.length === 0 ? ", empty payload" : "";
+    return `held cmd 0x${f.cmd.toString(16)} seq ${f.seq}${empty} ` +
+      `(wanted cmd 0x${UG_GET_SN_CMD.toString(16)} seq ${wantSeq})`;
+  } catch (e) {
+    return `unparseable: ${(e as Error).message}; first bytes ${raw.subarray(0, 8).toString("hex")}`;
+  }
 }

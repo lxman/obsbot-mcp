@@ -168,3 +168,40 @@ replug and that reading binds.
 Run twice — once with the subscription inline in `startServer()`, then again
 after extracting `helperFactory` — because the second refactor changed the
 runtime path the first run had verified.
+
+### Follow-up: the port-change case, and why the re-bind now retries
+
+Same-port replug was clean 3/3. **Different-port replug failed 2/2** — the
+arrival fired, `bind()` ran, and it lost, silently, because arrival was treated
+as a hint with exactly one attempt.
+
+Probing found the cause is not the port and not the event: for several seconds
+after ANY USB re-enumeration the vendor reply mailbox is intermittently
+not-ready — the reply slot reads back with its magic byte zeroed. Polling
+`readSerial` every 50 ms across a replug failed **22 of 80** attempts spread
+over the first 14 s, against **0 of 120** in steady state. So a single attempt
+on arrival is roughly a 1-in-4 coin flip and the same-port/different-port split
+was luck.
+
+Killed along the way, each having looked convincing first:
+
+| hypothesis | killed by |
+|---|---|
+| stale per-process view of an unfamiliar uniqueID | the same helper read a brand-new uniqueID at t+49 ms |
+| the device needs warm-up time | the attempt that FAILED (t+274 ms) was later than one that worked (t+49 ms) |
+| re-opening the device disturbs it | 0/40 with re-open, 0/40 without |
+| the per-transport seq counter restarting at 1 | 0/80 across two arms |
+
+The first read after arrival held the host's own request with the magic byte
+zeroed — the exact signature of the 3.2 s bind failure previously recorded as
+unexplained in the README. That entry now has a reproducible trigger.
+
+Two changes followed: `handleCameraArrived` retries on a bounded ladder
+(`[0, 400, 1200, 3000]` ms, so ~4.5 s and then it stops), and `readSerial`'s
+error reports what the mailbox actually held instead of only "no valid reply" —
+the missing datum that left the original failure unexplained for a day.
+
+Hardware after the fix: a different-port replug self-healed to `bound` before
+any tool call. That run's first attempt succeeded on its own, so it confirms
+the path but does not by itself exercise the retry; the retry rests on the
+22/80 measurement and unit tests.
