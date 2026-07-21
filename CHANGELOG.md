@@ -38,6 +38,19 @@
   drops only registry entries, so a helper that died mid-scan — before `promote()` moved it into the
   registry — stayed cached and every later scan talked to a dead process.
 
+- Every tool now recovers from a helper death, not just the eleven that route through the readiness
+  gate. `DeviceManager.get()` drops a bound entry whose helper has died so the next resolve re-binds.
+  Previously only `ensureReady()` called `invalidate()`, so the other ~19 call sites (`obsbot_status`,
+  `obsbot_gimbal_position`, …) returned the same dead transport indefinitely and recovery depended on
+  the caller happening to invoke a *different* tool. Since the caller is an LLM, that hidden
+  dependency meant a weaker model would retry the failing tool or report broken hardware that was
+  actually fine. A death between calls is now invisible; a death mid-request costs one error, and the
+  next call succeeds. Live bindings are untouched, so there is no per-call spawn churn.
+
+- Transport error messages are written for the model that reads them: they state what happened and
+  what to do next ("the connection resets automatically — retry this call") instead of surfacing bare
+  internals like `helper process exited (code 1, signal none)`.
+
 ### Internal
 
 - Added `test/mcp/framing-seam.test.ts`, which drives raw 60-byte status blocks through the real
