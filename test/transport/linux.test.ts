@@ -16,7 +16,7 @@ function makeFakeHelper() {
     })),
     camCtrlSet: vi.fn(async (_p: number, _v: number, _f: number) => {}),
     camCtrlRange: vi.fn(async (_p: number) => ({ min: 0, max: 100 })),
-    camCtrlGet: vi.fn(async (_p: number) => ({ value: 300000, flags: 2 })),
+    camCtrlGet: vi.fn(async (_p: number) => ({ value: 288000, flags: 2 })),
     procAmpSet: vi.fn(async (_p: number, _v: number, _f: number) => {}),
     procAmpRange: vi.fn(async (_p: number) => ({ min: 0, max: 100 })),
     close: vi.fn(async () => {}),
@@ -75,7 +75,8 @@ test("camCtrl delegated to helper", async () => {
   const helper = makeFakeHelper();
   const t = new LinuxTransport(helper);
   const r = await t.camCtrlGet(0);
-  expect(r).toEqual({ value: 300, flags: 2 });
+  // 288000 arc-seconds / 3600 per degree = 80°.
+  expect(r).toEqual({ value: 80, flags: 2 });
 });
 
 test("procAmp delegated to helper", async () => {

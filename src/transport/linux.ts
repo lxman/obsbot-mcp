@@ -11,8 +11,16 @@ const RESPONSE_SELECTOR = 0x02;
 const DEFAULT_REPLY_LEN = 60;
 const STATUS_SELECTOR = 0x06;
 const STATUS_BLOCK_LEN = 60;
-// V4L2 pan_absolute/tilt_absolute step is 3600 millidegrees = 1 degree
-const DEG_TO_MDEG = 1000;
+// V4L2_CID_PAN_ABSOLUTE/TILT_ABSOLUTE map directly to the UVC CT_PANTILT_ABSOLUTE
+// control (Camera Terminal, selector 0x0D), whose unit is arc-seconds per both the
+// UVC and V4L2 specs — confirmed on hardware: pan range ±468000 / tilt ±324000,
+// step 3600, i.e. exactly ±130°/±90° at 3600 units per degree. A prior version of
+// this file divided by 1000 (mislabeled as "millidegrees"), which was wrong by a
+// factor of 3.6x on both the read and write side — self-consistently wrong, since
+// gimbalSet and camCtrlGet shared the same bad divisor, so a move-then-read check
+// always reported 0 error while the true physical angle was ~28% of what was asked
+// for. See GIMBAL-POSITION-USB-2026-07-21.md §5.
+const ARCSEC_PER_DEG = 3600;
 
 /**
  * Linux V4L2 transport — functionally identical to {@link WindowsTransport}
@@ -23,7 +31,7 @@ const DEG_TO_MDEG = 1000;
  * Key difference: gimbal movement uses V4L2 pan_absolute/tilt_absolute
  * (hardware-proven to physically move the gimbal), NOT vendor V3 frames,
  * because vendor frames break V4L2 position readback on this device.
- * camCtrlGet for pan/tilt converts V4L2 millidegrees to degrees to match
+ * camCtrlGet for pan/tilt converts V4L2 arc-seconds to degrees to match
  * the Windows DirectShow convention used by the rest of the codebase.
  */
 export class LinuxTransport implements ObsbotTransport {
@@ -70,20 +78,20 @@ export class LinuxTransport implements ObsbotTransport {
 
   async camCtrlRange(property: number): Promise<{ min: number; max: number }> {
     const result = await this.helper.camCtrlRange(property);
-    // Convert V4L2 millidegrees → degrees for pan/tilt to match Windows convention
+    // Convert V4L2 arc-seconds → degrees for pan/tilt to match Windows convention
     if (property === 0 || property === 1) {
-      result.min = Math.round(result.min / DEG_TO_MDEG);
-      result.max = Math.round(result.max / DEG_TO_MDEG);
+      result.min = Math.round(result.min / ARCSEC_PER_DEG);
+      result.max = Math.round(result.max / ARCSEC_PER_DEG);
     }
     return result;
   }
 
   async camCtrlGet(property: number): Promise<{ value: number; flags: number }> {
     const result = await this.helper.camCtrlGet(property);
-    // V4L2 pan_absolute/tilt_absolute return millidegrees, but the rest of
+    // V4L2 pan_absolute/tilt_absolute return arc-seconds, but the rest of
     // the codebase expects degrees (Windows DirectShow convention).
     if (property === 0 || property === 1) {
-      result.value = Math.round(result.value / DEG_TO_MDEG);
+      result.value = Math.round(result.value / ARCSEC_PER_DEG);
     }
     return result;
   }
@@ -97,7 +105,7 @@ export class LinuxTransport implements ObsbotTransport {
   }
 
   /**
-   * Move the gimbal using V4L2 pan_absolute/tilt_absolute (millidegrees).
+   * Move the gimbal using V4L2 pan_absolute/tilt_absolute (arc-seconds).
    * Unlike vendor V3 frames, V4L2 writes keep the position readback working
    * (VIDIOC_G_CTRL returns the last-set value, which physically moved the gimbal
    * — proven by snapshot MD5 comparison 2026-07-19).
@@ -108,8 +116,8 @@ export class LinuxTransport implements ObsbotTransport {
   async gimbalSet(yawDeg: number, pitchDeg: number, _rollDeg?: number): Promise<void> {
     // V4L2 pan/tilt drives in parallel — both are independent controls.
     await Promise.all([
-      this.camCtrlSet(0, Math.round(yawDeg * DEG_TO_MDEG), 2),
-      this.camCtrlSet(1, Math.round(-pitchDeg * DEG_TO_MDEG), 2),
+      this.camCtrlSet(0, Math.round(yawDeg * ARCSEC_PER_DEG), 2),
+      this.camCtrlSet(1, Math.round(-pitchDeg * ARCSEC_PER_DEG), 2),
     ]);
   }
 
