@@ -18,6 +18,28 @@
   binding is pruned and re-scanned within ~500 ms, and the camera re-binds automatically once it
   returns — no restart, no manual `invalidate()`.
 
+### Added
+
+- The **Windows** helper now pushes `camera_arrived` / `camera_departed` events, so the server no
+  longer learns that the camera moved only by failing a call. Uses `CM_Register_Notification` on
+  `KSCATEGORY_CAPTURE`, whose callback runs on a thread-pool thread — no message pump and no hidden
+  window, so the helper's blocking stdin loop is unchanged. Every stdout write is now serialized
+  behind a mutex, because an event line and a response can be emitted concurrently and interleaving
+  them would corrupt both.
+
+  Departure paths are byte-identical to what `enumerate` reports, which `handleCameraDeparted()`
+  requires (it compares paths exactly and silently does nothing on a mismatch). Rather than rebuild
+  the DirectShow moniker from the notification's symbolic link — they differ in case and decoration,
+  which is precisely where a silent mismatch would come from — each `enumerate` remembers the
+  display names it produced and departures emit the remembered string.
+
+  Events are gated on a previously-enumerated path. The Tiny 2's audio interface (`MI_02`) also
+  registers under `KSCATEGORY_CAPTURE` with the same VID/PID, so an identity check alone let it fire
+  a spurious second `camera_arrived` (observed on hardware). One consequence is accepted
+  deliberately: a replug into a *different* port yields an unseen path, so no event fires and
+  recovery falls back to the failure-driven path — which still works, just on the next call rather
+  than proactively.
+
 - `obsbot_ai_track` no longer reports `verified:"hand", matched:false` on framing writes that
   actually succeeded. `AI_MODE_TABLE` mapped the status tuple `"6,0"` to `hand` (a defensive
   mapping taken from the Tiny4Linux reference), but on this firmware `m=6` is the transient the
