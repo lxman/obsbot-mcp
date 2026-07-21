@@ -163,6 +163,12 @@ export class DeviceManager {
   }
 
   private async getScanHelper(): Promise<HelperProcess> {
+    // A cached scan helper whose process has died must be discarded, not
+    // handed back. invalidate() only drops REGISTRY entries, so a helper that
+    // died mid-scan (before promote() moved it into the registry) would
+    // otherwise stay cached here and every later scan would talk to a corpse —
+    // the one path where failing fast on the transport isn't enough to recover.
+    if (this.scanHelper?.isDead) this.scanHelper = undefined;
     if (!this.scanHelper) {
       this.scanHelper = await this.makeHelper();
     }
