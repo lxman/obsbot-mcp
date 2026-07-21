@@ -38,11 +38,14 @@
 #include <wincodec.h>      // WIC (JPEG encode / scale / flip)
 #include <wincrypt.h>      // CryptBinaryToStringA (base64)
 
+#include <cfgmgr32.h>      // CM_Register_Notification (device arrival/removal)
 #include <string>
 #include <vector>
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
+#include <mutex>
+#include <algorithm>
 #include <cctype>
 
 #pragma comment(lib, "strmiids.lib")
@@ -264,11 +267,25 @@ static std::string field(const std::string& j, const std::string& key) {
   return j.substr(i, e - i);
 }
 
+// Every stdout write goes through here under one lock.
+//
+// Until device notifications existed, main() was the only writer and no lock was
+// needed. The CM_Register_Notification callback runs on a THREAD-POOL thread, so
+// an event line and a response can now be emitted concurrently; without this a
+// half-written response and a half-written event interleave and BOTH become
+// unparseable, desyncing the Node reader for the rest of the session.
+static std::mutex g_outMutex;
+
+static void emitLine(const std::string& line) {
+  std::lock_guard<std::mutex> lock(g_outMutex);
+  std::cout << line << "\n" << std::flush;
+}
+
 static void ok(const std::string& body) {
-  std::cout << "{\"ok\":true" << body << "}\n" << std::flush;
+  emitLine("{\"ok\":true" + body + "}");
 }
 static void err(const std::string& m) {
-  std::cout << "{\"ok\":false,\"error\":\"" << jsonEscape(m) << "\"}\n" << std::flush;
+  emitLine("{\"ok\":false,\"error\":\"" + jsonEscape(m) + "\"}");
 }
 static void errHr(const std::string& m, HRESULT hr) {
   std::ostringstream o;
@@ -276,7 +293,53 @@ static void errHr(const std::string& m, HRESULT hr) {
   err(o.str());
 }
 static void busy(const std::string& m) {
-  std::cout << "{\"ok\":false,\"busy\":true,\"error\":\"" << jsonEscape(m) << "\"}\n" << std::flush;
+  emitLine("{\"ok\":false,\"busy\":true,\"error\":\"" + jsonEscape(m) + "\"}");
+}
+
+// ---------------------------------------------------------------------------
+//  Device arrival/removal notifications
+// ---------------------------------------------------------------------------
+//
+// The Node side already understands {"event":"camera_arrived"|"camera_departed"}
+// push lines; without them Windows only learns the cable moved by FAILING a call.
+//
+// The path contract is asymmetric, and getting it wrong fails silently:
+//   - camera_departed: DeviceManager.handleCameraDeparted() matches registry
+//     entries with `entry.path !== e.path` — an exact string compare. A path that
+//     differs by so much as case matches nothing and the handler does nothing at
+//     all, which looks exactly like the events never firing.
+//   - camera_arrived: handleCameraArrived() takes `_e` and never reads the path;
+//     it decides from `everBound` alone. So arrival's path is advisory.
+//
+// Rather than rebuild the DirectShow moniker display name from the notification's
+// symbolic link by string surgery (they differ in case and decoration, so this is
+// exactly where a silent mismatch would come from), every enumerate records the
+// display names it produced. A departure emits the REMEMBERED string, so it is
+// byte-identical to what `enumerate` reported by construction.
+static std::mutex g_pathMutex;
+static std::vector<std::string> g_knownPaths;
+
+static std::string toLower(std::string s) {
+  std::transform(s.begin(), s.end(), s.begin(),
+                 [](unsigned char c) { return (char)std::tolower(c); });
+  return s;
+}
+
+static void rememberPath(const std::string& path) {
+  std::lock_guard<std::mutex> lock(g_pathMutex);
+  for (const auto& p : g_knownPaths) if (p == path) return;
+  g_knownPaths.push_back(path);
+}
+
+// The moniker display name embeds the device interface path, so the
+// notification's symbolic link appears inside it (modulo case).
+static std::string findKnownPath(const std::string& symbolicLink) {
+  const std::string needle = toLower(symbolicLink);
+  std::lock_guard<std::mutex> lock(g_pathMutex);
+  for (const auto& p : g_knownPaths) {
+    if (toLower(p).find(needle) != std::string::npos) return p;
+  }
+  return {};
 }
 
 // ---- global session state ------------------------------------------------
@@ -344,6 +407,7 @@ static void doEnumerate() {
     // than name; software/virtual sources have no vid/pid and are skipped.
     int vid = parseHexAfter(path, "vid_");
     int pid = parseHexAfter(path, "pid_");
+    rememberPath(path);
     out << "{\"path\":\"" << jsonEscape(path) << "\",\"name\":\"" << jsonEscape(name) << "\"";
     if (vid >= 0) out << ",\"vid\":" << vid;
     if (pid >= 0) out << ",\"pid\":" << pid;
@@ -907,11 +971,86 @@ static void doProcAmpRange(const std::string& propStr) {
   ok(o.str());
 }
 
+// Only OBSBOT hardware should drive events. An unrelated webcam departing would
+// match no registry entry (harmless), but an unrelated webcam ARRIVING would kick
+// off a re-bind ladder that forks helpers for a camera that is not ours. Gate on
+// the same Remo VID + model PID identity the candidacy check uses.
+static bool isObsbotSymbolicLink(const std::string& link) {
+  const int vid = parseHexAfter(link, "vid_");
+  const int pid = parseHexAfter(link, "pid_");
+  return vid == 0x3564 && pid == 0xFEF8; // Remo VID, Tiny 2
+}
+
+static void emitCameraEvent(const char* event, const std::string& path) {
+  emitLine(std::string("{\"event\":\"") + event + "\",\"path\":\"" + jsonEscape(path) +
+           "\",\"name\":\"OBSBOT Tiny 2\"}");
+}
+
+// Runs on a thread-pool thread — hence g_outMutex around the write. Deliberately
+// does no COM work: CoInitializeEx has not run on this thread, and enumerating
+// here would also block the notification callback.
+static DWORD CALLBACK onDeviceNotification(HCMNOTIFICATION /*notify*/, PVOID /*ctx*/,
+                                           CM_NOTIFY_ACTION action,
+                                           PCM_NOTIFY_EVENT_DATA data, DWORD /*size*/) {
+  if (!data || data->FilterType != CM_NOTIFY_FILTER_TYPE_DEVICEINTERFACE) return ERROR_SUCCESS;
+  if (action != CM_NOTIFY_ACTION_DEVICEINTERFACEARRIVAL &&
+      action != CM_NOTIFY_ACTION_DEVICEINTERFACEREMOVAL) {
+    return ERROR_SUCCESS;
+  }
+
+  const std::string link = wto(data->u.DeviceInterface.SymbolicLink);
+  if (!isObsbotSymbolicLink(link)) return ERROR_SUCCESS;
+
+  // Both directions require a path we have actually enumerated.
+  //
+  // For DEPARTURE this is the exact-match contract. For ARRIVAL it is what keeps
+  // the camera's OTHER interfaces out: the Tiny 2 also exposes an audio interface
+  // (MI_02) which registers under KSCATEGORY_CAPTURE too and carries the same
+  // VID/PID, so the identity gate alone let it through and it fired a spurious
+  // second camera_arrived (observed on hardware 2026-07-21). Requiring a cached
+  // path filters it without hardcoding interface numbers, and costs nothing the
+  // Node side wants: handleCameraArrived only acts when `everBound` is non-empty,
+  // i.e. this process bound the camera before, which means it enumerated it,
+  // which means its path is cached.
+  //
+  // Consequence, accepted deliberately: a replug into a DIFFERENT port produces a
+  // path we have never seen, so no event fires and recovery falls back to the
+  // failure-driven path (device-lost signature -> prune -> re-bind). Different-port
+  // replug was already the unreliable case on macOS, and it still recovers here —
+  // just on the next call rather than proactively.
+  const std::string known = findKnownPath(link);
+  if (known.empty()) return ERROR_SUCCESS;
+
+  const bool arrived = (action == CM_NOTIFY_ACTION_DEVICEINTERFACEARRIVAL);
+  emitCameraEvent(arrived ? "camera_arrived" : "camera_departed", known);
+  return ERROR_SUCCESS;
+}
+
 int main() {
   HRESULT hrInit = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
   if (FAILED(hrInit)) {
     std::cerr << "CoInitializeEx failed: 0x" << std::hex << hrInit << std::endl;
     return 1;
+  }
+
+  // Subscribe to capture-device interface arrival/removal. The callback runs on a
+  // thread-pool thread, so no message pump and no hidden window are needed and
+  // main()'s blocking getline loop below is untouched. (RegisterDeviceNotification
+  // + WM_DEVICECHANGE would have required both.)
+  HCMNOTIFICATION notify = nullptr;
+  {
+    CM_NOTIFY_FILTER filter{};
+    filter.cbSize = sizeof(filter);
+    filter.FilterType = CM_NOTIFY_FILTER_TYPE_DEVICEINTERFACE;
+    filter.u.DeviceInterface.ClassGuid = KSCATEGORY_CAPTURE;
+    const CONFIGRET cr = CM_Register_Notification(&filter, nullptr, onDeviceNotification, &notify);
+    if (cr != CR_SUCCESS) {
+      // Non-fatal: without events the helper still works exactly as before,
+      // discovering a moved cable by failing a call. Don't take the process down.
+      std::cerr << "CM_Register_Notification failed: " << cr
+                << " (device arrival/removal events disabled)" << std::endl;
+      notify = nullptr;
+    }
   }
 
   std::string line;
@@ -969,6 +1108,9 @@ int main() {
     }
   }
 
+  // Unregister BEFORE releasing the session: the callback may be running on a
+  // pool thread right now, and CM_Unregister_Notification waits for it to finish.
+  if (notify) CM_Unregister_Notification(notify);
   releaseSession();
   CoUninitialize();
   return 0;
