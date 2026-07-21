@@ -324,6 +324,32 @@ export class DeviceManager {
   }
 
   /**
+   * Drop registry entries whose helper process has died, so the next resolve
+   * re-binds instead of handing back a transport that can only ever fail.
+   *
+   * "Once bound, stay bound" is the right default, but a bound entry whose
+   * helper is GONE isn't a binding — it's a corpse. Without this, only the
+   * tools that route through ensureReady() (which calls invalidate()) could
+   * recover; every other tool resolved straight through get() and returned the
+   * same dead transport forever. Recovery then required the caller to happen to
+   * invoke a different tool — and the caller here is an LLM, which will instead
+   * retry the failing tool or report broken hardware that is actually fine.
+   *
+   * Deliberately a `dead` check and not a liveness probe: it costs a boolean,
+   * adds no round trip to the hot path, and leaves a LIVE binding untouched (a
+   * guard that re-scanned every call would spawn a helper per tool call).
+   *
+   * A wedged-but-alive helper is intentionally NOT caught here — that is the
+   * per-request timeout's job, and condemning a session for one slow op would
+   * throw away a working binding.
+   */
+  private pruneDeadEntries(): void {
+    for (const [serial, entry] of this.registry) {
+      if (entry.helper.isDead) this.registry.delete(serial);
+    }
+  }
+
+  /**
    * Resolve to a bound transport.
    *   no serial + one camera attached  -> bind & return it
    *   no serial + several attached     -> AmbiguousCameraError
@@ -333,6 +359,8 @@ export class DeviceManager {
    * rescanning — "bind lazily" means once bound, stay bound.
    */
   async get(serial?: string): Promise<ObsbotTransport> {
+    this.pruneDeadEntries();
+
     if (serial) {
       const existing = this.registry.get(serial);
       if (existing) return existing.transport;

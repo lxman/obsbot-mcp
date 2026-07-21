@@ -77,12 +77,27 @@ export class HelperProcess {
     this.proc = spawn(cmd, args, { stdio: ["pipe", "pipe", "inherit"] });
 
     // Without these, a dead child leaves every caller pending forever.
+    // Error text is API surface here: the caller is an LLM, so each message says
+    // what happened AND what to do next. "helper process exited (code 1)" is an
+    // implementation detail that prescribes nothing; a model reading it tends to
+    // either retry blindly forever or tell the human the camera is broken — when
+    // in fact the next call re-binds automatically (DeviceManager.pruneDeadEntries).
     this.proc.on("exit", (code, signal) =>
       this.failAll(
-        new Error(`helper process exited (code ${code ?? "null"}, signal ${signal ?? "none"})`),
+        new Error(
+          `camera link lost: the helper process exited (code ${code ?? "null"}, ` +
+            `signal ${signal ?? "none"}). The connection resets automatically — retry this call.`,
+        ),
       ),
     );
-    this.proc.on("error", (e) => this.failAll(new Error(`helper process error: ${e.message}`)));
+    this.proc.on("error", (e) =>
+      this.failAll(
+        new Error(
+          `camera link lost: the helper process failed to run (${e.message}). ` +
+            `Retry this call; if it repeats, the helper binary may be missing or blocked.`,
+        ),
+      ),
+    );
     // Writing to a dead child's stdin emits EPIPE on the stream; an 'error'
     // event with no listener is rethrown by Node and would take the server down.
     this.proc.stdin.on("error", (e) =>
@@ -142,7 +157,13 @@ export class HelperProcess {
       const timer = setTimeout(() => {
         entry.resolve = (): void => {}; // tombstone: swallow the late reply
         entry.reject = (): void => {};
-        reject(new Error(`helper request "${String(req.op)}" timed out after ${timeoutMs}ms`));
+        reject(
+          new Error(
+            `helper request "${String(req.op)}" timed out after ${timeoutMs}ms — the camera ` +
+              `did not respond. Retry this call; if it repeats, check that no other ` +
+              `application is using the camera.`,
+          ),
+        );
       }, timeoutMs);
 
       this.queue.push({
