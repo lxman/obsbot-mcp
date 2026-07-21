@@ -30,6 +30,11 @@ export class OwnerClient {
     this.socket.on("error", (e: Error) => this.failAll(e));
   }
 
+  /** Wrap an already-connected socket (e.g. the one elect() returned). */
+  static adopt(socket: net.Socket): OwnerClient {
+    return new OwnerClient(socket);
+  }
+
   static connect(path: string): Promise<OwnerClient> {
     return new Promise((resolve, reject) => {
       const socket = net.connect(path);

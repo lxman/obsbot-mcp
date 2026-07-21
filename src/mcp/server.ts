@@ -10,6 +10,7 @@ import { HelperProcess } from "../transport/helper-process.js";
 import { createTools, ToolDef } from "./tools.js";
 import { renderToolResult } from "./render.js";
 import { CaptureManager } from "../capture/manager.js";
+import { Coordinator, serialize } from "../ipc/coordinator.js";
 
 export async function startServer(opts: { debug?: boolean } = {}): Promise<void> {
   const mgr = new DeviceManager(async () => {
@@ -27,8 +28,28 @@ export async function startServer(opts: { debug?: boolean } = {}): Promise<void>
   // --debug exposes the RE/diagnostics surface (obsbot_debug_probe tool + status raw block).
   const tools: ToolDef[] = createTools(mgr, capture, opts.debug ?? false);
 
-  // Kill any recording/preview child processes when the server exits, so nothing orphans.
-  const shutdown = (): void => capture.stopAll();
+  // Single-owner camera coordination across concurrent MCP clients (see
+  // IPC-DESIGN.md). Every instance elects: the owner runs tool calls locally
+  // against the one DeviceManager; clients forward theirs to the owner and
+  // re-elect if it dies. runLocal is the tool dispatch, serialize()-wrapped so
+  // it is the single-camera lock — covering both this instance's own calls and
+  // any forwarded from clients (the local path bypasses OwnerServer's queue). A
+  // lone instance is simply the owner with no peers: it behaves exactly as
+  // before, plus an idle listener.
+  const runLocal = serialize(async (name, args) => {
+    const tool = tools.find((t) => t.name === name);
+    if (!tool) throw new Error(`unknown tool: ${name}`);
+    return tool.handler(args);
+  });
+  const coordinator = new Coordinator(runLocal);
+  await coordinator.start();
+
+  // Kill any recording/preview child processes when the server exits, so nothing
+  // orphans, and drop the IPC endpoint / owner connection.
+  const shutdown = (): void => {
+    capture.stopAll();
+    void coordinator.close();
+  };
   process.on("exit", shutdown);
   process.on("SIGINT", () => { shutdown(); process.exit(0); });
   process.on("SIGTERM", () => { shutdown(); process.exit(0); });
@@ -52,11 +73,14 @@ export async function startServer(opts: { debug?: boolean } = {}): Promise<void>
   }));
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
-    const tool = tools.find((t) => t.name === request.params.name);
-    if (!tool) {
-      throw new Error(`unknown tool: ${request.params.name}`);
+    const name = request.params.name;
+    if (!tools.find((t) => t.name === name)) {
+      throw new Error(`unknown tool: ${name}`);
     }
-    const result = await tool.handler(request.params.arguments ?? {});
+    // Route through the coordinator: run locally if we own the camera, else
+    // forward to whoever does. renderToolResult runs here at the MCP boundary,
+    // on the raw tool result either way.
+    const result = await coordinator.dispatch(name, request.params.arguments ?? {});
     return renderToolResult(result);
   });
 
