@@ -205,3 +205,119 @@ Hardware after the fix: a different-port replug self-healed to `bound` before
 any tool call. That run's first attempt succeeded on its own, so it confirms
 the path but does not by itself exercise the retry; the retry rests on the
 22/80 measurement and unit tests.
+
+---
+
+## Follow-up 2: the events reached nobody, and the verification above could not see it
+
+Everything above is accurate about what it measured. It was blind to one thing,
+and the blindness was structural rather than careless — worth recording, because
+the obvious way to write the probe is the way that hides the bug.
+
+### The bug
+
+Bus events are delivered per PROCESS. `helperFactory` subscribes each helper it
+spawns, and every process that could be listening gets closed:
+
+- `promote()` clears `scanHelper`, so the bound steady state is exactly ONE live
+  helper — the registry's
+- `handleCameraDeparted()` closes that one
+
+Zero subscribers, on the departure alone. No failed call required. The arrival
+that follows is delivered to nobody, and the camera stays unbound until a tool
+call binds it.
+
+### Why the runs above looked clean
+
+`listCameras()` calls `getScanHelper()`, which spawns a helper and never
+discards it — and a scan helper enumerates, which is what makes a process
+eligible to receive events at all (see below). So the results table's own
+protocol — `obsbot_devices` after the unplug, then `obsbot_devices` after the
+replug — *creates* the subscriber whose existence it then relies on.
+
+The attribution reasoning in that table is still sound: `listCameras()` only
+reads the registry, and only `promote()` writes `status:"bound"`. What it could
+not ask was **why any process was alive to hear the arrival**. Answering that
+requires making ZERO manager calls between the unplug and a single final
+observation — otherwise the probe manufactures its own subscriber.
+
+Corrected accounting: helpers at rest are **registry + watcher**, with the
+scanner transient — not "registry + scan".
+
+### Priming: a helper that has never enumerated receives nothing
+
+The non-obvious part, and neither platform's helper hints at it. Three
+processes, one same-port replug, none opening the device:
+
+|  | primed while present | never primed | primed during an absence |
+|---|---|---|---|
+| macOS | departure + arrival | **NEITHER** | arrival |
+| Windows | departure + arrival | **NEITHER** | **NONE** |
+
+The never-primed process stayed alive for the whole run and answered a later
+`enumerate` correctly, so that was genuine non-delivery, not a corpse. Its first
+`enumerate` took 71 ms against ~1 ms for the primed arms — AVFoundation's
+discovery subsystem starting for the first time.
+
+Two unrelated mechanisms, same rule:
+
+- **macOS** — registering the observers (`registerCameraNotifications`) does not
+  start delivery. Touching the device list does.
+- **Windows** — `helper.cpp` drops any event whose path is missing from
+  `g_knownPaths`, which only `enumerate` fills, per-process. The Windows run
+  logged its mechanism directly: the absent-camera enumerate recorded
+  "Tiny 2 in its list = false".
+
+So a "listen-only" watcher that never scans is deaf on both platforms, and no
+unit test with a hand-fed fake can see it.
+
+### Measured platform divergence
+
+Every cell hardware-measured, n=1 each:
+
+| scenario | macOS | Windows |
+|---|---|---|
+| same-port replug | proactive re-bind | proactive re-bind |
+| different-port replug | proactive re-bind | next tool call only |
+| watcher dies mid-absence | recovers proactively | next tool call only |
+| watcher never primed | deaf | deaf |
+
+macOS is immune to the port change because `emitCameraEvent` filters only on
+`hasMediaType:AVMediaTypeVideo` and `handleCameraArrived` re-binds by SERIAL,
+ignoring the path. The Windows gate is **not** a defect to remove: it filters
+the Tiny 2's `MI_02` audio interface, which registers under `KSCATEGORY_CAPTURE`
+with an identical VID/PID and otherwise fires a phantom second camera. Both
+divergent rows degrade to the pre-fix behaviour rather than stranding anything.
+
+This supersedes "the same-port/different-port split was luck" above. It was luck
+on macOS at that sample size; on Windows the split is structural.
+
+### The retry ladder, finally observed — riding out a different race
+
+The ladder had never been seen firing. A deliberately **fast** replug — cable
+out and straight back in — produced it:
+
+```
+MGR  arrival re-bind attempt 1/4 failed: ... open failed: open: missing path
+MGR  arrival re-bind succeeded on attempt 2
+```
+
+Note the failure: `open: missing path`, with an EMPTY path — AVFoundation had
+the device listed but had not yet resolved a path. That is **not** the vendor
+mailbox window the backoff was sized against. There are two distinct
+post-re-enumeration races, and the same ladder happens to cover both. Anyone
+reading the 22/80 measurement above should not assume a fast-replug failure is
+the mailbox.
+
+It also supports keeping `discardScanHelper()` unconditional in a scenario it
+was not written for: the failed attempt closed the scanner, attempt 2 forked
+fresh, and only then did the open succeed.
+
+### Linux
+
+`native/linux/helper.c` emits no events — zero occurrences of "event" in the
+file. The watcher is therefore spawned and primed there but can never receive
+anything, and recovery relies entirely on the device-lost path. Harmless, and
+already wired if Linux ever gains udev/netlink notifications, but it is one idle
+process with no possible benefit today. Open decision, deliberately not made
+without a Linux box to test on.
