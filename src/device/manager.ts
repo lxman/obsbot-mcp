@@ -173,6 +173,23 @@ export class DeviceManager {
     return new WindowsTransport(helper);
   }
 
+  /**
+   * Close and forget the scratch helper. Closing matters as much as forgetting:
+   * the process is alive and holding whatever it opened, so dropping only the
+   * reference leaks it and leaves the replacement unable to open the camera —
+   * the same mistake pruneDeadEntries() makes if it merely deletes an entry.
+   */
+  private async discardScanHelper(): Promise<void> {
+    const helper = this.scanHelper;
+    this.scanHelper = undefined;
+    if (!helper) return;
+    try {
+      await helper.close();
+    } catch {
+      // best-effort — a disconnected helper's close() may itself throw
+    }
+  }
+
   private async getScanHelper(): Promise<HelperProcess> {
     // A cached scan helper whose process has died must be discarded, not
     // handed back. invalidate() only drops REGISTRY entries, so a helper that
@@ -261,6 +278,33 @@ export class DeviceManager {
       throw new UnknownCameraError(wantSerial, [...found.keys()]);
     }
     if (found.size === 0) {
+      // A helper that SAW a camera and still could not bind it is suspect —
+      // drop it rather than cache it for the next attempt.
+      //
+      // Hardware, 2026-07-21 replug: the macOS helper derives `path` from
+      // AVFoundation, whose device list lags the USB bus and, in a long-lived
+      // process, did not refresh at all. A helper spawned while the camera was
+      // unplugged therefore kept enumerating it with vid/pid but an EMPTY path
+      // — unopenable — for over two minutes, while a freshly spawned process
+      // saw the device immediately. Retrying on the cached helper could never
+      // converge; only a new process could.
+      //
+      // Deliberately UNCONDITIONAL, including when the bus looks empty.
+      //
+      // It is tempting to narrow this to "only when a candidate was rejected",
+      // since a helper reporting an empty bus looks healthy and the churn is
+      // real — the verified run forked 16 processes in 15s. That narrowing was
+      // written, unit-tested, and then REVERTED: in the hardware run that
+      // actually recovered, every retry during the recovery window reported an
+      // empty bus with NO rejected candidate, and it recovered precisely
+      // because each attempt forked a fresh process with a fresh IOKit/
+      // AVFoundation view. Keeping the helper in that case would restore the
+      // bug. A stale process can under-report the bus as empty, so "empty" is
+      // not evidence the helper is healthy.
+      //
+      // Cost is bounded: one spawn (~60ms) per FAILED bind, nothing on the
+      // happy path, and it stops as soon as a camera binds.
+      await this.discardScanHelper();
       // With nothing attached there is nothing to explain, so that message
       // stays exactly as it was.
       throw new Error(
@@ -369,9 +413,28 @@ export class DeviceManager {
    * per-request timeout's job, and condemning a session for one slow op would
    * throw away a working binding.
    */
-  private pruneDeadEntries(): void {
+  private async pruneDeadEntries(): Promise<void> {
     for (const [serial, entry] of this.registry) {
-      if (entry.helper.isDead) this.registry.delete(serial);
+      // `deviceLost` covers the unplug case, where the helper PROCESS is alive
+      // and healthy but the camera behind it is gone. Hardware-tested
+      // 2026-07-21: without this, a replug left every call failing forever —
+      // the handle was stranded and only killing the helper recovered it,
+      // because process death was the only condition anything watched for.
+      if (!entry.helper.isDead && !entry.helper.deviceLost) continue;
+
+      // CLOSE, don't just forget. A device-lost helper is still RUNNING and
+      // still holding the USB device, so dropping the reference alone leaks the
+      // process and the replacement helper can never open the camera. The first
+      // cut of this fix did exactly that and turned one stranded handle into a
+      // helper leak — every retry spawned another one and recovery never
+      // happened. (A dead helper's close() is a harmless no-op, same as in
+      // invalidate(), which has always closed-then-deleted for this reason.)
+      try {
+        await entry.helper.close();
+      } catch {
+        // best-effort — a disconnected helper's close() may itself throw
+      }
+      this.registry.delete(serial);
     }
   }
 
@@ -385,7 +448,7 @@ export class DeviceManager {
    * rescanning — "bind lazily" means once bound, stay bound.
    */
   async get(serial?: string): Promise<ObsbotTransport> {
-    this.pruneDeadEntries();
+    await this.pruneDeadEntries();
 
     if (serial) {
       const existing = this.registry.get(serial);
@@ -417,6 +480,12 @@ export class DeviceManager {
    * re-opening (avoids a pointless self-conflict against our own handle).
    */
   async listCameras(): Promise<CameraInfo[]> {
+    // Registry entries are reported as `bound` without re-opening them, so a
+    // stale one is indistinguishable from a healthy camera. Observed on
+    // hardware 2026-07-21: obsbot_devices kept reporting status:"bound" with a
+    // serial for a camera that was physically UNPLUGGED — a caller reads that
+    // as "present and ready", which is exactly backwards.
+    await this.pruneDeadEntries();
     const results: CameraInfo[] = [];
     const seenSerials = new Set<string>();
     const boundLocationIds = new Set<number>();
