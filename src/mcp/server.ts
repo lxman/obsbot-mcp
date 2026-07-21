@@ -7,6 +7,7 @@ import {
 import { zodToJsonSchema } from "zod-to-json-schema";
 import { DeviceManager } from "../device/manager.js";
 import { helperFactory } from "../device/helper-factory.js";
+import { makeLogSink } from "./log-sink.js";
 import { createTools, ToolDef } from "./tools.js";
 import { renderToolResult } from "./render.js";
 import { CaptureManager } from "../capture/manager.js";
@@ -16,7 +17,12 @@ export async function startServer(opts: { debug?: boolean } = {}): Promise<void>
   // helperFactory subscribes every helper it spawns to the OS bus events, so
   // the manager hears about a camera arriving or leaving instead of finding
   // out by failing a call. See src/device/helper-factory.ts.
-  const mgr: DeviceManager = new DeviceManager(helperFactory(() => mgr));
+  //
+  // OBSBOT_LOG_FILE additionally mirrors the manager's diagnostics to a file:
+  // our stderr goes to a pipe the launcher owns, so a rare event like a
+  // retried arrival re-bind would otherwise be unobservable after the fact.
+  const log = makeLogSink(process.env.OBSBOT_LOG_FILE, (m) => console.error(m));
+  const mgr: DeviceManager = new DeviceManager(helperFactory(() => mgr), { log });
 
   // DeviceManager now owns the connection lifecycle: lazy bind, invalidate +
   // re-bind on a mid-session disconnect (self-heal), and per-camera reconnect

@@ -180,11 +180,23 @@ export class DeviceManager {
    */
   private arrivalBackoffMs: number[];
 
+  /**
+   * Where a failed or retried arrival re-bind is reported. STDERR by default —
+   * never stdout, which is the JSON-RPC channel.
+   *
+   * Exists because the ladder was silent: a ladder that fired and a clean first
+   * attempt looked identical from outside the process, so the retry could not
+   * be observed on hardware even once it existed. A self-heal that fails
+   * quietly is the failure mode that cost a day of debugging.
+   */
+  private log: (msg: string) => void;
+
   constructor(
     private makeHelper: () => Promise<HelperProcess>,
-    opts: { arrivalBackoffMs?: number[] } = {},
+    opts: { arrivalBackoffMs?: number[]; log?: (msg: string) => void } = {},
   ) {
     this.arrivalBackoffMs = opts.arrivalBackoffMs ?? [0, 400, 1200, 3000];
+    this.log = opts.log ?? ((m): void => console.error(m));
   }
 
   private createTransport(helper: HelperProcess): ObsbotTransport {
@@ -540,20 +552,33 @@ export class DeviceManager {
     if (this.rebinding) return;
 
     this.rebinding = true;
+    const total = this.arrivalBackoffMs.length;
     try {
-      for (const delay of this.arrivalBackoffMs) {
+      for (let i = 0; i < total; i++) {
+        const delay = this.arrivalBackoffMs[i]!;
         if (delay > 0) await new Promise((r) => setTimeout(r, delay));
         // A tool call may have bound it while we waited — it got there first.
         if (this.registry.size > 0) return;
         try {
           await this.bind();
+          // Silent on the happy path; every replug would otherwise print. A
+          // retried success is worth a line precisely because it is the only
+          // evidence the ladder ever does anything.
+          if (i > 0) this.log(`obsbot-mcp: arrival re-bind succeeded on attempt ${i + 1}`);
           return;
-        } catch {
+        } catch (e) {
           // Keep trying: see the backoff's own comment for why one attempt is
           // a coin flip. Arrival is still only a hint — if the ladder runs out
           // the next tool call binds normally.
+          this.log(
+            `obsbot-mcp: arrival re-bind attempt ${i + 1}/${total} failed: ${errText(e)}`,
+          );
         }
       }
+      this.log(
+        `obsbot-mcp: arrival re-bind gave up after ${total} attempts; ` +
+          `the next tool call will bind normally`,
+      );
     } finally {
       this.rebinding = false;
     }

@@ -891,3 +891,67 @@ test("a second arrival while a ladder is running does not start another", async 
   // promote(), which asserts on the scratch helper being present.
   expect(factory.spawned.length - spawnedBefore).toBeLessThanOrEqual(3);
 });
+
+// ---------------------------------------------------------------------------
+//  Reporting the arrival re-bind.
+//
+//  The ladder was silent, so a fired ladder and a clean first attempt looked
+//  identical from outside the process — which is why the retry could not be
+//  observed on hardware even once it existed. Failures and retried successes
+//  are reported; the happy path stays quiet.
+//
+//  stderr, never stdout: stdout is the JSON-RPC channel.
+// ---------------------------------------------------------------------------
+
+test("a failed arrival re-bind attempt is reported with its reason", async () => {
+  const factory = yankableHelperFactory("AAA");
+  const log: string[] = [];
+  const mgr = new DeviceManager(factory, { arrivalBackoffMs: [0, 0], log: (m) => log.push(m) });
+  await mgr.get();
+  await mgr.handleCameraDeparted({ path: "/dev/yank", name: "OBSBOT Tiny 2" });
+
+  factory.failBinds = 1;
+  await mgr.handleCameraArrived({ path: "/dev/yank", name: "OBSBOT Tiny 2" });
+
+  expect(log.some((m) => /no OBSBOT camera found/.test(m))).toBe(true);
+});
+
+test("a re-bind that needed a retry says which attempt won", async () => {
+  // The line that makes the ladder observable on hardware.
+  const factory = yankableHelperFactory("AAA");
+  const log: string[] = [];
+  const mgr = new DeviceManager(factory, { arrivalBackoffMs: [0, 0], log: (m) => log.push(m) });
+  await mgr.get();
+  await mgr.handleCameraDeparted({ path: "/dev/yank", name: "OBSBOT Tiny 2" });
+
+  factory.failBinds = 1;
+  await mgr.handleCameraArrived({ path: "/dev/yank", name: "OBSBOT Tiny 2" });
+
+  expect(log.some((m) => /attempt 2/.test(m))).toBe(true);
+});
+
+test("a re-bind that works first time logs nothing", async () => {
+  // No noise on the happy path — every replug would otherwise print.
+  const factory = yankableHelperFactory("AAA");
+  const log: string[] = [];
+  const mgr = new DeviceManager(factory, { arrivalBackoffMs: [0, 0], log: (m) => log.push(m) });
+  await mgr.get();
+  await mgr.handleCameraDeparted({ path: "/dev/yank", name: "OBSBOT Tiny 2" });
+
+  await mgr.handleCameraArrived({ path: "/dev/yank", name: "OBSBOT Tiny 2" });
+
+  expect(log).toEqual([]);
+});
+
+test("giving up is reported, so a camera that never came back is not silent", async () => {
+  const factory = yankableHelperFactory("AAA");
+  const log: string[] = [];
+  const mgr = new DeviceManager(factory, { arrivalBackoffMs: [0, 0], log: (m) => log.push(m) });
+  await mgr.get();
+  await mgr.handleCameraDeparted({ path: "/dev/yank", name: "OBSBOT Tiny 2" });
+
+  factory.failNextBind = true;
+  await mgr.handleCameraArrived({ path: "/dev/yank", name: "OBSBOT Tiny 2" });
+
+  expect(log.some((m) => /gave up/i.test(m))).toBe(true);
+});
