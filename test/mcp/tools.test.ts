@@ -183,7 +183,10 @@ test("obsbot_gimbal_move_speed sends move then auto-stop", async () => {
 
   expect(transport.gimbalSpeed).toHaveBeenCalledTimes(1);
   expect(transport.gimbalSpeed).toHaveBeenCalledWith(10, 5, 0, 1);
-  expect(result).toEqual({ ok: true, stopped: true });
+  // yaw/pitch echo the speeds actually used after clamping, so a caller can see
+  // when its request was bounded rather than silently ignored by the firmware.
+  // Kept as an exact-shape assertion so an unintended field cannot creep in.
+  expect(result).toEqual({ ok: true, yaw: 10, pitch: 5, stopped: true });
 });
 
 test("obsbot_gimbal_move_speed negates yaw so +yaw pans camera-left (matches gimbal_move)", async () => {
@@ -1731,4 +1734,59 @@ test("obsbot_capture_snapshot honours an explicit resolution", async () => {
   expect(transport.snapshot).toHaveBeenCalledWith(
     expect.objectContaining({ maxDim: 1920 }),
   );
+});
+
+// --- obsbot_gimbal_move_speed: units and bounds ---
+//
+// Alone among the gimbal tools this one passed yaw/pitch straight through to
+// the firmware: no clamp, and a description that said "speed" without ever
+// saying speed in WHAT. Callers had to reverse-engineer the unit.
+//
+// Measured on hardware 2026-07-21 by timing moves against the live position
+// readback: 10/1000ms -> 10 deg, 20/700ms -> 14 deg, 60/500ms -> 29 deg,
+// 120/300ms -> 35 deg, 170/300ms -> 49 deg. The value is degrees per second,
+// linear across the whole usable band.
+//
+// Above that the firmware does not saturate -- it silently IGNORES the
+// command: 180, 200 and 300 each produced EXACTLY 0 degrees of motion while
+// still returning ok:true. An unclamped caller therefore gets a successful
+// result and a camera that never moved, which is the worst of both worlds.
+test("obsbot_gimbal_move_speed clamps to the hardware-verified degrees/second band", async () => {
+  const transport = makeFakeTransport();
+  const tools = createTools(makeFakeMgr(transport));
+  const tool = findTool(tools, "obsbot_gimbal_move_speed");
+
+  await tool.handler({ yaw: 999, pitch: -999, roll: 0, autoStopMs: 0 });
+
+  expect(transport.gimbalSpeed).toHaveBeenCalledTimes(1);
+  const [yaw, pitch] = transport.gimbalSpeed.mock.calls[0]!;
+  expect(yaw).toBe(150);
+  expect(pitch).toBe(-150);
+});
+
+test("obsbot_gimbal_move_speed reports the clamped speed it actually used", async () => {
+  const transport = makeFakeTransport();
+  const tools = createTools(makeFakeMgr(transport));
+  const tool = findTool(tools, "obsbot_gimbal_move_speed");
+
+  const result = (await tool.handler({ yaw: 999, pitch: 0, roll: 0, autoStopMs: 0 })) as {
+    yaw: number;
+  };
+  expect(result.yaw).toBe(150);
+});
+
+test("obsbot_gimbal_move_speed documents its unit as degrees per second", async () => {
+  const tool = findTool(createTools(makeFakeMgr()), "obsbot_gimbal_move_speed");
+  expect(tool.description).toMatch(/degrees per second|deg\/s/i);
+});
+
+test("obsbot_gimbal_move_speed leaves in-range speeds untouched", async () => {
+  const transport = makeFakeTransport();
+  const tools = createTools(makeFakeMgr(transport));
+  const tool = findTool(tools, "obsbot_gimbal_move_speed");
+
+  await tool.handler({ yaw: 30, pitch: -20, roll: 0, autoStopMs: 0 });
+  const [yaw, pitch] = transport.gimbalSpeed.mock.calls[0]!;
+  expect(yaw).toBe(30);
+  expect(pitch).toBe(-20);
 });

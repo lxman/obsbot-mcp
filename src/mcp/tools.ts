@@ -153,6 +153,13 @@ const PROBE_QUERY_POLL_ATTEMPTS = 8;
 // no delay = 24 failures (96%), 30ms delay = 0. f27956f fixed exactly this in
 // read-serial.ts; the probe kept the un-delayed loop until 2026-07-21.
 const PROBE_QUERY_POLL_DELAY_MS = 30;
+// Max gimbal velocity accepted by obsbot_gimbal_move_speed, in degrees per
+// second. Hardware-measured 2026-07-21: 150/160/170 all drove the gimbal
+// linearly, while 180/200/300 each moved it EXACTLY 0° yet still reported
+// success — the firmware ignores an over-range speed rather than saturating.
+// The true cutoff lies somewhere in 170..180; 150 keeps margin under it and
+// matches obsbot_gimbal_move's yaw bound.
+const GIMBAL_MAX_SPEED_DPS = 150;
 const fovSchema = withCamera({ fov: z.enum(FOV_TYPES as [FovType, ...FovType[]]) });
 const hdrSchema = withCamera({ enabled: bool() });
 const focusAutoSchema = withCamera({});
@@ -477,19 +484,41 @@ export function createTools(
     {
       name: "obsbot_gimbal_move_speed",
       description:
-        "Drive the gimbal at a yaw/pitch speed (positive yaw pans to the camera's left, matching " +
-        "obsbot_gimbal_move), then automatically stop after autoStopMs (default 800ms) so it can't run away.",
+        "Drive the gimbal at a yaw/pitch speed in DEGREES PER SECOND (positive yaw pans to the " +
+        "camera's left, matching obsbot_gimbal_move), then automatically stop after autoStopMs " +
+        "(default 800ms) so it can't run away. Speed is clamped to ±150 °/s; the returned " +
+        "yaw/pitch are the speeds actually used.",
       schema: ptzMoveSpeedSchema,
       handler: async (args: unknown) => {
-        const { yaw, pitch, roll, autoStopMs, camera } = ptzMoveSpeedSchema.parse(args);
-        const ready = await gate(camera);
+        const parsed = ptzMoveSpeedSchema.parse(args);
+        // Degrees per second, measured on hardware 2026-07-21 against the live
+        // position readback: 10/1000ms -> 10°, 60/500ms -> 29°, 120/300ms -> 35°,
+        // 170/300ms -> 49° — linear across the band.
+        //
+        // Clamping matters more here than for absolute moves. Past the limit the
+        // firmware does not saturate, it silently IGNORES the command: 180, 200
+        // and 300 each produced EXACTLY 0° of motion while still reporting
+        // success. Unclamped, a caller gets ok:true and a camera that never
+        // moved. 150 sits inside the verified-good band (150/160/170 all moved)
+        // with margin, and matches obsbot_gimbal_move's yaw bound so the API has
+        // one number to remember.
+        const yaw = clamp(parsed.yaw, -GIMBAL_MAX_SPEED_DPS, GIMBAL_MAX_SPEED_DPS);
+        const pitch = clamp(parsed.pitch, -GIMBAL_MAX_SPEED_DPS, GIMBAL_MAX_SPEED_DPS);
+        const roll = clamp(parsed.roll, -GIMBAL_MAX_SPEED_DPS, GIMBAL_MAX_SPEED_DPS);
+        const ready = await gate(parsed.camera);
         if (!ready.ok) return ready;
         const t = ready.transport;
         // Firmware velocity-yaw is inverted relative to position-yaw: the vendor
         // AI_SET_GIM_SPEED +yaw drives right (opposite of obsbot_gimbal_move).
         // The transport's gimbalSpeed handles this per-platform as needed.
-        await t.gimbalSpeed(yaw, pitch, roll, autoStopMs);
-        return { ok: true, stopped: autoStopMs > 0, ...(ready.reconnected && { reconnected: true }) };
+        await t.gimbalSpeed(yaw, pitch, roll, parsed.autoStopMs);
+        return {
+          ok: true,
+          yaw,
+          pitch,
+          stopped: parsed.autoStopMs > 0,
+          ...(ready.reconnected && { reconnected: true }),
+        };
       },
     },
     {
