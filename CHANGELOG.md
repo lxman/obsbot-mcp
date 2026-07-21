@@ -4,6 +4,37 @@
 
 ### Fixed
 
+- Proactive re-bind after a replug now actually happens. Bus events are delivered per *process*,
+  and every process that could be listening was being closed: `promote()` clears `scanHelper`, so
+  the bound steady state is exactly one live helper — the registry's — and `handleCameraDeparted()`
+  closes it. Zero subscribers, on the departure alone; no failed call required. Earlier macOS runs
+  looked clean only because an `obsbot_devices` between unplug and replug happens to leave a
+  scan helper alive.
+
+  The fix is a long-lived `watcher` helper, spawned at `promote()` and closed by neither
+  `invalidate()` nor `discardScanHelper()` — which stays unconditional, since forking a fresh
+  scanner per attempt is load-bearing.
+
+  **The watcher must be primed, and that is not obvious.** A helper that has never enumerated
+  receives nothing. Measured on hardware across one same-port replug, three processes, none opening
+  the device: enumerated-while-present got both events, enumerated-while-absent got the arrival,
+  and never-enumerated got **neither** — while staying alive throughout and answering a later
+  `enumerate` correctly. On macOS registering the AVFoundation observers does not start delivery;
+  touching the device list does. Windows enforces the same rule for an unrelated reason, since
+  `helper.cpp` drops any event whose path is missing from the per-process `g_knownPaths`, which
+  only `enumerate` fills. So `ensureWatcher()` enumerates once, on every call — the repeat is
+  Windows insurance, since a watcher replaced during an absence can never cache the path there and
+  would otherwise stay deaf forever. macOS is measured *not* to need the repeat: one prime held
+  across two full replug cycles.
+
+  Priming failure is non-fatal — it runs after `promote()`, so throwing would escape `bind()` with
+  the camera already registered.
+
+  Verified end to end on hardware with the real `DeviceManager` and zero tool calls between the
+  unplug and the observation: departure closes the registry helper, the watcher alone hears the
+  arrival, and the camera re-binds itself. Also verified with the watcher `SIGKILL`ed mid-session,
+  where the departure rebuilds it.
+
 - Mid-session device-loss recovery now works on **Windows**. `DEVICE_LOST_SIGNATURES` had entries
   for macOS and Linux but none for Windows, because the DirectShow removal code had never been
   observed — so a camera unplugged mid-session stranded the binding until the server restarted,
@@ -19,6 +50,13 @@
   returns — no restart, no manual `invalidate()`.
 
 ### Added
+
+- `DeviceManager.shutdown()` closes every helper it holds — registry, scratch scanner, and watcher —
+  and is wired into the server's exit path. The watcher is the first helper deliberately built to
+  outlive every operation, so it is the first whose lifetime nothing else bounds. Note what this is
+  *not*: with the call commented out, a real server sent `SIGTERM` still left zero orphaned helpers,
+  because they exit on stdin EOF when the parent dies. The pipe is what reaps them; this is for an
+  orderly stop that does not tear down stdio.
 
 - The **Windows** helper now pushes `camera_arrived` / `camera_departed` events, so the server no
   longer learns that the camera moved only by failing a call. Uses `CM_Register_Notification` on

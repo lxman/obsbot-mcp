@@ -133,6 +133,11 @@ export class DeviceManager {
   /** Lazily spawned, reused across scans until promoted into the registry. */
   private scanHelper?: HelperProcess;
   /**
+   * Long-lived listener. Holds no device and never scans for one — its only job
+   * is to still be alive, and still subscribed, when the cable moves.
+   */
+  private watcher?: HelperProcess;
+  /**
    * Reconnect tracking, folded in from the retired DeviceSession. `everBound`
    * records every serial this manager has bound at least once — deliberately
    * SEPARATE from the registry Map so it survives invalidate() dropping a
@@ -226,6 +231,77 @@ export class DeviceManager {
     }
   }
 
+  /**
+   * Keep one helper alive purely to receive bus events.
+   *
+   * Bus events are delivered per PROCESS (helperFactory subscribes each one it
+   * spawns), and every process that could be listening gets closed: a departure
+   * closes the registry helper, and a failed bind closes the scratch scanner.
+   * Since promote() clears `scanHelper`, the bound steady state is exactly ONE
+   * live helper — the registry's — so handleCameraDeparted() alone drops the
+   * subscriber count to zero. The arrival that follows is then delivered to
+   * nobody and the camera stays unbound until a tool call fails against it.
+   *
+   * PRIMING IS NOT OPTIONAL. A helper that has never enumerated receives
+   * nothing. Measured on hardware (darwin-arm64, Tiny 2, 2026-07-21) across one
+   * same-port replug, three processes, none of which opened the device:
+   *
+   *   enumerated while camera present -> departure YES, arrival YES
+   *   never enumerated                -> departure NO,  arrival NO
+   *   enumerated while camera absent   -> arrival YES
+   *
+   * The silent one stayed alive the whole run and answered a later enumerate
+   * correctly, so that was genuine non-delivery. Its first enumerate took 71ms
+   * against ~1ms for the primed pair — AVFoundation's discovery subsystem
+   * starting up for the first time. Registering the observers
+   * (helper.m:registerCameraNotifications) is NOT what starts delivery;
+   * touching the device list is.
+   *
+   * Windows enforces the same rule for an unrelated reason: helper.cpp drops
+   * any event whose path is missing from `g_knownPaths`, which only enumerate
+   * fills, and that cache is per-process. There the path must have been seen
+   * WHILE THE CAMERA WAS PRESENT — an enumerate during an absence cannot cache
+   * it. macOS has no such constraint: an arm primed during an absence received
+   * the arrival in the same millisecond as one primed while present.
+   *
+   * PRIMING REPEATS ON EVERY CALL, and that is Windows insurance specifically.
+   * macOS does NOT need it — measured across two full replug cycles, a watcher
+   * primed once at startup kept delivering (arrived=2, departed=2), identical
+   * to one that re-primed after every departure. The prime is a one-time
+   * activation there, not a lease. But on Windows a watcher whose predecessor
+   * DIED during an absence gets replaced while the camera is gone, never caches
+   * the path, and never self-corrects, because the guard below would otherwise
+   * early-return on a watcher that is alive and useless. Re-priming means the
+   * next successful bind — camera present by definition — repairs it. That
+   * reasoning is read from helper.cpp and is NOT verified on hardware.
+   *
+   * Costs one idle process once a camera has been bound. It opens nothing, so
+   * it holds no exclusive USB handle and the camera stays available to Zoom,
+   * OBS and OBSBOT Center — the constraint that shaped handleCameraArrived.
+   */
+  private async ensureWatcher(): Promise<void> {
+    if (this.everBound.size === 0) return; // never ours — stay hands-off
+    try {
+      if (!this.watcher || this.watcher.isDead) this.watcher = await this.makeHelper();
+      await this.watcher.enumerate(); // the touch that starts delivery — see above
+    } catch (e) {
+      // NEVER fatal. This runs AFTER promote(), so throwing would escape bind()
+      // with the camera already in the registry: the caller sees an exception
+      // while listCameras() reports it bound. The watcher only buys a proactive
+      // re-bind — without it recovery falls back to the failure-driven path,
+      // which is one extra call, exactly where things stood before it existed.
+      //
+      // Self-healing by construction: a spawn failure leaves `watcher`
+      // undefined and a prime failure leaves it unprimed, and either way the
+      // next ensureWatcher() call retries. Logged because a self-heal that
+      // fails quietly is the failure mode that cost a day of debugging.
+      this.log(
+        `obsbot-mcp: bus watcher unavailable (${errText(e)}); ` +
+          `replug recovery falls back to the next tool call`,
+      );
+    }
+  }
+
   private async getScanHelper(): Promise<HelperProcess> {
     // A cached scan helper whose process has died must be discarded, not
     // handed back. invalidate() only drops REGISTRY entries, so a helper that
@@ -309,6 +385,7 @@ export class DeviceManager {
     if (wantSerial) {
       if (matched && matched.serial === wantSerial) {
         this.promote(matched);
+        await this.ensureWatcher();
         return { transport: matched.transport, serial: matched.serial };
       }
       throw new UnknownCameraError(wantSerial, [...found.keys()]);
@@ -341,6 +418,13 @@ export class DeviceManager {
       // Cost is bounded: one spawn (~60ms) per FAILED bind, nothing on the
       // happy path, and it stops as soon as a camera binds.
       await this.discardScanHelper();
+      // That discard just closed what may have been the only process left. If
+      // the watcher had already died and nothing was bound, this failing call
+      // is the ONLY signal that the camera went away — the unplug itself was
+      // heard by nobody. Restore the listener (never the scanner, which stays
+      // unconditionally fresh) before throwing, or the replug that follows is
+      // silent too and costs a second failed call.
+      await this.ensureWatcher();
       // With nothing attached there is nothing to explain, so that message
       // stays exactly as it was.
       throw new Error(
@@ -355,6 +439,7 @@ export class DeviceManager {
     // Exactly one distinct serial: `matched` is guaranteed bound to it
     // (every successful candidate shared that one serial).
     this.promote(matched!);
+    await this.ensureWatcher();
     return { transport: matched!.transport, serial: matched!.serial };
   }
 
@@ -527,6 +612,17 @@ export class DeviceManager {
       }
       this.registry.delete(serial);
     }
+    // The close above may have removed the last live subscriber, and the arrival
+    // this departure pairs with has not happened yet. Replacing the watcher here
+    // matters when it died unnoticed while the camera was bound: the registry
+    // helper was still alive to hear THIS event, but nothing would be alive to
+    // hear the next one.
+    //
+    // The replacement is necessarily spawned with the camera absent, which
+    // primes it on macOS but not on Windows — see ensureWatcher(). On Windows
+    // this degrades to the failure-driven path and the next successful bind
+    // re-primes it, so the call is worth making on both.
+    await this.ensureWatcher();
   }
 
   /**
@@ -582,6 +678,36 @@ export class DeviceManager {
     } finally {
       this.rebinding = false;
     }
+  }
+
+  /**
+   * Close everything this manager is holding: registry helpers, the scratch
+   * scanner, and the watcher.
+   *
+   * Helpers already self-terminate when the parent goes away — they exit on
+   * stdin EOF — so this is not what stops them leaking on a crash. It exists
+   * because the watcher is the first helper deliberately built to outlive every
+   * operation: nothing else bounds its lifetime, so an orderly stop needs
+   * something explicit to call. Best-effort throughout; a shutdown path that can
+   * itself throw is worse than one that leaves a process for the OS to reap.
+   */
+  async shutdown(): Promise<void> {
+    const close = async (h: HelperProcess | undefined): Promise<void> => {
+      if (!h) return;
+      try {
+        await h.close();
+      } catch {
+        // best-effort — a disconnected helper's close() may itself throw
+      }
+    };
+    const watcher = this.watcher;
+    this.watcher = undefined;
+    await Promise.all([
+      ...[...this.registry.values()].map((e) => close(e.helper)),
+      this.discardScanHelper(),
+      close(watcher),
+    ]);
+    this.registry.clear();
   }
 
   /** Compat shim for the single-camera API B1 retires. */
