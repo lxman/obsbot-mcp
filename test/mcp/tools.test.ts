@@ -1790,3 +1790,51 @@ test("obsbot_gimbal_move_speed leaves in-range speeds untouched", async () => {
   expect(yaw).toBe(30);
   expect(pitch).toBe(-20);
 });
+
+// --- Tool descriptions are the model's only documentation ---
+//
+// These are read at the call site by the caller choosing arguments, so a
+// description that is wrong or silent about a hazard costs a failed call or an
+// unexpected physical movement. Each assertion below corresponds to something
+// found on hardware 2026-07-21 that the description did not convey.
+const describedBy = (name: string): string =>
+  findTool(createTools(makeFakeMgr(), undefined, true), name).description;
+
+test("obsbot_image_adjust warns that gain/backlight-compensation are unimplemented here", () => {
+  // Both report GET_LEN 0 on the Tiny 2 and now hard-error, but the enum still
+  // offers them, so a caller reading the old text would keep trying.
+  const d = describedBy("obsbot_image_adjust");
+  expect(d).toMatch(/gain/);
+  expect(d).toMatch(/not (implemented|supported)|unsupported/i);
+});
+
+test("obsbot_capture_record describes its default path without Windows separators", () => {
+  const d = describedBy("obsbot_capture_record");
+  expect(d).not.toMatch(/Videos\\/);       // "Videos\\OBSBOT" is wrong off Windows
+  expect(d).toMatch(/Videos\/OBSBOT/);
+});
+
+test("obsbot_status documents faceAe, which it actually returns", () => {
+  expect(describedBy("obsbot_status")).toMatch(/faceAe/);
+});
+
+test("obsbot_gimbal_recenter states its target pose and that it returns before arriving", () => {
+  const d = describedBy("obsbot_gimbal_recenter");
+  expect(d).toMatch(/0\s*°?\s*\/\s*0|yaw 0|0,\s*0/i);
+  expect(d).toMatch(/still be moving|before .* (arriv|complet)|asynchronous/i);
+});
+
+test("obsbot_sleep warns that it stows the gimbal", () => {
+  // Measured: sleep drives pitch to ~84° (camera face-down), wake returns to 0.
+  // That is a large physical movement a caller should not discover by surprise.
+  const d = describedBy("obsbot_sleep");
+  expect(d).toMatch(/stow|84|physically|points? down/i);
+});
+
+test("obsbot_wake warns that it un-stows the gimbal", () => {
+  expect(describedBy("obsbot_wake")).toMatch(/stow|level|physically|moves/i);
+});
+
+test("obsbot_image_exposure_manual documents the raw field it returns", () => {
+  expect(describedBy("obsbot_image_exposure_manual")).toMatch(/`?raw`?/);
+});

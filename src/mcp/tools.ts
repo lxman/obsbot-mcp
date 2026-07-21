@@ -442,7 +442,10 @@ export function createTools(
     },
     {
       name: "obsbot_wake",
-      description: "Wake the camera/gimbal (sends \"run\").",
+      description:
+        "Wake the camera/gimbal (sends \"run\"). This MOVES the camera: waking un-stows the " +
+        "gimbal and brings it back to level (pitch ~0). Most control commands also wake the " +
+        "camera implicitly as a side effect.",
       schema: wakeSchema,
       handler: async (args: unknown) => {
         const { camera } = wakeSchema.parse(args);
@@ -453,7 +456,10 @@ export function createTools(
     },
     {
       name: "obsbot_sleep",
-      description: "Sleep the camera/gimbal (sends \"sleep\").",
+      description:
+        "Sleep the camera/gimbal (sends \"sleep\"). This MOVES the camera: sleeping STOWS the " +
+        "gimbal, tilting it face-down to roughly pitch 84°, so obsbot_gimbal_position will read " +
+        "~84 rather than the pose you left it in. obsbot_wake un-stows it.",
       schema: sleepSchema,
       handler: async (args: unknown) => {
         const { camera } = sleepSchema.parse(args);
@@ -523,7 +529,10 @@ export function createTools(
     },
     {
       name: "obsbot_gimbal_recenter",
-      description: "Recenter the gimbal.",
+      description:
+        "Recenter the gimbal — drives it back to yaw 0 / pitch 0 (level and facing forward). " +
+        "Returns as soon as the command is sent: the gimbal may still be moving, so poll " +
+        "obsbot_gimbal_position if you need to know it has arrived.",
       schema: gimbalRecenterSchema,
       handler: async (args: unknown) => {
         const { camera } = gimbalRecenterSchema.parse(args);
@@ -638,7 +647,8 @@ export function createTools(
     {
       name: "obsbot_status",
       description:
-        "Read the camera's live status block. Returns { awake, hdr, aiMode, trackSpeed }: " +
+        "Read the camera's live status block. Returns { awake, hdr, faceAe, aiMode, trackSpeed }: " +
+        "faceAe is whether auto-exposure is metering for a detected face; " +
         "aiMode is the current AI framing (no-tracking|normal|upper-body|close-up|headless|" +
         "lower-body|desk|whiteboard|hand|group|unknown); trackSpeed is standard|sport|unknown. " +
         "Under --debug the result also carries `raw`: the full 60-byte status block as hex " +
@@ -1071,7 +1081,10 @@ export function createTools(
       description:
         "Adjust a standard image control: control is brightness | contrast | hue | " +
         "saturation | sharpness | gain | backlight-compensation; level 0-100 is mapped onto " +
-        "the device's supported range for that control. Standard UVC (IAMVideoProcAmp), no auto.",
+        "the device's supported range for that control. Standard UVC (IAMVideoProcAmp), no auto. " +
+        "NOTE: `gain` and `backlight-compensation` are NOT implemented on the Tiny 2 — it " +
+        "reports them as zero-length controls — so they are refused with an error rather than " +
+        "silently doing nothing. The other five work.",
       schema: imageControlSchema,
       handler: async (args: unknown) => {
         const { control, level, camera } = imageControlSchema.parse(args);
@@ -1118,7 +1131,8 @@ export function createTools(
       name: "obsbot_image_exposure_manual",
       description:
         "Set exposure level 0-100 (0 darkest → 100 brightest), mapped onto the device's " +
-        "exposure range. " +
+        "exposure range. Also returns `raw`: the device-native exposure value the level mapped " +
+        "to, for diagnostics — `level` is the number to reason with. " +
         "Uses the proprietary V3 frame protocol (CAM_SET_EXPOSURE_TINY2, which carries mode " +
         "and value in one command) because the standard UVC/IAMCameraControl V4L2 path is a " +
         "stub on the Tiny 2.",
@@ -1200,7 +1214,8 @@ export function createTools(
       description:
         "Start recording the camera to an MP4 (for the user). durationSec optional (open-ended " +
         "recordings auto-stop after 60 min); audio defaults to on (the OBSBOT mic); outputPath " +
-        "optional (defaults under Videos\\\\OBSBOT). NOTE: before calling, ensure the camera " +
+        "optional (defaults to ~/Videos/OBSBOT on every platform, including macOS, where that " +
+        "is NOT the usual ~/Movies). NOTE: before calling, ensure the camera " +
         "is focused (call obsbot_focus_auto for autofocus) unless otherwise " +
         "directed. source: device|virtual|ndi. Returns a sessionId " +
         "for obsbot_capture_stop.",
