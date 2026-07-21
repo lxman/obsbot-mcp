@@ -446,6 +446,25 @@ static IOReturn uvcGetMax(IOUSBDeviceInterface **intf,
   return uvcControl(intf, 0xA1, 0x83, selector, entityId, buf, len);
 }
 
+// GET_LEN — the control's own declared payload width, in bytes. This is the
+// authority on how wide every other request for that control must be, and it
+// doubles as a support check: a control this device does not implement reports
+// length 0 (verified on the Tiny 2 for PU_GAIN and PU_BACKLIGHT_COMPENSATION).
+//
+// Reading a control at the WRONG width does not fail cleanly — see the comment
+// on camctrlLen(). For Processing Unit controls it returned the right value in
+// the low 2 bytes with uninitialised junk above it, which varied between calls
+// (0x0200 one moment, 0x0001 the next), silently corrupting every min/max.
+static IOReturn uvcGetLen(IOUSBDeviceInterface **intf,
+                          uint8_t selector,
+                          uint8_t entityId,
+                          uint16_t *outLen) {
+  uint8_t buf[2] = {0, 0};
+  IOReturn kr = uvcControl(intf, 0xA1, 0x85, selector, entityId, buf, sizeof(buf));
+  if (kr == kIOReturnSuccess) *outLen = (uint16_t)(buf[0] | (buf[1] << 8));
+  return kr;
+}
+
 // ---------------------------------------------------------------------------
 // IAMCameraControl property → UVC selector/entity mapping
 // ---------------------------------------------------------------------------
@@ -848,6 +867,46 @@ static void doCamCtrlGet(NSString *propStr) {
 // IAMVideoProcAmp equivalents
 // ---------------------------------------------------------------------------
 
+// Ask the device how wide this Processing Unit control is, and refuse the
+// control outright if it does not implement it (GET_LEN 0). Every ProcAmp
+// transfer sizes itself from here, exactly as camera-terminal transfers size
+// themselves from camctrlLen().
+static BOOL procampWidth(uint8_t sel, const char *op, uint16_t *outLen) {
+  uint16_t len = 0;
+  IOReturn kr = uvcGetLen(g_session.usbDevice, sel, UVC_PU, &len);
+  if (kr != kIOReturnSuccess) {
+    err([NSString stringWithFormat:@"%s: GET_LEN failed (0x%x)", op, kr]);
+    return NO;
+  }
+  if (len == 0) {
+    // The device advertises no payload for this control, i.e. it is not
+    // implemented. Reporting success here would be a lie: the Tiny 2 does not
+    // STALL undefined selectors, so the write appears to succeed and nothing
+    // happens. PU_GAIN and PU_BACKLIGHT_COMPENSATION are both in this state.
+    err([NSString stringWithFormat:@"%s: control not supported by this device", op]);
+    return NO;
+  }
+  if (len > 4) {
+    err([NSString stringWithFormat:@"%s: unexpected control width %u", op, len]);
+    return NO;
+  }
+  *outLen = len;
+  return YES;
+}
+
+/** Little-endian encode/decode at the control's own width (1, 2 or 4 bytes). */
+static void procampEncode(int32_t v, uint8_t *buf, uint16_t len) {
+  for (uint16_t i = 0; i < len; i++) buf[i] = (uint8_t)((v >> (8 * i)) & 0xFF);
+}
+
+static int32_t procampDecode(const uint8_t *buf, uint16_t len) {
+  if (len == 1) return (int8_t)buf[0];
+  if (len == 2) return (int16_t)(buf[0] | (buf[1] << 8));
+  int32_t v = 0;
+  memcpy(&v, buf, len);
+  return v;
+}
+
 static void doProcAmpSet(NSString *propStr, NSString *valStr, NSString *flagsStr) {
   (void)flagsStr;
   if (!g_session.usbDevice) { err(@"procamp_set: no device open"); return; }
@@ -856,8 +915,12 @@ static void doProcAmpSet(NSString *propStr, NSString *valStr, NSString *flagsStr
   uint8_t sel = procampSel(prop);
   if (sel == 0) { err(@"procamp_set: unsupported property"); return; }
 
-  int32_t v = (int32_t)value;
-  IOReturn kr = uvcSetCur(g_session.usbDevice, sel, UVC_PU, &v, sizeof(v));
+  uint16_t len = 0;
+  if (!procampWidth(sel, "procamp_set", &len)) return;
+
+  uint8_t buf[4] = {0};
+  procampEncode((int32_t)value, buf, len);
+  IOReturn kr = uvcSetCur(g_session.usbDevice, sel, UVC_PU, buf, len);
   if (kr != kIOReturnSuccess) {
     err([NSString stringWithFormat:@"procamp_set: SET_CUR failed (0x%x)", kr]);
     return;
@@ -871,15 +934,19 @@ static void doProcAmpRange(NSString *propStr) {
   uint8_t sel = procampSel(prop);
   if (sel == 0) { err(@"procamp_range: unsupported property"); return; }
 
-  int32_t min = 0, max = 0;
-  IOReturn kr = uvcGetMin(g_session.usbDevice, sel, UVC_PU, &min, sizeof(min));
+  uint16_t len = 0;
+  if (!procampWidth(sel, "procamp_range", &len)) return;
+
+  uint8_t minBuf[4] = {0}, maxBuf[4] = {0};
+  IOReturn kr = uvcGetMin(g_session.usbDevice, sel, UVC_PU, minBuf, len);
   if (kr == kIOReturnSuccess)
-    kr = uvcGetMax(g_session.usbDevice, sel, UVC_PU, &max, sizeof(max));
+    kr = uvcGetMax(g_session.usbDevice, sel, UVC_PU, maxBuf, len);
   if (kr != kIOReturnSuccess) {
     err([NSString stringWithFormat:@"procamp_range: GET_MIN/MAX failed (0x%x)", kr]);
     return;
   }
-  ok([NSString stringWithFormat:@",\"min\":%d,\"max\":%d", min, max]);
+  ok([NSString stringWithFormat:@",\"min\":%d,\"max\":%d",
+        procampDecode(minBuf, len), procampDecode(maxBuf, len)]);
 }
 
 // ---------------------------------------------------------------------------
