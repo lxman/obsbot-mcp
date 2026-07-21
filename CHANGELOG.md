@@ -1,5 +1,36 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- `obsbot_ai_track` no longer reports `verified:"hand", matched:false` on framing writes that
+  actually succeeded. `AI_MODE_TABLE` mapped the status tuple `"6,0"` to `hand` (a defensive
+  mapping taken from the Tiny4Linux reference), but on this firmware `m=6` is the transient the
+  device parks at mid-switch — `hand` is `m=3`. Because `verifyFraming()` treats anything other
+  than `unknown` as a settled landing, decoding the transient as a real framing ended the poll
+  early and reported a false negative. Confirmed on hardware by polling XU selector 6 at 60 ms
+  across a `normal -> upper-body` switch: `m=2,n=0` (before) -> `m=6,n=0` (~200 ms transient) ->
+  `m=2,n=1` (landed). The transient is ~200 ms wide and the poll interval is 200 ms, so whether it
+  was sampled was a coin flip — hence the intermittency. Verified over 10 real framing switches on
+  one camera: the old decode gave 7/10 with 3 false negatives, the fix gives 10/10.
+
+- The MCP server handshake and all three native helpers reported version `0.1.0` while the package
+  was at `0.4.0`. All four now report the real version.
+
+### Internal
+
+- Added `test/mcp/framing-seam.test.ts`, which drives raw 60-byte status blocks through the real
+  `decodeStatus` into the real `verifyFraming`. Both existing suites stayed green through the
+  framing regression above because neither crossed that seam: the codec tests asserted the
+  tuple-to-label mapping while the framing tests hand-fed the literal string `"unknown"` as the
+  transient. Each half was self-consistent; only the join was wrong.
+
+- Added `test/version-sync.test.ts`, which fails if the version declared in `src/mcp/server.ts` or
+  any of the three native helpers drifts from `package.json`. The helpers compile separately and
+  `src/` cannot import `package.json` (`rootDir: "src"`), so the string has to be duplicated — this
+  makes the duplication safe rather than silent.
+
 ## [0.4.0] — 2026-07-20
 
 ### BREAKING: every tool renamed, no aliases

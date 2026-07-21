@@ -59,7 +59,8 @@ export async function startServer(opts: { debug?: boolean } = {}): Promise<void>
   process.on("SIGTERM", () => { shutdown(); process.exit(0); });
 
   const server = new Server(
-    { name: "obsbot-mcp", version: "0.1.0" },
+    // Must match package.json's version; test/version-sync.test.ts enforces it.
+    { name: "obsbot-mcp", version: "0.4.0" },
     { capabilities: { tools: {} } },
   );
 

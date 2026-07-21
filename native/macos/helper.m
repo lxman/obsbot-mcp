@@ -559,7 +559,8 @@ static void pumpRunLoop(NSTimeInterval seconds) {
 // ---------------------------------------------------------------------------
 
 static void doVersion(void) {
-  ok(@",\"version\":\"0.1.0-macos\"");
+  // Must match package.json's version; test/version-sync.test.ts enforces it.
+  ok(@",\"version\":\"0.4.0-macos\"");
 }
 
 static void doEnumerate(void) {
