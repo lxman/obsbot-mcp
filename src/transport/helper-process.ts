@@ -52,12 +52,17 @@ const SNAPSHOT_RPC_TIMEOUT_MS = 30_000;
 //    this repo, which anchors the numbering.
 //  - linux: the helper formats errno via strerror(), so ENODEV is exactly
 //    "No such device".
-//
-// Windows is deliberately ABSENT: its helper reports DirectShow HRESULTs and
-// the device-removal code has not been observed on hardware. Guessing one risks
-// matching an unrelated failure and dropping a working binding, which is the
-// one outcome this list must never cause. Add it once it has been seen.
-const DEVICE_LOST_SIGNATURES = [/0xe00002c0/i, /No such device/i];
+//  - win32: HRESULT 0x800701b1 = HRESULT_FROM_WIN32(433) ERROR_DEV_NOT_EXIST,
+//    "A device which does not exist was specified." Hardware-observed
+//    2026-07-21 (Tiny 2, cable pull with the device held open). BOTH DirectShow
+//    surfaces report the identical code — the KS/XU vendor property path
+//    ("KsProperty GET failed (hr=0x800701b1)") and IAMCameraControl
+//    ("IAMCameraControl::Get failed (hr=0x800701b1)") — so one pattern covers
+//    both. Worth recording that none of the plausible guesses was right:
+//    not 0x8007001F (ERROR_GEN_FAILURE), not 0x800705B4 (timeout), not
+//    0x8007048F (ERROR_DEVICE_NOT_CONNECTED), not VFW_E_NOT_CONNECTED. This
+//    entry exists because it was measured, not inferred.
+const DEVICE_LOST_SIGNATURES = [/0xe00002c0/i, /No such device/i, /0x800701b1/i];
 
 /** A camera the OS reported as attached or detached, pushed by the helper. */
 export interface CameraEvent {

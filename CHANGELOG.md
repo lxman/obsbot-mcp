@@ -4,6 +4,20 @@
 
 ### Fixed
 
+- Mid-session device-loss recovery now works on **Windows**. `DEVICE_LOST_SIGNATURES` had entries
+  for macOS and Linux but none for Windows, because the DirectShow removal code had never been
+  observed — so a camera unplugged mid-session stranded the binding until the server restarted,
+  exactly as it had on macOS before that platform was fixed. Measured on hardware (Tiny 2, cable
+  pull with the device held open): the code is `0x800701b1` = `HRESULT_FROM_WIN32(433)`
+  `ERROR_DEV_NOT_EXIST`, and **both** DirectShow surfaces — the KS/XU vendor property path and
+  `IAMCameraControl` — report it identically, so one pattern covers both. None of the plausible
+  guesses (`0x8007001F`, `0x800705B4`, `0x8007048F`, `VFW_E_NOT_CONNECTED`) was correct, which is
+  why this was observed rather than inferred.
+
+  Verified end to end across a same-port replug: the device-lost error is detected, the stale
+  binding is pruned and re-scanned within ~500 ms, and the camera re-binds automatically once it
+  returns — no restart, no manual `invalidate()`.
+
 - `obsbot_ai_track` no longer reports `verified:"hand", matched:false` on framing writes that
   actually succeeded. `AI_MODE_TABLE` mapped the status tuple `"6,0"` to `hand` (a defensive
   mapping taken from the Tiny4Linux reference), but on this firmware `m=6` is the transient the
