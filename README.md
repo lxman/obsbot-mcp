@@ -235,7 +235,7 @@ What has actually been exercised against hardware, and what hasn't:
 |---|---|
 | `win32-x64` | Builds in CI |
 | `linux-x64` | Builds in CI |
-| `darwin-arm64` | **Hardware-verified** — control, gimbal movement **and per-axis position readback**, zoom, and snapshot on a real Tiny 2 |
+| `darwin-arm64` | **Hardware-verified** — control, gimbal movement **and per-axis position readback**, zoom, snapshot, USB vid/pid candidacy, serial readback and serial-keyed binding, single-owner IPC coordination, and helper-death recovery, on a real Tiny 2 |
 | `darwin-x64` | **Build-verified only** — compiles with the right architecture and deployment target, never executed |
 
 - **The Intel (`darwin-x64`) helper has never been run.** No Intel Mac was available to test it. It
@@ -258,10 +258,26 @@ What has actually been exercised against hardware, and what hasn't:
 - **The camera may not enumerate through a USB hub or dock.** A Tiny 2 connected through a USB-C
   dock was invisible to `ioreg` and `system_profiler` entirely — not just to this server. If
   `obsbot_devices` comes back empty, try a direct connection before assuming a software fault.
-- **Only the OBSBOT Tiny 2 is supported.** On macOS the USB vendor/product IDs are hardcoded
-  (`0x3564`/`0xFEF8`), so no other model is detected at all. Windows and Linux match devices by
-  name, so a different OBSBOT may be *found* — but the vendor command set is Tiny 2 specific
-  either way.
+- **Only the OBSBOT Tiny 2 is supported.** On Windows and macOS candidacy is gated on the Remo USB
+  vendor ID plus a known-model product ID (`0x3564`/`0xFEF8`), so no other model is detected at
+  all — and a name-matching software source, such as the "OBSBOT Virtual Camera" that OBSBOT Center
+  registers, is rejected because it reports no vid/pid. Linux still matches by name, because its
+  helper does not report vid/pid yet, so a different OBSBOT may be *found* there — but the vendor
+  command set is Tiny 2 specific either way. (On macOS the virtual camera cannot appear at all: the
+  helper enumerates USB devices through the IORegistry, which a software camera never enters.)
+- **One macOS bind failure has been seen once and never reproduced.** On 2026-07-21 a Tiny 2
+  entered a state where the vendor reply mailbox (XU selector 2) returned only the host's own
+  echoed request frame — magic byte `0xaa` cleared to `0x00`, every other byte identical — for a
+  continuous 3.2 s of polling. `readSerial()` therefore threw, `bind()` found no serial, and every
+  tool that needs a bound camera failed with "no OBSBOT camera found" while the device was plainly
+  healthy: it enumerated with the correct vid/pid, opened, returned XU node 2, and kept serving a
+  live status block on selector 6. It has not recurred in roughly fifty subsequent trials, and the
+  trigger is unknown. Ruled out: reply latency (polled 3.2 s), the wrong extension unit (the
+  VideoControl interface exposes exactly one, `bUnitID 2`), the wrong `wLength` (every XU selector
+  is 60 bytes by `GET_LEN`), the reply arriving on another selector (1–19 swept), camera sleep
+  state, and contention from OBSBOT Center. If you hit it, the symptom is a mailbox read equal to
+  the frame you just sent with byte 0 zeroed; the bind error now names the rejected candidate and
+  the reason rather than reporting an absent camera.
 - **Two-camera operation is not yet hardware-verified.** The `camera` selector and the
   per-camera device registry are covered by the unit test suite against fake transports; running
   two physical Tiny 2s attached at once has not been confirmed on real hardware (a second unit

@@ -421,10 +421,12 @@ export function createTools(
       name: "obsbot_devices",
       description:
         "List attached OBSBOT-compatible cameras. Each entry is { serial?, locationId?, name, " +
-        "status }: serial is the value to pass as `camera` to any camera-addressing tool " +
+        "status, reason? }: serial is the value to pass as `camera` to any camera-addressing tool " +
         "(present where obtainable — reading it requires briefly opening the camera); status " +
-        "is available (free to bind), bound (already opened by this process), or busy (held by " +
-        "another process — serial not obtainable, so it can't be targeted here).",
+        "is available (free to bind), bound (already opened by this process), or busy (could not " +
+        "be opened and identified, so it can't be targeted here — usually another process holds " +
+        "it, but it also covers a camera that opened yet would not answer). On a busy entry, " +
+        "`reason` carries the underlying error and distinguishes those cases.",
       schema: listDevicesSchema,
       handler: async (args: unknown) => {
         listDevicesSchema.parse(args);
