@@ -22,6 +22,15 @@ rl.on("line", (line) => {
       // might emit on stdout before the real JSON response.
       process.stdout.write("this is not json, just a stray log line\n");
       return send({ ok: true, version: "fake-1" });
+    case "die":
+      // Exit without answering, simulating a helper that crashes (or is killed)
+      // with a request in flight — the shape that wedged the MCP server when a
+      // helper was killed to replace its locked binary.
+      return process.exit(1);
+    case "hang":
+      // Stay alive and never answer, simulating a helper wedged in the driver.
+      // No 'exit' fires for this one, so only a timeout can unstick it.
+      return;
     case "enumerate":
       return send({
         ok: true,
