@@ -99,7 +99,7 @@ with no serial, since it can't be opened to read one.
 | Tool | Parameters | Description |
 |------|------------|-------------|
 | `obsbot_gimbal_move` | `yaw`, `pitch`, `roll` (degrees, `roll` defaults `0`), `camera`? | Move the gimbal to an absolute angle. Positive yaw pans to the camera's left, positive pitch tilts down. Yaw clamped to `[-150, 150]`, pitch to `[-90, 90]`. Absolute 1:1 degrees, hardware-verified. |
-| `obsbot_gimbal_move_speed` | `yaw`, `pitch`, `roll` (deg/s, `roll` defaults `0`), `autoStopMs` (default `800`), `camera`? | Drive the gimbal at a speed, then auto-stop after `autoStopMs` so it can't run away. Same yaw/pitch sign convention as `gimbal_move`. |
+| `obsbot_gimbal_move_speed` | `yaw`, `pitch`, `roll` (deg/s, clamped to `±150`, `roll` defaults `0`), `autoStopMs` (default `800`), `camera`? | Drive the gimbal at a speed, then auto-stop after `autoStopMs` so it can't run away. Same yaw/pitch sign convention as `gimbal_move`. Returns the speeds actually used. Past its limit the firmware ignores the command outright rather than saturating — 180 deg/s and above move the gimbal exactly 0° — so requests are clamped into the hardware-verified band. |
 | `obsbot_gimbal_recenter` | `camera`? | Recenter the gimbal (return to home position). |
 | `obsbot_gimbal_position` | `camera`? | Read the gimbal's current absolute `{ yaw, pitch }` in degrees via standard UVC Pan/Tilt. Valid during a move as well as after one. |
 
@@ -235,7 +235,7 @@ What has actually been exercised against hardware, and what hasn't:
 |---|---|
 | `win32-x64` | Builds in CI |
 | `linux-x64` | Builds in CI |
-| `darwin-arm64` | **Hardware-verified** — control, gimbal movement **and per-axis position readback**, zoom, snapshot, USB vid/pid candidacy, serial readback and serial-keyed binding, single-owner IPC coordination, and helper-death recovery, on a real Tiny 2 |
+| `darwin-arm64` | **Hardware-verified** — control, gimbal movement **and per-axis position readback**, zoom, snapshot, USB vid/pid candidacy, serial readback and serial-keyed binding, single-owner IPC coordination, helper-death recovery, and **unaided recovery from an unplug/replug**, on a real Tiny 2 |
 | `darwin-x64` | **Build-verified only** — compiles with the right architecture and deployment target, never executed |
 
 - **The Intel (`darwin-x64`) helper has never been run.** No Intel Mac was available to test it. It
