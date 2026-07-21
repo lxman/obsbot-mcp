@@ -128,6 +128,28 @@ test("a live helper reporting kIOReturnNoDevice is flagged as having lost its de
   await h.close();
 });
 
+// Windows, hardware-observed 2026-07-21 (Tiny 2, cable pull with the device held
+// open). The list had no Windows entry, so the whole prune-and-rebind path was
+// dead here exactly as it had been on macOS.
+//
+// Two things the observation settled that reading the code could not:
+//   - the actual code is 0x800701b1 = HRESULT_FROM_WIN32(433) ERROR_DEV_NOT_EXIST.
+//     NONE of the plausible guesses (0x8007001F ERROR_GEN_FAILURE, 0x800705B4
+//     timeout, 0x8007048F ERROR_DEVICE_NOT_CONNECTED, VFW_E_NOT_CONNECTED) was it.
+//   - the KS/XU property path and IAMCameraControl return the SAME HRESULT, so one
+//     pattern covers both DirectShow surfaces rather than needing one each.
+test.each([
+  ["KS/XU property path", "device_gone_windows"],
+  ["IAMCameraControl path", "device_gone_windows_camctrl"],
+])("a live helper reporting ERROR_DEV_NOT_EXIST (%s) is flagged as having lost its device", async (_label, op) => {
+  const h = spawnFake();
+  await h.start();
+  await expect(mustSettle(rpcOf(h)({ op }))).rejects.toThrow(/800701b1/);
+  expect(h.deviceLost).toBe(true);
+  expect(h.isDead).toBe(false); // the PROCESS is fine -- only its USB handle died
+  await h.close();
+});
+
 test("an ordinary helper error does NOT flag the device as lost", async () => {
   // Condemning a working binding on any random failure would be worse than the
   // bug: one bad argument would drop a healthy camera.

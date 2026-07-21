@@ -47,6 +47,15 @@ rl.on("line", (line) => {
       // shape of an unplugged camera on macOS (kIOReturnNoDevice, 0xe00002c0).
       // Hardware-observed 2026-07-21 after a cable pull.
       return send({ ok: false, error: "xu_get: USB control request failed (0xe00002c0)" });
+    case "device_gone_windows":
+      // The Windows shape of the same event. Hardware-observed 2026-07-21 on a
+      // cable pull while a helper held the device open: BOTH DirectShow paths --
+      // the KS/XU vendor property and IAMCameraControl -- returned the identical
+      // HRESULT 0x800701b1 = HRESULT_FROM_WIN32(433) ERROR_DEV_NOT_EXIST,
+      // "A device which does not exist was specified."
+      return send({ ok: false, error: "xu_get: KsProperty GET failed (hr=0x800701b1)" });
+    case "device_gone_windows_camctrl":
+      return send({ ok: false, error: "camctrl_get: IAMCameraControl::Get failed (hr=0x800701b1)" });
     case "some_other_error":
       // An ordinary failure that says nothing about the device being attached.
       // Must NOT condemn a working binding.
