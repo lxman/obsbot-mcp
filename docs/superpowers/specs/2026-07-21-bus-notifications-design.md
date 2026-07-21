@@ -91,6 +91,25 @@ Parse `{"event":...}` lines and expose them as typed callbacks
   which matters on a device Zoom / OBS / OBSBOT Center also want, while still
   removing the failed first call after a replug.
 
+### 5. `helperFactory` — subscribe every helper
+
+`DeviceManager` spawns helpers through a factory, and there is no single
+long-lived one: the scratch scanner is promoted into the registry on bind and the
+next scan spawns another. So the subscription belongs in the factory
+(`src/device/helper-factory.ts`), where whichever process is alive when the cable
+moves is the one that reports it.
+
+Two details that are not free choices:
+
+- **Subscribe before `start()`.** After it, a camera plugged in during spawn emits
+  into nothing and the arrival is lost.
+- **`getMgr` is a thunk.** The manager is constructed *with* this factory, so it
+  does not exist when the factory is built; it is resolved when an event fires.
+
+The factory takes an injectable helper constructor purely so this is testable —
+left inline in `startServer()` nothing covered it, and deleting the two
+subscriptions broke no test while disabling the whole feature.
+
 ## Non-goals
 
 - Linux (`udev_monitor_new_from_netlink`) and Windows (`CM_Register_Notification`)
@@ -126,3 +145,25 @@ Parse `{"event":...}` lines and expose them as typed callbacks
    `open: missing path`.
 3. Snapshot still works, including immediately after a replug.
 4. No helper leak; no regression in the 400-test suite.
+
+## Result — all four met on hardware (2026-07-21, macOS 26.5, Tiny 2 `RMOWAHG3293TTL`)
+
+Physical unplug/replug on the same port, driven through the real `mcp__obsbot__*`
+tools against the running server:
+
+| | before | after |
+|---|---|---|
+| `obsbot_devices` after unplug, no failed call first | phantom `bound` + serial | `{"cameras":[]}` |
+| `obsbot_devices` after replug, before any camera call | nothing bound | already `bound` |
+| first real tool call after replug | failed (`0xe00002c0`) | succeeded |
+| `obsbot_capture_snapshot` immediately after replug | — | real frame, nested run loop intact |
+| helper processes at rest | — | 2 (registry + scan), no accumulation |
+
+The re-bind is attributable to the arrival event, not to the call that observed
+it: `listCameras()` only *reads* the registry, and `status:"bound"` can only be
+written by `promote()`, which only `bind()` calls. Nothing invoked between the
+replug and that reading binds.
+
+Run twice — once with the subscription inline in `startServer()`, then again
+after extracting `helperFactory` — because the second refactor changed the
+runtime path the first run had verified.
