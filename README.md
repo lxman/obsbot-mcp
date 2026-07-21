@@ -90,9 +90,9 @@ with no serial, since it can't be opened to read one.
 | Tool | Parameters | Description |
 |------|------------|-------------|
 | `obsbot_devices` | — | List attached OBSBOT cameras with each one's serial (where obtainable), name, and status (`available`/`bound`/`busy`). A `busy` camera is held by another process. |
-| `obsbot_wake` | `camera`? | Wake the camera/gimbal (sends `"run"`). |
-| `obsbot_sleep` | `camera`? | Sleep the camera/gimbal (sends `"sleep"`). |
-| `obsbot_status` | `camera`? | Read the live status block: `{ awake, hdr, aiMode, trackSpeed }`. Under `--debug`, also returns the raw 60-byte block as hex. |
+| `obsbot_wake` | `camera`? | Wake the camera/gimbal (sends `"run"`). **Moves the camera:** un-stows the gimbal back to level (pitch ~0). Most control commands also wake it implicitly. |
+| `obsbot_sleep` | `camera`? | Sleep the camera/gimbal (sends `"sleep"`). **Moves the camera:** stows the gimbal face-down at roughly pitch `84`, so `obsbot_gimbal_position` reads ~84 rather than the pose you left. |
+| `obsbot_status` | `camera`? | Read the live status block: `{ awake, hdr, faceAe, aiMode, trackSpeed }` (`faceAe` = auto-exposure metering for a detected face). Under `--debug`, also returns the raw 60-byte block as hex. |
 
 ### Gimbal (PTZ)
 
@@ -100,7 +100,7 @@ with no serial, since it can't be opened to read one.
 |------|------------|-------------|
 | `obsbot_gimbal_move` | `yaw`, `pitch`, `roll` (degrees, `roll` defaults `0`), `camera`? | Move the gimbal to an absolute angle. Positive yaw pans to the camera's left, positive pitch tilts down. Yaw clamped to `[-150, 150]`, pitch to `[-90, 90]`. Absolute 1:1 degrees, hardware-verified. |
 | `obsbot_gimbal_move_speed` | `yaw`, `pitch`, `roll` (deg/s, clamped to `±150`, `roll` defaults `0`), `autoStopMs` (default `800`), `camera`? | Drive the gimbal at a speed, then auto-stop after `autoStopMs` so it can't run away. Same yaw/pitch sign convention as `gimbal_move`. Returns the speeds actually used. Past its limit the firmware ignores the command outright rather than saturating — 180 deg/s and above move the gimbal exactly 0° — so requests are clamped into the hardware-verified band. |
-| `obsbot_gimbal_recenter` | `camera`? | Recenter the gimbal (return to home position). |
+| `obsbot_gimbal_recenter` | `camera`? | Recenter the gimbal — drives it to yaw `0` / pitch `0`. Returns as soon as the command is sent, so poll `obsbot_gimbal_position` if you need to know it arrived. |
 | `obsbot_gimbal_position` | `camera`? | Read the gimbal's current absolute `{ yaw, pitch }` in degrees via standard UVC Pan/Tilt. Valid during a move as well as after one. |
 
 ### Gimbal presets
@@ -154,7 +154,7 @@ splitting them lets each schema say exactly what it needs.
 | `obsbot_image_exposure_manual` | `level` (`0`–`100`, default `50`), `camera`? | Set exposure `level` (0 darkest → 100 brightest). |
 | `obsbot_image_wb_auto` | `camera`? | Enable auto white balance. |
 | `obsbot_image_wb_manual` | `temperature` (Kelvin, default `5000`), `camera`? | Set a colour temperature (clamped to device range). |
-| `obsbot_image_adjust` | `control`, `level` (`0`–`100`), `camera`? | Adjust `brightness \| contrast \| hue \| saturation \| sharpness \| gain \| backlight-compensation`; `level` maps onto the device range. |
+| `obsbot_image_adjust` | `control`, `level` (`0`–`100`), `camera`? | Adjust `brightness \| contrast \| hue \| saturation \| sharpness \| gain \| backlight-compensation`; `level` maps onto the device range. **`gain` and `backlight-compensation` are not implemented on the Tiny 2** (it reports them as zero-length controls) and are refused with an error; the other five work. |
 
 ### Capture
 
@@ -167,7 +167,7 @@ name, independent of `camera`.
 | Tool | Parameters | Description |
 |------|------------|-------------|
 | `obsbot_capture_snapshot` | `resolution` (`256`–`1920`, default `640`), `quality` (`1`–`100`, default `80`), `settleMs` (default `600`), `source` (default `"device"`), `camera`? (source:"device" only) | Grab one still frame and return it as an image (for framing/lighting/exposure checks). `resolution` is the longest edge in pixels — larger costs proportionally more tokens. `source`: `device \| virtual \| ndi`. |
-| `obsbot_capture_record` | `durationSec` (optional), `audio` (default `true`), `outputPath` (optional), `source` (default `"device"`) | Start recording to MP4. Open-ended recordings auto-stop after 60 min; audio uses the OBSBOT mic; defaults under `Videos/OBSBOT`. Returns a `sessionId`. **Needs ffmpeg.**¹ No `camera`. |
+| `obsbot_capture_record` | `durationSec` (optional), `audio` (default `true`), `outputPath` (optional), `source` (default `"device"`) | Start recording to MP4. Open-ended recordings auto-stop after 60 min; audio uses the OBSBOT mic; defaults to `~/Videos/OBSBOT` on every platform, including macOS, where that is not the usual `~/Movies`. Returns a `sessionId`. **Needs ffmpeg.**¹ No `camera`. |
 | `obsbot_capture_preview` | `source` (default `"device"`) | Open a live preview window. Returns a `sessionId`. **Needs ffplay.**¹ No `camera`. |
 | `obsbot_capture_stop` | `sessionId` | Stop a recording or preview session (recordings are finalized gracefully). No `camera`. |
 | `obsbot_capture_list` | — | List active recording/preview sessions. No `camera`. |
