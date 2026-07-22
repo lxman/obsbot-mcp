@@ -79,6 +79,38 @@ test("camCtrl delegated to helper", async () => {
   expect(r).toEqual({ value: 80, flags: 2 });
 });
 
+test("gimbalSet writes pan/tilt via V4L2 camCtrlSet, in parallel", async () => {
+  const helper = makeFakeHelper();
+  const t = new LinuxTransport(helper);
+
+  await t.gimbalSet(10, 5);
+
+  // yaw=10 -> pan raw = 10*3600 = 36000; pitch=5 (down) -> tilt raw = -5*3600 = -18000.
+  expect(helper.camCtrlSet).toHaveBeenCalledWith(0, 36000, 2);
+  expect(helper.camCtrlSet).toHaveBeenCalledWith(1, -18000, 2);
+  expect(helper.xuSet).not.toHaveBeenCalled();
+});
+
+test("gimbalRecenter writes pan=0, tilt=0 via V4L2 camCtrlSet", async () => {
+  const helper = makeFakeHelper();
+  const t = new LinuxTransport(helper);
+
+  await t.gimbalRecenter();
+
+  expect(helper.camCtrlSet).toHaveBeenCalledWith(0, 0, 2);
+  expect(helper.camCtrlSet).toHaveBeenCalledWith(1, 0, 2);
+});
+
+test("gimbalSpeed sends a vendor frame then an auto-stop frame, negating yaw", async () => {
+  const helper = makeFakeHelper();
+  const t = new LinuxTransport(helper);
+
+  await t.gimbalSpeed(10, 5, 0, 1);
+
+  expect(helper.xuSet).toHaveBeenCalledTimes(2);
+  expect(helper.camCtrlSet).not.toHaveBeenCalled();
+});
+
 test("procAmp delegated to helper", async () => {
   const helper = makeFakeHelper();
   const t = new LinuxTransport(helper);

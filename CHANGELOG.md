@@ -63,6 +63,29 @@
   binding is pruned and re-scanned within ~500 ms, and the camera re-binds automatically once it
   returns — no restart, no manual `invalidate()`.
 
+- Linux gimbal absolute moves were landing at ~28% of the requested angle. `V4L2_CID_PAN_ABSOLUTE`/
+  `TILT_ABSOLUTE` map to the UVC `CT_PANTILT_ABSOLUTE` control, whose unit is arc-seconds per both
+  the UVC and V4L2 specs (confirmed on hardware: pan range ±468000, step 3600 — exactly ±130° at
+  3600 units/degree), but the transport divided by 1000 (mislabeled as "millidegrees"). This went
+  undetected because `gimbalSet` (write) and `camCtrlGet` (read) shared the same wrong divisor, so
+  a move-then-read check always reported 0 error while the true physical angle was ~28% of what was
+  asked for — physically confirmed after the fix: a `yaw=80` request now swings ~80°, not ~22°.
+
+  A parallel investigation explored bypassing V4L2 entirely for both reads and writes via raw USB
+  (`libusb`, with the kernel driver briefly detached) to get genuinely live position feedback — this
+  device's firmware does track live position, confirmed by a raw USB read tracking a real slew in
+  real time. That approach was reverted: detaching the kernel driver from the camera's control
+  interface, even briefly and even without writing anything, breaks any concurrent video capture on
+  this device (streaming and control share one kernel-managed USB function), which makes it
+  incompatible with actually using the camera as a webcam at the same time. `obsbot_gimbal_move` and
+  `obsbot_gimbal_recenter` are hardware-verified to work reliably via plain V4L2 writes instead — 20
+  consecutive absolute moves succeeded with a live preview running throughout. `obsbot_gimbal_move_speed`
+  is now hidden on Linux specifically: a speed×duration burst has no target position to clamp before
+  sending, and without live position feedback there's no way to bound it against the gimbal's
+  mechanical limits — `obsbot_gimbal_move`'s absolute target can be (and is) clamped up front instead.
+  See README's "Linux gimbal position feedback is not live" for the kernel-level cause (`uvcvideo`
+  doesn't mark these controls `V4L2_CTRL_FLAG_VOLATILE`) and the upstream patch submitted for it.
+
 ### Added
 
 - `DeviceManager.shutdown()` closes every helper it holds — registry, scratch scanner, and watcher —

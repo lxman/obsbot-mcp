@@ -98,6 +98,40 @@ function findTool(tools: ReturnType<typeof createTools>, name: string) {
   return t;
 }
 
+// obsbot_gimbal_move_speed is hidden specifically on Linux (see createTools),
+// but its clamping/negation logic is shared, platform-agnostic handler code —
+// these tests exercise that logic from a platform where the tool isn't hidden,
+// independent of whatever platform the test suite itself happens to run on.
+function withPlatform<T>(platform: string, fn: () => T): T {
+  const original = Object.getOwnPropertyDescriptor(process, "platform")!;
+  Object.defineProperty(process, "platform", { value: platform });
+  try {
+    return fn();
+  } finally {
+    Object.defineProperty(process, "platform", original);
+  }
+}
+
+function createToolsAsIfNotLinux(
+  ...args: Parameters<typeof createTools>
+): ReturnType<typeof createTools> {
+  return withPlatform("win32", () => createTools(...args));
+}
+
+test("obsbot_gimbal_move_speed is hidden on Linux — no live position feedback to bound it", () => {
+  const names = withPlatform("linux", () => createTools(makeFakeMgr()).map((t) => t.name));
+  expect(names).not.toContain("obsbot_gimbal_move_speed");
+  // The absolute-move tools remain fully available — only the unbounded speed
+  // burst is affected.
+  expect(names).toContain("obsbot_gimbal_move");
+  expect(names).toContain("obsbot_gimbal_recenter");
+});
+
+test("obsbot_gimbal_move_speed is present on non-Linux platforms", () => {
+  const names = withPlatform("win32", () => createTools(makeFakeMgr()).map((t) => t.name));
+  expect(names).toContain("obsbot_gimbal_move_speed");
+});
+
 // Hard break: the v0.4.0 1:1 renames (naming spec §3). Old names must not
 // resolve — there are no aliases.
 const RENAMES: [string, string][] = [
@@ -117,7 +151,12 @@ const RENAMES: [string, string][] = [
   ["obsbot_preview_start", "obsbot_capture_preview"],
 ];
 test.each(RENAMES)("%s is renamed to %s (old name gone)", (oldName, newName) => {
-  const names = createTools(makeFakeMgr()).map((t) => t.name);
+  // createToolsAsIfNotLinux, not createTools: obsbot_gimbal_move_speed is hidden
+  // on Linux (tested separately above), which would make this rename-presence
+  // check platform-dependent for that one row — this test is only about the
+  // rename having happened, so it always checks from a platform where nothing
+  // is hidden.
+  const names = createToolsAsIfNotLinux(makeFakeMgr()).map((t) => t.name);
   expect(names).toContain(newName);
   expect(names).not.toContain(oldName);
 });
@@ -176,7 +215,7 @@ test("obsbot_sleep sends sleep status without a state arg", async () => {
 test("obsbot_gimbal_move_speed sends move then auto-stop", async () => {
   const transport = makeFakeTransport();
   const mgr = makeFakeMgr(transport);
-  const tools = createTools(mgr);
+  const tools = createToolsAsIfNotLinux(mgr);
   const tool = findTool(tools, "obsbot_gimbal_move_speed");
 
   const result = await tool.handler({ yaw: 10, pitch: 5, roll: 0, autoStopMs: 1 });
@@ -194,7 +233,7 @@ test("obsbot_gimbal_move_speed negates yaw so +yaw pans camera-left (matches gim
   // AI_SET_GIM_SPEED but LEFT on AI_SET_GIM_MOTOR_DEG (HW-observed). The tool normalizes
   // so a caller's +yaw means the same physical direction (camera-left) on both tools.
   const transport = makeFakeTransport();
-  const tools = createTools(makeFakeMgr(transport));
+  const tools = createToolsAsIfNotLinux(makeFakeMgr(transport));
   const tool = findTool(tools, "obsbot_gimbal_move_speed");
 
   await tool.handler({ yaw: 40, pitch: 0, roll: 0, autoStopMs: 0 });
@@ -1753,7 +1792,7 @@ test("obsbot_capture_snapshot honours an explicit resolution", async () => {
 // result and a camera that never moved, which is the worst of both worlds.
 test("obsbot_gimbal_move_speed clamps to the hardware-verified degrees/second band", async () => {
   const transport = makeFakeTransport();
-  const tools = createTools(makeFakeMgr(transport));
+  const tools = createToolsAsIfNotLinux(makeFakeMgr(transport));
   const tool = findTool(tools, "obsbot_gimbal_move_speed");
 
   await tool.handler({ yaw: 999, pitch: -999, roll: 0, autoStopMs: 0 });
@@ -1766,7 +1805,7 @@ test("obsbot_gimbal_move_speed clamps to the hardware-verified degrees/second ba
 
 test("obsbot_gimbal_move_speed reports the clamped speed it actually used", async () => {
   const transport = makeFakeTransport();
-  const tools = createTools(makeFakeMgr(transport));
+  const tools = createToolsAsIfNotLinux(makeFakeMgr(transport));
   const tool = findTool(tools, "obsbot_gimbal_move_speed");
 
   const result = (await tool.handler({ yaw: 999, pitch: 0, roll: 0, autoStopMs: 0 })) as {
@@ -1776,13 +1815,13 @@ test("obsbot_gimbal_move_speed reports the clamped speed it actually used", asyn
 });
 
 test("obsbot_gimbal_move_speed documents its unit as degrees per second", async () => {
-  const tool = findTool(createTools(makeFakeMgr()), "obsbot_gimbal_move_speed");
+  const tool = findTool(createToolsAsIfNotLinux(makeFakeMgr()), "obsbot_gimbal_move_speed");
   expect(tool.description).toMatch(/degrees per second|deg\/s/i);
 });
 
 test("obsbot_gimbal_move_speed leaves in-range speeds untouched", async () => {
   const transport = makeFakeTransport();
-  const tools = createTools(makeFakeMgr(transport));
+  const tools = createToolsAsIfNotLinux(makeFakeMgr(transport));
   const tool = findTool(tools, "obsbot_gimbal_move_speed");
 
   await tool.handler({ yaw: 30, pitch: -20, roll: 0, autoStopMs: 0 });

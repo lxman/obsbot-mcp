@@ -99,9 +99,9 @@ with no serial, since it can't be opened to read one.
 | Tool | Parameters | Description |
 |------|------------|-------------|
 | `obsbot_gimbal_move` | `yaw`, `pitch`, `roll` (degrees, `roll` defaults `0`), `camera`? | Move the gimbal to an absolute angle. Positive yaw pans to the camera's left, positive pitch tilts down. Yaw clamped to `[-150, 150]`, pitch to `[-90, 90]`. Absolute 1:1 degrees, hardware-verified. |
-| `obsbot_gimbal_move_speed` | `yaw`, `pitch`, `roll` (deg/s, clamped to `±150`, `roll` defaults `0`), `autoStopMs` (default `800`), `camera`? | Drive the gimbal at a speed, then auto-stop after `autoStopMs` so it can't run away. Same yaw/pitch sign convention as `gimbal_move`. Returns the speeds actually used. Past its limit the firmware ignores the command outright rather than saturating — 180 deg/s and above move the gimbal exactly 0° — so requests are clamped into the hardware-verified band. |
+| `obsbot_gimbal_move_speed` | `yaw`, `pitch`, `roll` (deg/s, clamped to `±150`, `roll` defaults `0`), `autoStopMs` (default `800`), `camera`? | Drive the gimbal at a speed, then auto-stop after `autoStopMs` so it can't run away. Same yaw/pitch sign convention as `gimbal_move`. Returns the speeds actually used. Past its limit the firmware ignores the command outright rather than saturating — 180 deg/s and above move the gimbal exactly 0° — so requests are clamped into the hardware-verified band. **Not available on Linux** — see [limitations](#linux-gimbal-position-feedback-is-not-live). |
 | `obsbot_gimbal_recenter` | `camera`? | Recenter the gimbal — drives it to yaw `0` / pitch `0`. Returns as soon as the command is sent, so poll `obsbot_gimbal_position` if you need to know it arrived. |
-| `obsbot_gimbal_position` | `camera`? | Read the gimbal's current absolute `{ yaw, pitch }` in degrees via standard UVC Pan/Tilt. Valid during a move as well as after one. |
+| `obsbot_gimbal_position` | `camera`? | Read the gimbal's current absolute `{ yaw, pitch }` in degrees via standard UVC Pan/Tilt. Valid during a move as well as after one. On Linux this is the last-*commanded* value, not a live in-flight reading — see [limitations](#linux-gimbal-position-feedback-is-not-live). |
 
 ### Gimbal presets
 
@@ -188,10 +188,14 @@ need ffmpeg — it grabs the frame through the native helper.
   (CMake + MSVC); the published npm package ships a prebuilt binary so end users need no toolchain.
 - **Linux x64** — supported from v0.2. The native helper is in `native/linux/` (CMake + GCC);
   it uses **V4L2** for standard UVC controls (zoom, focus, exposure, pan/tilt, white balance,
-  image controls) and `UVCIOC_CTRL_QUERY` for vendor Extension Unit commands (gimbal, AI tracking,
-  wake/sleep, HDR, FOV). Snapshots capture a MJPEG or YUYV frame via V4L2 mmap streaming and encode
-  to JPEG using **libjpeg**. The `linux-x64` prebuilt binary ships with the published npm package.
-  Build dependencies: `build-essential cmake libjpeg-dev libv4l-dev`.
+  image controls) and `UVCIOC_CTRL_QUERY` for vendor Extension Unit commands (gimbal speed/AI
+  tracking, wake/sleep, HDR, FOV). Snapshots capture a MJPEG or YUYV frame via V4L2 mmap streaming
+  and encode to JPEG using **libjpeg**. The `linux-x64` prebuilt binary ships with the published npm
+  package. Build dependencies: `build-essential cmake libjpeg-dev libv4l-dev`.
+
+  Gimbal *position* reads (`obsbot_gimbal_position`) reflect the last-commanded value, not live
+  in-flight position — see ["Linux gimbal position feedback"](#linux-gimbal-position-feedback-is-not-live)
+  below for why, and what would fix it.
 - **macOS 14+ (Apple Silicon and Intel)** — supported. The native helper is in `native/macos/`
   (Objective-C + **IOKit**/**AVFoundation**). It uses IOKit USB control transfers for both standard
   UVC controls and vendor Extension Unit commands, and AVFoundation for enumeration and snapshots.
@@ -217,6 +221,39 @@ cmake ..
 make -j$(nproc)
 make install  # copies to native/prebuilt/linux-x64/
 ```
+
+### Linux gimbal position feedback is not live
+
+`obsbot_gimbal_position` on Linux reports the last position `obsbot_gimbal_move`/
+`obsbot_gimbal_recenter` commanded — not a live, in-flight reading. This is a Linux kernel-driver
+gap, not a firmware limitation: hardware testing (2026-07-21) confirmed the OBSBOT Tiny 2's
+`CT_PANTILT_ABSOLUTE` control genuinely tracks live position — a raw USB read of that same control,
+bypassing the kernel, showed a real slew progressing in real time. The reason plain V4L2
+(`VIDIOC_G_CTRL`) never sees that is that `uvcvideo` doesn't mark `V4L2_CID_PAN_ABSOLUTE`/
+`TILT_ABSOLUTE` as `V4L2_CTRL_FLAG_VOLATILE` on this kernel (confirmed via `VIDIOC_QUERY_EXT_CTRL`),
+so the V4L2 core control framework serves its own cache of the last `VIDIOC_S_CTRL` value instead of
+re-querying the device.
+
+Getting a genuinely live reading through V4L2 requires briefly detaching the kernel driver from
+the camera's control interface and reading the control directly over raw USB — but detaching that
+interface (even briefly, even without writing anything) breaks any concurrent video capture on this
+device: streaming and control share one kernel-managed USB function, so pulling the driver off one
+takes both down together. That makes a libusb-based workaround incompatible with anything actually
+using the camera as a webcam at the same time, which ruled it out as a shipped default.
+
+**A kernel patch has been submitted upstream** to mark these controls volatile in `uvcvideo`,
+matching precedent — this device already has one OBSBOT-specific quirk merged
+(`UVC_QUIRK_OBSBOT_MIN_SETTINGS`, a different bug). If it lands, `obsbot_gimbal_position` would
+become live through plain V4L2 with no code changes needed here. Until then:
+
+- `obsbot_gimbal_move` and `obsbot_gimbal_recenter` work normally — hardware-verified,
+  repeatedly, via direct V4L2 `VIDIOC_S_CTRL` writes. Their target values are known and clamped
+  before being sent, so they can't exceed the gimbal's mechanical range regardless of the missing
+  feedback.
+- **`obsbot_gimbal_move_speed` is not available on Linux** (hidden from the tool list entirely,
+  not just refused at runtime). A speed×duration burst has no target position to clamp — without a
+  live reading to confirm where the gimbal actually is, there's no way to bound it against the
+  mechanical limits before it gets there. It remains available on Windows/macOS.
 
 ### Building the native helper (macOS)
 
@@ -292,6 +329,10 @@ What has actually been exercised against hardware, and what hasn't:
   per-camera device registry are covered by the unit test suite against fake transports; running
   two physical Tiny 2s attached at once has not been confirmed on real hardware (a second unit
   wasn't available). Single-camera use is unaffected either way.
+- **Linux gimbal position feedback is not live, and `obsbot_gimbal_move_speed` is unavailable
+  there as a result.** See ["Linux gimbal position feedback is not live"](#linux-gimbal-position-feedback-is-not-live)
+  above — a kernel patch has been submitted to fix this at the source. `obsbot_gimbal_move` and
+  `obsbot_gimbal_recenter` are unaffected; both are hardware-verified to work normally.
 - **`obsbot_zoom_vendor`'s ratio scale doesn't match `obsbot_zoom_uvc`'s at the same `ratio`.** A
   hardware snapshot comparison at `ratio: 2.0` showed the vendor path framed tighter than the UVC
   path. Whether the vendor-side ratio encoding is off by a scale factor, or the two zoom controls

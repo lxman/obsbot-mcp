@@ -19,7 +19,7 @@ const STATUS_BLOCK_LEN = 60;
 // factor of 3.6x on both the read and write side — self-consistently wrong, since
 // gimbalSet and camCtrlGet shared the same bad divisor, so a move-then-read check
 // always reported 0 error while the true physical angle was ~28% of what was asked
-// for. See GIMBAL-POSITION-USB-2026-07-21.md §5.
+// for.
 const ARCSEC_PER_DEG = 3600;
 
 /**
@@ -28,11 +28,18 @@ const ARCSEC_PER_DEG = 3600;
  * stdio protocol. The selector constants are camera-side constants (the UVC
  * Extension Unit), not OS constants, so they are shared.
  *
- * Key difference: gimbal movement uses V4L2 pan_absolute/tilt_absolute
- * (hardware-proven to physically move the gimbal), NOT vendor V3 frames,
- * because vendor frames break V4L2 position readback on this device.
- * camCtrlGet for pan/tilt converts V4L2 arc-seconds to degrees to match
- * the Windows DirectShow convention used by the rest of the codebase.
+ * Key difference: gimbal absolute movement uses V4L2 pan_absolute/tilt_absolute
+ * (hardware-verified to physically move the gimbal, repeatedly, 2026-07-21),
+ * NOT vendor V3 frames. camCtrlGet for pan/tilt reads back the same V4L2
+ * controls — this is the last-*commanded* value, not a live in-flight
+ * reading: VIDIOC_QUERY_EXT_CTRL reports these controls as non-volatile on
+ * this kernel, so V4L2 core serves its own cache rather than re-querying the
+ * device. Getting a genuinely live reading requires a raw USB read with the
+ * kernel driver briefly detached, which conflicts with any concurrent video
+ * capture (preview/recording) and was deliberately dropped from the shipped
+ * transport for that reason — see README's Linux limitations section. A
+ * kernel patch marking these controls volatile would fix this at the source;
+ * until then, gimbal moves on Linux are open-loop, same as the position read.
  */
 export class LinuxTransport implements ObsbotTransport {
   private seq = 0;
@@ -89,7 +96,8 @@ export class LinuxTransport implements ObsbotTransport {
   async camCtrlGet(property: number): Promise<{ value: number; flags: number }> {
     const result = await this.helper.camCtrlGet(property);
     // V4L2 pan_absolute/tilt_absolute return arc-seconds, but the rest of
-    // the codebase expects degrees (Windows DirectShow convention).
+    // the codebase expects degrees (Windows DirectShow convention). This is
+    // the last-commanded value, not a live reading — see the class comment.
     if (property === 0 || property === 1) {
       result.value = Math.round(result.value / ARCSEC_PER_DEG);
     }
@@ -106,9 +114,9 @@ export class LinuxTransport implements ObsbotTransport {
 
   /**
    * Move the gimbal using V4L2 pan_absolute/tilt_absolute (arc-seconds).
-   * Unlike vendor V3 frames, V4L2 writes keep the position readback working
-   * (VIDIOC_G_CTRL returns the last-set value, which physically moved the gimbal
-   * — proven by snapshot MD5 comparison 2026-07-19).
+   * Hardware-verified to physically move the gimbal (2026-07-21, repeated
+   * across many absolute targets). Unlike vendor V3 frames, V4L2 writes keep
+   * camCtrlGet's echo in sync with what was actually commanded.
    *
    * Sign convention: V4L2 pan_absolute + = camera's left (matches our yaw sign).
    * V4L2 tilt_absolute + = tilt up (opposite of our +pitch = down convention).
@@ -123,8 +131,13 @@ export class LinuxTransport implements ObsbotTransport {
 
   /**
    * Drive the gimbal at a speed for a duration, using vendor-frame velocity
-   * protocol (fire-and-forget, no position readback).
-   * gimbalSet (V4L2) handles position-based movement where readback matters.
+   * protocol (fire-and-forget, no position readback). Not reachable from the
+   * Linux tool surface (obsbot_gimbal_move_speed is hidden on this platform):
+   * without a live position reading there is no way to confirm a speed burst
+   * stays within the gimbal's mechanical range before it gets there, unlike
+   * gimbalSet's absolute target, which can be clamped up front regardless of
+   * current position. Kept implemented here for ObsbotTransport conformance
+   * and for any future internal use once live feedback exists.
    */
   async gimbalSpeed(yaw: number, pitch: number, roll: number, autoStopMs: number): Promise<void> {
     // Firmware velocity-yaw is inverted relative to position-yaw (same vendor
@@ -139,7 +152,7 @@ export class LinuxTransport implements ObsbotTransport {
 
   /**
    * Recenter the gimbal via V4L2 pan_absolute=0, tilt_absolute=0.
-   * Proven to physically recenter the gimbal (HW-verified 2026-07-19).
+   * Hardware-verified to physically recenter the gimbal (2026-07-21).
    */
   async gimbalRecenter(): Promise<void> {
     await Promise.all([

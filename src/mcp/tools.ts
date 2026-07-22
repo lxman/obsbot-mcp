@@ -1281,5 +1281,14 @@ export function createTools(
   // obsbot_debug_probe is an RE/diagnostics-only tool (raw XU byte access); expose it
   // only under --debug so normal deployments don't advertise it. get_status's raw
   // block is gated the same way, inside its handler.
-  return debug ? toolDefs : toolDefs.filter((t) => t.name !== "obsbot_debug_probe");
+  const filtered = debug ? toolDefs : toolDefs.filter((t) => t.name !== "obsbot_debug_probe");
+
+  // obsbot_gimbal_move_speed is hidden on Linux specifically: without live position
+  // feedback there (see LinuxTransport's class comment), a speed×duration burst can't
+  // be verified to stay within the gimbal's mechanical range before it gets there —
+  // unlike an absolute target, which is clamped up front regardless of current
+  // position. obsbot_gimbal_move/obsbot_gimbal_recenter remain fully available.
+  return process.platform === "linux"
+    ? filtered.filter((t) => t.name !== "obsbot_gimbal_move_speed")
+    : filtered;
 }
