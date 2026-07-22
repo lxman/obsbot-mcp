@@ -270,8 +270,8 @@ What has actually been exercised against hardware, and what hasn't:
 
 | Platform | Status |
 |---|---|
-| `win32-x64` | Builds in CI |
-| `linux-x64` | Builds in CI |
+| `win32-x64` | **Hardware-verified** — mid-session disconnect recovery (`ERROR_DEV_NOT_EXIST`, measured not guessed), camera arrival/removal push events, proactive re-bind across a **same-port** replug with no tool call, white balance, and the ProcAmp control ranges, on a real Tiny 2. A **different-port** replug recovers on the next tool call rather than proactively — see below |
+| `linux-x64` | **Hardware-verified** — gimbal absolute moves and recenter via V4L2 (20 consecutive moves with a live preview running), and the arc-second scaling fix confirmed by physical swing. Gimbal *position* is not live and `obsbot_gimbal_move_speed` is unavailable — see below |
 | `darwin-arm64` | **Hardware-verified** — control, gimbal movement **and per-axis position readback**, zoom, snapshot, USB vid/pid candidacy, serial readback and serial-keyed binding, single-owner IPC coordination, helper-death recovery, and **unaided recovery from an unplug/replug**, on a real Tiny 2 |
 | `darwin-x64` | **Build-verified only** — compiles with the right architecture and deployment target, never executed |
 
@@ -325,6 +325,26 @@ What has actually been exercised against hardware, and what hasn't:
   (the VideoControl interface exposes exactly one, `bUnitID 2`), the wrong `wLength` (every XU
   selector is 60 bytes by `GET_LEN`), the reply arriving on another selector (1–19 swept), camera
   sleep state, and contention from OBSBOT Center.
+- **Recovery after a replug is proactive, but not in every case, and it differs by platform.**
+  The server subscribes to OS camera arrival/removal events, so in the common case a replugged
+  camera re-binds itself with no tool call — `obsbot_devices` reports it `bound` again on its own.
+  Every cell below is hardware-measured:
+
+  | scenario | macOS | Windows | Linux |
+  |---|---|---|---|
+  | same-port replug | proactive | proactive | next tool call |
+  | different-port replug | proactive | next tool call | next tool call |
+
+  Where it says "next tool call", nothing is stranded — the call that follows detects the stale
+  binding, prunes it and re-binds. It costs one failed call, which is exactly how every platform
+  behaved before these events existed. The Windows difference comes from its arrival filter
+  requiring a path it has already enumerated, which is also what stops the Tiny 2's *audio*
+  interface from being reported as a second camera; macOS has no equivalent problem because it
+  re-binds by serial and ignores the path. Linux emits no bus events at all yet.
+
+  Note the interaction with the mailbox entry above: a re-bind attempted immediately after a
+  replug can still lose the first attempt, so the server retries on a short bounded ladder.
+
 - **Two-camera operation is not yet hardware-verified.** The `camera` selector and the
   per-camera device registry are covered by the unit test suite against fake transports; running
   two physical Tiny 2s attached at once has not been confirmed on real hardware (a second unit
