@@ -5,7 +5,7 @@
 // written to stdout; diagnostics (if any) go to stderr.
 //
 // Ops:
-//   {"op":"version"}                              -> {"ok":true,"version":"0.4.0"}
+//   {"op":"version"}                              -> {"ok":true,"version":"0.4.1"}
 //   {"op":"enumerate"}                             -> {"ok":true,"devices":[{"path":"...","name":"..."}]}
 //   {"op":"open","path":"..."}                     -> {"ok":true,"xuNode":N}
 //   {"op":"nodes"}                                 -> {"ok":true,"nodes":[{"index":N,"type":"{...}"}]}
@@ -369,7 +369,7 @@ static void releaseSession() {
 // ---- ops -------------------------------------------------------------
 
 // Must match package.json's version; test/version-sync.test.ts enforces it.
-static void doVersion() { ok(",\"version\":\"0.4.0\""); }
+static void doVersion() { ok(",\"version\":\"0.4.1\""); }
 
 static void doEnumerate() {
   ICreateDevEnum* devEnum = nullptr;

@@ -225,14 +225,14 @@ make install  # copies to native/prebuilt/linux-x64/
 ### Linux gimbal position feedback is not live
 
 `obsbot_gimbal_position` on Linux reports the last position `obsbot_gimbal_move`/
-`obsbot_gimbal_recenter` commanded — not a live, in-flight reading. This is a Linux kernel-driver
-gap, not a firmware limitation: hardware testing (2026-07-21) confirmed the OBSBOT Tiny 2's
-`CT_PANTILT_ABSOLUTE` control genuinely tracks live position — a raw USB read of that same control,
-bypassing the kernel, showed a real slew progressing in real time. The reason plain V4L2
-(`VIDIOC_G_CTRL`) never sees that is that `uvcvideo` doesn't mark `V4L2_CID_PAN_ABSOLUTE`/
-`TILT_ABSOLUTE` as `V4L2_CTRL_FLAG_VOLATILE` on this kernel (confirmed via `VIDIOC_QUERY_EXT_CTRL`),
-so the V4L2 core control framework serves its own cache of the last `VIDIOC_S_CTRL` value instead of
-re-querying the device.
+`obsbot_gimbal_recenter` commanded — not a live, in-flight reading. Hardware testing (2026-07-21)
+confirmed the OBSBOT Tiny 2's `CT_PANTILT_ABSOLUTE` control genuinely tracks live position — a raw
+USB read of that same control, bypassing the kernel, showed a real slew progressing in real time.
+The reason plain V4L2 (`VIDIOC_G_CTRL`) never sees that is that `uvcvideo` caches the control's
+value and serves the cache instead of re-querying the device (confirmed via
+`VIDIOC_QUERY_EXT_CTRL`, which reports no `V4L2_CTRL_FLAG_VOLATILE`). The driver invalidates that
+cache when the device sends a UVC Control Change interrupt — which this camera's firmware never
+does, and never advertises support for.
 
 Getting a genuinely live reading through V4L2 requires briefly detaching the kernel driver from
 the camera's control interface and reading the control directly over raw USB — but detaching that
@@ -241,10 +241,8 @@ device: streaming and control share one kernel-managed USB function, so pulling 
 takes both down together. That makes a libusb-based workaround incompatible with anything actually
 using the camera as a webcam at the same time, which ruled it out as a shipped default.
 
-**A kernel patch has been submitted upstream** to mark these controls volatile in `uvcvideo`,
-matching precedent — this device already has one OBSBOT-specific quirk merged
-(`UVC_QUIRK_OBSBOT_MIN_SETTINGS`, a different bug). If it lands, `obsbot_gimbal_position` would
-become live through plain V4L2 with no code changes needed here. Until then:
+**A kernel patch is being worked on.** If one lands, `obsbot_gimbal_position` would become live
+through plain V4L2 with no code changes needed here. Until then:
 
 - `obsbot_gimbal_move` and `obsbot_gimbal_recenter` work normally — hardware-verified,
   repeatedly, via direct V4L2 `VIDIOC_S_CTRL` writes. Their target values are known and clamped
@@ -351,7 +349,7 @@ What has actually been exercised against hardware, and what hasn't:
   wasn't available). Single-camera use is unaffected either way.
 - **Linux gimbal position feedback is not live, and `obsbot_gimbal_move_speed` is unavailable
   there as a result.** See ["Linux gimbal position feedback is not live"](#linux-gimbal-position-feedback-is-not-live)
-  above — a kernel patch has been submitted to fix this at the source. `obsbot_gimbal_move` and
+  above — a kernel patch to fix this at the source is being worked on. `obsbot_gimbal_move` and
   `obsbot_gimbal_recenter` are unaffected; both are hardware-verified to work normally.
 - **`obsbot_zoom_vendor`'s ratio scale doesn't match `obsbot_zoom_uvc`'s at the same `ratio`.** A
   hardware snapshot comparison at `ratio: 2.0` showed the vendor path framed tighter than the UVC

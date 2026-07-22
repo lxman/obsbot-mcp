@@ -78,7 +78,7 @@ export async function startServer(opts: { debug?: boolean } = {}): Promise<void>
 
   const server = new Server(
     // Must match package.json's version; test/version-sync.test.ts enforces it.
-    { name: "obsbot-mcp", version: "0.4.0" },
+    { name: "obsbot-mcp", version: "0.4.1" },
     { capabilities: { tools: {} } },
   );
 

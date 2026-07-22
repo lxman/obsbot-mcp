@@ -314,7 +314,7 @@ static int probe_xu_unit(int fd)
 static void do_version(void)
 {
     /* Must match package.json's version; test/version-sync.test.ts enforces it. */
-    printf("{\"ok\":true,\"version\":\"0.4.0\",\"helper\":\"v4l2\"}\n");
+    printf("{\"ok\":true,\"version\":\"0.4.1\",\"helper\":\"v4l2\"}\n");
     fflush(stdout);
 }
 

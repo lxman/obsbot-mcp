@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.4.1] — 2026-07-21
+
+### Fixed
+
+- **Docs: the Linux gimbal-position section made claims that were not true.** It stated a kernel
+  patch "has been submitted upstream" — none was. It cited `UVC_QUIRK_OBSBOT_MIN_SETTINGS` as an
+  already-merged OBSBOT quirk setting precedent; that macro has never existed in the kernel. The
+  fix for OBSBOT's relative pan/tilt/zoom speeds did land (January 2026), but as a *general* helper
+  applying to all UVC devices, not a vendor quirk. It also attributed the stale readings to the
+  V4L2 core control framework, which `uvcvideo` does not use for these controls — the cache is
+  `uvcvideo`'s own.
+
+  The section now says a patch is being worked on, and describes the real mechanism: `uvcvideo`
+  caches the control and invalidates that cache on a UVC Control Change interrupt, which this
+  camera's firmware never sends and never advertises support for (measured: `GET_INFO` returns a
+  constant `0x03` for every Camera Terminal control, leaving the Autoupdate and Asynchronous
+  capability bits clear, contrary to UVC 1.5 §2.4.4).
+
+  No behavior change — `obsbot_gimbal_position` on Linux still reports last-commanded position, and
+  `obsbot_gimbal_move_speed` remains hidden there for the same unchanged reason. See
+  `UVCVIDEO-LINUX-POSITION-2026-07-21.md` for the full investigation.
+
 ## [0.4.0] — 2026-07-21
 
 ### BREAKING: every tool renamed, no aliases
