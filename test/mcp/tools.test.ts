@@ -1877,3 +1877,153 @@ test("obsbot_wake warns that it un-stows the gimbal", () => {
 test("obsbot_image_exposure_manual documents the raw field it returns", () => {
   expect(describedBy("obsbot_image_exposure_manual")).toMatch(/`?raw`?/);
 });
+
+// --- obsbot_aim_at_pixel ---
+//
+// The tool takes NO optics parameters: it reads the FOV mode from the status
+// block instead. An earlier design took `fov` from the caller, which would have
+// made a wrong value a silent 36% aiming error (wide vs narrow).
+//
+// Everything it cannot verify is a refusal, never a silent miss.
+
+// Status block variants. HEALTHY_STATUS_AWAKE already reads wide (block[0x11]=0)
+// with no zoom (block[0x04]=0), so it serves as the happy path unmodified.
+const statusFov = (fovByte: number, zoomByte = 0): Buffer => {
+  const b = Buffer.from(HEALTHY_STATUS_AWAKE);
+  b[0x11] = fovByte;
+  b[0x04] = zoomByte;
+  return b;
+};
+// AI mode tuple lives at block[0x18] / block[0x1c]; the awake fixture decodes to
+// no-tracking. Setting m=2 moves it off no-tracking (see AI_MODE_TABLE).
+const statusTracking = (): Buffer => {
+  const b = Buffer.from(HEALTHY_STATUS_AWAKE);
+  b[0x18] = 2;
+  b[0x1c] = 0;
+  return b;
+};
+
+const HD_FRAME = { frameWidth: 1280, frameHeight: 720 };
+
+test("aiming at the center pixel leaves the pose unchanged", async () => {
+  const transport = makeFakeTransport();
+  const tool = findTool(createTools(makeFakeMgr(transport)), "obsbot_aim_at_pixel");
+  const r = (await tool.handler({ x: 640, y: 360, ...HD_FRAME })) as {
+    ok: boolean; target: { yaw: number; pitch: number }; clamped: boolean; fovMode: string;
+  };
+  expect(r.ok).toBe(true);
+  expect(r.target.yaw).toBeCloseTo(0, 6);
+  expect(r.target.pitch).toBeCloseTo(0, 6);
+  expect(r.clamped).toBe(false);
+  expect(r.fovMode).toBe("wide");
+  expect(transport.gimbalSet).toHaveBeenCalled();
+});
+
+test("an off-center pixel commands the offset the geometry module computes", async () => {
+  const transport = makeFakeTransport();
+  const tool = findTool(createTools(makeFakeMgr(transport)), "obsbot_aim_at_pixel");
+  // x=960 is u=0.5 on a 1280-wide frame; on wide (68deg) that is -18.64deg.
+  const r = (await tool.handler({ x: 960, y: 360, ...HD_FRAME })) as {
+    ok: boolean; target: { yaw: number }; offset: { dYaw: number };
+  };
+  expect(r.ok).toBe(true);
+  expect(r.offset.dYaw).toBeCloseTo(-18.64, 2);
+  expect(r.target.yaw).toBeCloseTo(-18.64, 2);
+});
+
+test("the FOV mode is READ, not assumed — narrow gives a different angle than wide", async () => {
+  const transport = makeFakeTransport();
+  transport.recvStatus = vi.fn(async () => statusFov(2)); // narrow
+  const tool = findTool(createTools(makeFakeMgr(transport)), "obsbot_aim_at_pixel");
+  const r = (await tool.handler({ x: 960, y: 360, ...HD_FRAME })) as {
+    ok: boolean; offset: { dYaw: number }; fovMode: string;
+  };
+  expect(r.ok).toBe(true);
+  expect(r.fovMode).toBe("narrow");
+  // narrow is 50deg, so u=0.5 gives -13.12deg, NOT wide's -18.64deg. This is the
+  // test that would have caught the original parameter-guessing design.
+  expect(r.offset.dYaw).toBeCloseTo(-13.12, 2);
+  expect(r.offset.dYaw).not.toBeCloseTo(-18.64, 1);
+});
+
+test("active AI tracking is refused, naming the mode", async () => {
+  const transport = makeFakeTransport();
+  transport.recvStatus = vi.fn(async () => statusTracking());
+  const tool = findTool(createTools(makeFakeMgr(transport)), "obsbot_aim_at_pixel");
+  const r = (await tool.handler({ x: 640, y: 360, ...HD_FRAME })) as { ok: boolean; error: string };
+  expect(r.ok).toBe(false);
+  expect(r.error).toMatch(/track/i);
+  expect(r.error).toMatch(/obsbot_ai_track/);
+  expect(transport.gimbalSet).not.toHaveBeenCalled();
+});
+
+test("a custom zoom is refused — the magnification mapping is uncalibrated", async () => {
+  const transport = makeFakeTransport();
+  transport.recvStatus = vi.fn(async () => statusFov(3, 100));
+  const tool = findTool(createTools(makeFakeMgr(transport)), "obsbot_aim_at_pixel");
+  const r = (await tool.handler({ x: 640, y: 360, ...HD_FRAME })) as { ok: boolean; error: string };
+  expect(r.ok).toBe(false);
+  expect(r.error).toMatch(/zoom/i);
+  expect(transport.gimbalSet).not.toHaveBeenCalled();
+});
+
+test("an unrecognised FOV mode is refused rather than guessed", async () => {
+  const transport = makeFakeTransport();
+  transport.recvStatus = vi.fn(async () => statusFov(9));
+  const tool = findTool(createTools(makeFakeMgr(transport)), "obsbot_aim_at_pixel");
+  const r = (await tool.handler({ x: 640, y: 360, ...HD_FRAME })) as { ok: boolean; error: string };
+  expect(r.ok).toBe(false);
+  expect(transport.gimbalSet).not.toHaveBeenCalled();
+});
+
+test("a non-16:9 frame is refused as a transposition or typo", async () => {
+  const transport = makeFakeTransport();
+  const tool = findTool(createTools(makeFakeMgr(transport)), "obsbot_aim_at_pixel");
+  const r = (await tool.handler({ x: 100, y: 100, frameWidth: 720, frameHeight: 1280 })) as {
+    ok: boolean; error: string;
+  };
+  expect(r.ok).toBe(false);
+  expect(r.error).toMatch(/16:9|aspect/i);
+  expect(transport.gimbalSet).not.toHaveBeenCalled();
+});
+
+test("a pixel outside the frame is refused", async () => {
+  const transport = makeFakeTransport();
+  const tool = findTool(createTools(makeFakeMgr(transport)), "obsbot_aim_at_pixel");
+  const r = (await tool.handler({ x: 5000, y: 360, ...HD_FRAME })) as { ok: boolean; error: string };
+  expect(r.ok).toBe(false);
+  expect(transport.gimbalSet).not.toHaveBeenCalled();
+});
+
+test("saturation is reported and never commands an out-of-range pose", async () => {
+  const transport = makeFakeTransport();
+  // Current yaw 149; the left frame edge adds +34deg, which would be 183.
+  transport.camCtrlGet = vi.fn(async (p: number) => ({ value: p === 0 ? 149 : 0, flags: 0 }));
+  const tool = findTool(createTools(makeFakeMgr(transport)), "obsbot_aim_at_pixel");
+  const r = (await tool.handler({ x: 0, y: 360, ...HD_FRAME })) as {
+    ok: boolean; target: { yaw: number }; clamped: boolean;
+  };
+  expect(r.ok).toBe(true);
+  expect(r.clamped).toBe(true);
+  expect(r.target.yaw).toBe(150);
+  expect(transport.gimbalSet).toHaveBeenCalledWith(150, expect.any(Number), expect.any(Number));
+});
+
+test("a sleeping camera is woken, not refused", async () => {
+  const transport = makeFakeTransport();
+  let first = true;
+  transport.recvStatus = vi.fn(async () => {
+    if (first) { first = false; return HEALTHY_STATUS_ASLEEP; }
+    return HEALTHY_STATUS_AWAKE;
+  });
+  const tool = findTool(createTools(makeFakeMgr(transport)), "obsbot_aim_at_pixel");
+  const r = (await tool.handler({ x: 640, y: 360, ...HD_FRAME })) as { ok: boolean };
+  expect(r.ok).toBe(true);
+  expect(transport.gimbalSet).toHaveBeenCalled();
+});
+
+test("the tool description warns that the frame size must match the pixel's frame", () => {
+  const tool = findTool(createTools(makeFakeMgr()), "obsbot_aim_at_pixel");
+  expect(tool.description).toMatch(/same/i);
+  expect(tool.description).toMatch(/obsbot_capture_snapshot/);
+});
