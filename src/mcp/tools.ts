@@ -32,7 +32,7 @@ import {
   UVC_FLAG_MANUAL,
 } from "../codec/commands.js";
 import type { AiTrackSpeed, AiFramingMode, AiSceneMode, AiModeStatus, FovType, ImageControl } from "../codec/commands.js";
-import { aimAtPixel, GIMBAL_YAW_LIMIT_DEG, GIMBAL_PITCH_LIMIT_DEG } from "../geometry/aim.js";
+import { aimAtPixel, GIMBAL_YAW_LIMIT_DEG, GIMBAL_PITCH_LIMIT_DEG, FOV_MAGNIFICATION } from "../geometry/aim.js";
 import { verifyFraming } from "./framing.js";
 import { parseFrame } from "../codec/frame.js";
 import { OP_BY_NAME } from "../codec/opcodes.js";
@@ -938,12 +938,12 @@ export function createTools(
         const yaw = (await t.camCtrlGet(CAMERA_CONTROL_PAN)).value;
         const pitch = -(await t.camCtrlGet(CAMERA_CONTROL_TILT)).value;
 
-        // zoom:1 — the measured FOV constants already include each discrete
-        // mode's inherent crop, so applying zoomPercent again would double-count.
+        // The mode's magnification alone — it already includes that discrete
+        // mode's inherent crop, so folding in zoomPercent too would double-count.
         const aim = aimAtPixel(
           x, y,
           { width: frameWidth, height: frameHeight },
-          { fov: status.fovMode, zoom: 1 },
+          { magnification: FOV_MAGNIFICATION[status.fovMode] },
           { yaw, pitch },
         );
 

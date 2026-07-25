@@ -18,13 +18,22 @@ export interface Pose {
 }
 
 export interface Optics {
-  fov: FovType;
-  /** Zoom factor, >= 1. Zoom is a crop, so it divides the tangent. Defaults to 1. */
-  zoom?: number;
+  /**
+   * Total linear magnification relative to the WIDE field, which is 1.0.
+   *
+   * One number, deliberately. The camera has a single magnification scale: the
+   * discrete FOV modes are points on it (FOV_MAGNIFICATION) and a continuous
+   * zoom writes to it directly (magnificationFromZoomRatio). Setting a zoom
+   * ratio REPLACES the mode's magnification rather than multiplying it —
+   * `narrow` plus ratio 1.5 measures 2.509, the same as `wide` plus 1.5, not
+   * 1.47 x 2.5. An earlier `{ fov, zoom }` shape made that double-counting easy
+   * to write and had to warn against it; this shape makes it unrepresentable.
+   */
+  magnification: number;
   /**
    * Whether the capture path horizontally flips the preview. This inverts the
    * yaw correction, so it is an explicit input rather than a baked-in
-   * assumption — see the spec's section 3. Defaults to false.
+   * assumption. Defaults to false.
    */
   mirrored?: boolean;
 }
@@ -143,12 +152,26 @@ export const HORIZONTAL_FOV_DEG: Record<FovType, number> = {
  */
 export const VERTICAL_TANGENT_CORRECTION = 0.957;
 
+/** Magnification of the wide field, and of the whole scale, at its extremes. */
+export const MIN_MAGNIFICATION = 1;
+export const MAX_MAGNIFICATION = 4;
+
+/**
+ * Linear magnification for a UVC zoom ratio. MEASURED 2026-07-25: magnification
+ * is linear in the ratio, `m = 3r - 2`, holding to better than 0.05% at ratios
+ * 1.25, 1.5 and 2.0. So ratio 2.0 is 4x linear — carried for a long time as an
+ * unsourced note, now measured to four figures. See the spec's section 1.1.
+ */
+export const magnificationFromZoomRatio = (ratio: number): number => 3 * ratio - 2;
+
+/** Inverse of {@link magnificationFromZoomRatio}: the ratio that yields `m`. */
+export const zoomRatioFromMagnification = (m: number): number => (m + 2) / 3;
+
 // The tangents are the useful form for every downstream calculation, so they are
 // computed once here and the degree-valued halfAngles() is a thin wrapper. Going
 // through degrees would mean an atan followed immediately by a tan.
 const halfAngleTangents = (optics: Optics, frame: Frame): { tanH: number; tanV: number } => {
-  const zoom = optics.zoom ?? 1;
-  const tanH = Math.tan(toRad(HORIZONTAL_FOV_DEG[optics.fov] / 2)) / zoom;
+  const tanH = Math.tan(toRad(WIDE_HFOV_DEG / 2)) / optics.magnification;
   // Vertical starts from the horizontal half-angle scaled by the frame aspect —
   // what square-pixel geometry predicts — then takes the measured correction,
   // because hardware says the real vertical field is ~4.3% shorter than that.
