@@ -32,7 +32,15 @@ import {
   UVC_FLAG_MANUAL,
 } from "../codec/commands.js";
 import type { AiTrackSpeed, AiFramingMode, AiSceneMode, AiModeStatus, FovType, ImageControl } from "../codec/commands.js";
-import { aimAtPixel, GIMBAL_YAW_LIMIT_DEG, GIMBAL_PITCH_LIMIT_DEG, FOV_MAGNIFICATION } from "../geometry/aim.js";
+import {
+  aimAtPixel,
+  GIMBAL_YAW_LIMIT_DEG,
+  GIMBAL_PITCH_LIMIT_DEG,
+  FOV_MAGNIFICATION,
+  magnificationFromZoomRatio,
+  MIN_MAGNIFICATION,
+  MAX_MAGNIFICATION,
+} from "../geometry/aim.js";
 import { verifyFraming } from "./framing.js";
 import { parseFrame } from "../codec/frame.js";
 import { OP_BY_NAME } from "../codec/opcodes.js";
@@ -64,6 +72,37 @@ export interface ToolDef {
 
 const clamp = (value: number, min: number, max: number): number =>
   Math.min(max, Math.max(min, value));
+
+/**
+ * The camera's total magnification relative to wide, from its reported state.
+ *
+ * A discrete FOV mode and a continuous zoom are two ways of writing to one
+ * scale, so this returns one number either way. Returns null for anything that
+ * cannot be trusted:
+ *  - `fovMode: "unknown"` — the status byte didn't decode, a state to refuse
+ *    on rather than guess at.
+ *  - a `"custom"` mode whose derived magnification falls outside the camera's
+ *    known range [MIN_MAGNIFICATION, MAX_MAGNIFICATION] — a corrupt or
+ *    implausible `zoomPercent` reading (e.g. a garbled status byte reporting
+ *    zoomPercent > 100). Callers should refuse rather than pass this through:
+ *    the geometry module's own guard (halfAngleTangents in src/geometry/aim.ts)
+ *    would otherwise be the only thing standing between a bad reading and a
+ *    silently wrong — or NaN/Infinity — aim.
+ *
+ * One function decides resolvability so there is exactly one place a caller
+ * has to check.
+ */
+export function resolveMagnification(
+  status: { fovMode: FovType | "custom" | "unknown"; zoomPercent: number },
+): number | null {
+  if (status.fovMode === "unknown") return null;
+  if (status.fovMode === "custom") {
+    const m = magnificationFromZoomRatio(1 + status.zoomPercent / 100);
+    if (!Number.isFinite(m) || m < MIN_MAGNIFICATION || m > MAX_MAGNIFICATION) return null;
+    return m;
+  }
+  return FOV_MAGNIFICATION[status.fovMode];
+}
 
 // Some MCP clients serialize numbers and booleans as strings when the advertised
 // inputSchema lacks type info. We now advertise a proper JSON Schema (see
@@ -843,10 +882,12 @@ export function createTools(
         "pixel from one frame with dimensions from another aims at the wrong place and cannot be " +
         "detected. The frame must come from a source:\"device\" snapshot — virtual and ndi frames " +
         "are framed by OBSBOT Center, not this camera's own optics, and will aim wrongly. Takes no " +
-        "field-of-view argument: it reads the camera's actual FOV mode. Refuses when AI tracking is " +
-        "active (tracking moves the gimbal itself and would fight the aim) and when a custom zoom " +
-        "is set (the zoom magnification is measured but not applied yet), so it never aims on an assumption it " +
-        "cannot check. If the camera was asleep, waking it moves the gimbal and invalidates the " +
+        "field-of-view or zoom argument: it reads the camera's magnification from its reported " +
+        "state, a discrete FOV mode or a continuous zoom alike, so it works at any zoom. Refuses " +
+        "when AI tracking is active (tracking moves the gimbal itself and would fight the aim), " +
+        "when the FOV mode can't be decoded, or when a corrupt zoom reading would resolve to an " +
+        "implausible magnification, so it never aims on an assumption it cannot check. If the " +
+        "camera was asleep, waking it moves the gimbal and invalidates the " +
         "frame you measured, so the call refuses instead of aiming on stale geometry — take a fresh " +
         "snapshot and retry. Returns clamped:true if the target was outside the gimbal's range; the " +
         "camera still moves, to the nearest reachable pose. Refuses (ok:false) instead of moving when " +
@@ -909,27 +950,33 @@ export function createTools(
               `fight the aim. Disable it with obsbot_ai_track {enabled:false} first.`,
           };
         }
-        if (status.fovMode === "custom") {
+        // One function decides whether the camera's reported state resolves to a
+        // usable magnification — discrete mode or continuous zoom alike — so there
+        // is exactly one place that decides to refuse rather than guess.
+        const magnification = resolveMagnification(status);
+        if (magnification === null) {
+          if (status.fovMode === "unknown") {
+            // block[0x11] is STATUS_OFF_FOV_MODE (src/codec/commands.ts) — same offset
+            // decodeStatus reads to produce fovMode, surfaced raw since "unknown" means
+            // it didn't match any known value.
+            return {
+              ok: false,
+              error:
+                `could not read the camera's FOV mode (raw byte 0x${block[0x11].toString(16).padStart(2, "0")}); ` +
+                `refusing to guess it. Set a known mode with obsbot_image_fov (e.g. {fov:"wide"}) and retry.`,
+            };
+          }
+          // fovMode is "custom" but the zoom it derives from is implausible — e.g.
+          // zoomPercent far outside 0-100 — so the resulting magnification falls
+          // outside the camera's known range. That is a corrupt reading, not a
+          // real optical state; refuse rather than aim from a bad number.
           return {
             ok: false,
             error:
-              `a custom zoom is active (zoom ${status.zoomPercent}%). The zoom-to-magnification ` +
-              `mapping IS measured — magnification is 3*ratio-2, so this zoom is about ` +
-              `${(1 + 0.03 * status.zoomPercent).toFixed(2)}x — but it is not applied here yet, and ` +
-              `aiming without it would be wrong by that factor. Set obsbot_image_fov {fov:"wide"} ` +
-              `(or any discrete mode) to clear it. obsbot_zoom_uvc {ratio:1} will NOT clear it: ` +
-              `ratio 1.0 is the same optical state as wide, so the camera stays in custom mode.`,
-          };
-        }
-        if (status.fovMode === "unknown") {
-          // block[0x11] is STATUS_OFF_FOV_MODE (src/codec/commands.ts) — same offset
-          // decodeStatus reads to produce fovMode, surfaced raw since "unknown" means
-          // it didn't match any known value.
-          return {
-            ok: false,
-            error:
-              `could not read the camera's FOV mode (raw byte 0x${block[0x11].toString(16).padStart(2, "0")}); ` +
-              `refusing to guess it. Set a known mode with obsbot_image_fov (e.g. {fov:"wide"}) and retry.`,
+              `the camera's zoom reading (zoomPercent ${status.zoomPercent}) resolves to a ` +
+              `magnification outside the camera's known range [${MIN_MAGNIFICATION}, ` +
+              `${MAX_MAGNIFICATION}]; refusing rather than aim from what looks like a corrupt ` +
+              `status read. Retry, or set a known mode with obsbot_image_fov.`,
           };
         }
 
@@ -938,12 +985,13 @@ export function createTools(
         const yaw = (await t.camCtrlGet(CAMERA_CONTROL_PAN)).value;
         const pitch = -(await t.camCtrlGet(CAMERA_CONTROL_TILT)).value;
 
-        // The mode's magnification alone — it already includes that discrete
-        // mode's inherent crop, so folding in zoomPercent too would double-count.
+        // resolveMagnification already folded fovMode and zoomPercent into one
+        // number — a discrete mode's inherent crop and a continuous zoom are two
+        // ways of writing to the SAME scale, so there is nothing left to combine.
         const aim = aimAtPixel(
           x, y,
           { width: frameWidth, height: frameHeight },
-          { magnification: FOV_MAGNIFICATION[status.fovMode] },
+          { magnification },
           { yaw, pitch },
         );
 

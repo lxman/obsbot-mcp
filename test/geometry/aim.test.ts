@@ -2,7 +2,7 @@ import { expect, test } from "vitest";
 import {
   halfAngles, pixelToOffset, aimAtPixel,
   HORIZONTAL_FOV_DEG, VERTICAL_TANGENT_CORRECTION, GIMBAL_YAW_LIMIT_DEG, GIMBAL_PITCH_LIMIT_DEG,
-  WIDE_HFOV_DEG, FOV_MAGNIFICATION,
+  WIDE_HFOV_DEG, FOV_MAGNIFICATION, MIN_MAGNIFICATION, MAX_MAGNIFICATION,
   magnificationFromZoomRatio, zoomRatioFromMagnification,
 } from "../../src/geometry/aim.js";
 
@@ -122,6 +122,41 @@ test("zoom crops the field of view by dividing the tangent, not the angle", () =
   expect(Math.tan(rad(twoX))).toBeCloseTo(Math.tan(rad(oneX)) / 2, 9);
   expect(twoX).toBeCloseTo(18.3116, 2);
   expect(twoX).not.toBeCloseTo(17.0, 1);
+});
+
+// --- degenerate magnification is refused, not silently miscomputed ---
+//
+// Dividing by optics.magnification with no guard would let a magnification of
+// 0 yield tanH = Infinity (atan resolves that to a silent 90-degree half-angle),
+// a negative value flip the half-angle's sign with no error, and NaN propagate
+// all the way through aimAtPixel's output with no error anywhere. Now that
+// resolveMagnification (src/mcp/tools.ts) derives magnification from a
+// device-reported zoomPercent, a malformed reading is exactly how one of these
+// gets in — so the geometry module itself refuses rather than trusting the
+// caller.
+
+test("zero magnification throws rather than silently producing a 90-degree half-angle", () => {
+  expect(() => halfAngles({ magnification: 0 }, HD)).toThrow(/magnification/i);
+});
+
+test("negative magnification throws rather than silently flipping the aim's sign", () => {
+  expect(() => pixelToOffset(960, 360, HD, { magnification: -1 })).toThrow(/magnification/i);
+});
+
+test("NaN magnification throws rather than propagating to a NaN aim", () => {
+  expect(() => aimAtPixel(960, 360, HD, { magnification: NaN }, { yaw: 0, pitch: 0 })).toThrow(/magnification/i);
+});
+
+test("magnification outside the camera's known range throws", () => {
+  expect(() => halfAngles({ magnification: MAX_MAGNIFICATION + 0.01 }, HD)).toThrow(/magnification/i);
+  expect(() => halfAngles({ magnification: MIN_MAGNIFICATION - 0.01 }, HD)).toThrow(/magnification/i);
+});
+
+test("the camera's known magnification range is exactly what the endpoints allow", () => {
+  // MIN/MAX are inclusive — the wide field (m=1) and the top of the measured
+  // zoom range (m=4, ratio 2.0) must both compute without throwing.
+  expect(() => halfAngles({ magnification: MIN_MAGNIFICATION }, HD)).not.toThrow();
+  expect(() => halfAngles({ magnification: MAX_MAGNIFICATION }, HD)).not.toThrow();
 });
 
 // --- pixel -> angular offset ---

@@ -170,7 +170,29 @@ export const zoomRatioFromMagnification = (m: number): number => (m + 2) / 3;
 // The tangents are the useful form for every downstream calculation, so they are
 // computed once here and the degree-valued halfAngles() is a thin wrapper. Going
 // through degrees would mean an atan followed immediately by a tan.
+//
+// This is also the ONE place every public entry point (halfAngles, pixelToOffset,
+// aimAtPixel) funnels through, which is why the magnification bound is enforced
+// here rather than trusted from the caller. A magnification of 0 divides out to
+// tanH = Infinity, which atan silently resolves to a 90-degree half-angle; a
+// negative value flips the half-angle's sign with no error; NaN propagates all
+// the way through aimAtPixel's output. Before this guard MIN_MAGNIFICATION/
+// MAX_MAGNIFICATION were exported but enforced nowhere — decorative constants
+// that a malformed device reading (this module's callers now derive magnification
+// from a reported zoomPercent) could silently violate. Callers that already
+// validate their own input (resolveMagnification in src/mcp/tools.ts) should
+// never actually trip this; it exists as the backstop for whichever caller
+// doesn't.
 const halfAngleTangents = (optics: Optics, frame: Frame): { tanH: number; tanV: number } => {
+  if (
+    !Number.isFinite(optics.magnification) ||
+    optics.magnification < MIN_MAGNIFICATION ||
+    optics.magnification > MAX_MAGNIFICATION
+  ) {
+    throw new RangeError(
+      `optics.magnification must be finite and within [${MIN_MAGNIFICATION}, ${MAX_MAGNIFICATION}], got ${optics.magnification}`,
+    );
+  }
   const tanH = Math.tan(toRad(WIDE_HFOV_DEG / 2)) / optics.magnification;
   // Vertical starts from the horizontal half-angle scaled by the frame aspect —
   // what square-pixel geometry predicts — then takes the measured correction,

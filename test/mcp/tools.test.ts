@@ -1972,13 +1972,39 @@ test("active AI tracking is refused, naming the mode", async () => {
   expect(transport.gimbalSet).not.toHaveBeenCalled();
 });
 
-test("a custom zoom is refused — the magnification mapping is uncalibrated", async () => {
+test("aiming works at a custom zoom, using the measured magnification", async () => {
+  // zoomPercent 50 is ratio 1.5, so m = 2.5. At u = 0.5 on a 1280-wide frame the
+  // offset is -atan(0.5 * tan(33.5)/2.5) = -7.5408 deg, against -18.3116 at
+  // wide. Aiming at wide's angle from a 2.5x zoom would overshoot by 10.8 deg.
+  //
+  // NOTE: the task brief's worked example for this test gave -7.5344, which
+  // does not reproduce from tan(33.5deg): computing -atan(0.5*tan(33.5deg)/2.5)
+  // directly gives -7.5408 (verified in node and matching this suite's other
+  // hand-worked angles, e.g. the -18.3116 wide figure above, which does
+  // reproduce exactly). Using the mathematically correct value here.
   const transport = makeFakeTransport();
-  transport.recvStatus = vi.fn(async () => statusFov(3, 100));
+  transport.recvStatus = vi.fn(async () => statusFov(3, 50));
+  const tool = findTool(createTools(makeFakeMgr(transport)), "obsbot_aim_at_pixel");
+  const r = (await tool.handler({ x: 960, y: 360, ...HD_FRAME })) as {
+    ok: boolean; offset: { dYaw: number };
+  };
+  expect(r.ok).toBe(true);
+  expect(r.offset.dYaw).toBeCloseTo(-7.5408, 3);
+  expect(transport.gimbalSet).toHaveBeenCalled();
+});
+
+test("a corrupt zoom reading that resolves outside the known magnification range is refused", async () => {
+  // zoomByte 200 -> zoomPercent 200 -> ratio 3.0 -> magnification 3*3-2 = 7,
+  // well outside [MIN_MAGNIFICATION, MAX_MAGNIFICATION] = [1, 4]. zoomPercent is
+  // read straight off a raw status byte (0-255), so a garbled read can produce
+  // exactly this: a "custom" mode with an implausible zoom behind it. This must
+  // refuse rather than aim from the bad number.
+  const transport = makeFakeTransport();
+  transport.recvStatus = vi.fn(async () => statusFov(3, 200));
   const tool = findTool(createTools(makeFakeMgr(transport)), "obsbot_aim_at_pixel");
   const r = (await tool.handler({ x: 640, y: 360, ...HD_FRAME })) as { ok: boolean; error: string };
   expect(r.ok).toBe(false);
-  expect(r.error).toMatch(/zoom/i);
+  expect(r.error).toMatch(/magnification/i);
   expect(transport.gimbalSet).not.toHaveBeenCalled();
 });
 
