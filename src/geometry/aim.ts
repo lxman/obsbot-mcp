@@ -32,13 +32,25 @@ export interface Optics {
 /**
  * Horizontal field of view of the CAPTURE STREAM for each FOV setting, in
  * degrees. These are MEASURED against a physical Tiny 2 (2026-07-25), not taken
- * from OBSBOT's spec sheet — the two disagree, and the measured values are the
- * ones this module needs.
+ * from OBSBOT's SDK — the two disagree, and the measured values are the ones
+ * this module needs.
  *
- * The spec sheet's 86/78/65 (repeated in `codec/commands.ts`, `mcp/tools.ts`,
- * `README.md`, `tiny2_specification.md`) do not describe the horizontal extent
- * of the frames the server actually receives. Measured against a letter sheet of
- * known width at a tape-measured distance:
+ * The vendor's figures come from OBSBOT's own C++ SDK header,
+ * `libdev_v2.1.0_8/include/dev/dev.hpp:486-488`:
+ *
+ *     FovType86 = 0, /// field of view 86°, wide view
+ *     FovType78 = 1, /// field of view 78°, medium view
+ *     FovType65 = 2, /// field of view 65°, narrow view
+ *
+ * Note it states no AXIS — just "field of view 86°". The other official header,
+ * `SDKs/remo_uvc_ctrl.en.h:55`, defines the same enum with no angles at all. The
+ * repeats in `README.md`, `tiny2_specification.md` and `SDKs/CAPABILITIES-
+ * REPORT.md` are our own documents downstream of that one header, so this is a
+ * single source cited several times, not independent confirmations.
+ *
+ * Whatever axis those figures describe, they do not describe the horizontal
+ * extent of the frames the server actually receives. Measured against a letter
+ * sheet of known width at a tape-measured distance:
  *
  *     setting   spec    measured    tan(H) measured / tan(H) spec
  *     wide      86°     67.9°       0.722

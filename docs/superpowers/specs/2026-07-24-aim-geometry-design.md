@@ -217,10 +217,19 @@ list of unknowns.
 *left* across the frame, which is what an unmirrored path does. `mirrored: false` is the correct
 default and §3's sign composition holds as derived.
 
-**Field of view — the spec sheet's numbers do not describe the capture stream.** Measured with a
-letter sheet of known width at a tape-measured distance, centered on-axis:
+**Field of view — the vendor's numbers do not describe the capture stream.**
 
-| setting | spec sheet | measured HFOV | measured `tan(H)` | measured / spec |
+The vendor figures are sourced from OBSBOT's own C++ SDK header,
+`libdev_v2.1.0_8/include/dev/dev.hpp:486-488` — `FovType86 = 0, /// field of view 86°, wide view`
+and siblings. Two things about that source matter: it states **no axis** (just "field of view 86°"),
+and the other official header (`SDKs/remo_uvc_ctrl.en.h:55`) defines the same enum with **no angles
+at all**. The repeats in `README.md:149`, `tiny2_specification.md:243` and
+`SDKs/CAPABILITIES-REPORT.md:184` are our own documents downstream of that one header — a single
+source cited several times, not independent confirmation.
+
+Measured with a letter sheet of known width at a tape-measured distance, centered on-axis:
+
+| setting | SDK header | measured HFOV | measured `tan(H)` | measured / spec |
 |---|---|---|---|---|
 | wide | 86° | **67.9°** | 0.673 | 0.722 |
 | medium | 78° | **60.2°** | 0.582 | 0.719 |
