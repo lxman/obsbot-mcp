@@ -241,15 +241,26 @@ measured                                                    tan(H) = 0.673  → 
 Reading the figure as diagonal moves the ratio from 0.722 to **0.835** — it explains roughly half
 the discrepancy and leaves ~17% unaccounted.
 
-**The likeliest remaining cause is that the published figure describes the 4K path, and the ≤1080p
-stream is cropped.** The Tiny 2 is 4K@30 / 1080p@60, and `obsbot_capture_snapshot` caps `resolution`
-at 1920, so *every measurement here was taken on the ≤1080p path*. 1280 and 1920 were verified to
-share a field of view (the target subtended 187 px vs 270 px, matching downscale and ruling out a
-crop between those two), but 4K was never reachable through this tool.
+**The remainder is the 16:9 crop, and it was tested directly.** `obsbot_capture_snapshot` caps
+`resolution` at 1920, but the camera can be driven at any of its native modes through ffmpeg/dshow,
+so the two candidate explanations were both checked against real frames:
 
-**Scope of these constants, stated plainly: they are correct for the frames `obsbot_capture_snapshot`
-produces, which is what this module exists to serve. They may be wrong at 4K.** A consumer that ever
-obtains frames from a 4K path must re-measure rather than assume.
+- **4K is NOT wider than 1080p — hypothesis refuted.** Captured 3840×2160 and 1920×1080 of the same
+  scene at a fixed pose. A feature pair spanning the frame measured 343 px vs 337 px, and subject
+  head height 305 px vs 300 px, at equal display width. **Same field of view within ~2%.** An
+  earlier draft of this spec claimed the published figure described a wider 4K path; it does not.
+- **The 4:3 modes are wider, and their diagonal matches the published figure.** At 4000×3000 the
+  frame shows substantially more scene. Measured against the 16:9 frame, horizontal is wider by only
+  ~2.5% but vertical is far taller, giving `tan(H) ≈ 0.690`, `tan(V) ≈ 0.518`, and a diagonal of
+  **≈82°** — against the published 85.5°, inside the ~3% precision of these eyeball measurements.
+
+So the published **85.5° DFOV describes the full-sensor 4:3 mode**, and every 16:9 mode is cropped
+from it. For reference the 16:9 diagonal works out to ≈75°, which is why a "86°" figure never
+reconciled with anything measured on the 16:9 path.
+
+**Scope of these constants: they are correct for 16:9 capture at any resolution, which is every frame
+`obsbot_capture_snapshot` produces.** A consumer that ever captures in a 4:3 mode must re-measure —
+those are wider, and the aspect-derived `tan(V)` would also change.
 
 Measured with a letter sheet of known width at a tape-measured distance, centered on-axis:
 

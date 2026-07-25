@@ -47,17 +47,22 @@ export interface Optics {
  * the same sources give pan as ±150°, corroborating GIMBAL_YAW_LIMIT_DEG below).
  * So the SDK's "86°" is a rounded diagonal figure.
  *
- * That resolves the axis but does not close the gap. 85.5° diagonal at 16:9
- * works out to tan(H) = 0.806 (HFOV 77.7°) against a measured 0.673 (67.9°) —
- * the diagonal reading explains about half the discrepancy and leaves ~17%.
- * The likeliest remainder: the published figure describes the 4K path, and the
- * <=1080p stream is cropped. `obsbot_capture_snapshot` caps resolution at 1920,
- * so every measurement behind these constants was taken on the <=1080p path.
- * 1280 and 1920 were verified to share a field of view; 4K was never reachable.
+ * The diagonal reading explains about half the gap (85.5° diagonal at 16:9 gives
+ * tan(H) = 0.806 vs a measured 0.673). The rest is the 16:9 crop, verified by
+ * driving the camera at its native modes through ffmpeg/dshow:
+ *   - 4K is NOT wider than 1080p. Same scene, fixed pose, 3840x2160 vs
+ *     1920x1080: a frame-spanning feature pair measured 343 vs 337 px at equal
+ *     display width. Same FOV within ~2%.
+ *   - The 4:3 modes ARE wider. At 4000x3000, tan(H) ~= 0.690 and tan(V) ~= 0.518
+ *     give a diagonal of ~82°, matching the published 85.5° within the ~3%
+ *     precision of the measurement.
+ * So 85.5° DFOV describes the full-sensor 4:3 mode, and every 16:9 mode is
+ * cropped from it. The 16:9 diagonal is ~75°, which is why "86°" never
+ * reconciled with anything measured here.
  *
- * SCOPE: these values are correct for the frames obsbot_capture_snapshot
- * produces, which is what this module exists to serve. They may be wrong at 4K —
- * re-measure rather than assume if a 4K path is ever added. Measured against a
+ * SCOPE: correct for 16:9 capture at any resolution — every frame
+ * obsbot_capture_snapshot produces. A 4:3 capture path would need re-measuring;
+ * those are wider, and the aspect-derived tan(V) changes too. Measured against a
  * letter sheet of known width at a tape-measured distance:
  *
  *     setting   spec    measured    tan(H) measured / tan(H) spec
