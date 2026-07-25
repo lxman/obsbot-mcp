@@ -82,12 +82,15 @@ the capture stream). Zoom is a crop, so it divides the tangent:
 
 ```
 tan(H) = tan(hfov / 2) / zoom
-tan(V) = tan(H) · (height / width)
+tan(V) = tan(H) · (height / width) · 0.898
 ```
 
-The vertical half-angle is derived from the horizontal one and the frame aspect ratio, on the
-assumption that the projection is the same in both axes. That holds for a rectilinear lens and is
-weakest at the wide end; §8 records it as a hardware question rather than a settled fact.
+The vertical half-angle starts from the horizontal one scaled by the frame aspect ratio — what
+square-pixel geometry predicts — and then takes a **measured correction of 0.898**, because hardware
+says the real vertical field is about 10% shorter than geometry predicts. Measured
+`tan(V)/tan(H) ≈ 0.505` at 16:9, against the 0.5625 that square pixels demand. §8 records the ten
+measurements and, critically, the one that proves the shortfall is optical rather than a gimbal
+artifact.
 
 Angular offsets:
 
@@ -193,7 +196,7 @@ All offline. No camera required.
 | center `u = 0` | `dYaw = 0` |
 | right edge `u = 1` | `dYaw = −34°` (edge maps to exactly half the FOV) |
 | `u = 0.5` | `dYaw = −18.64°` (linear would say −17°) |
-| vertical half-angle | `V ≈ 20.78°`, so `vfov ≈ 41.6°` at 16:9 |
+| vertical half-angle | `V ≈ 18.81°`, so `vfov ≈ 37.6°` at 16:9 (measured, not `tan(H)·aspect`'s 20.78°) |
 
 **Properties:**
 
@@ -305,6 +308,36 @@ Nothing in the code was ever at risk from this: `LinuxTransport.gimbalSet` write
 only in comments. The sole clamp on the absolute-move path is `tools.ts`'s ±150, which is right.
 `GIMBAL_YAW_LIMIT_DEG = 150` stands unchanged and is not platform-conditional.
 
+**Vertical projection — the aspect-derived value is wrong by ~10%, and the cause is optical.**
+Measured `tan(V)/tan(H) ≈ 0.505` at 16:9, against the **0.5625** square-pixel geometry demands.
+`VERTICAL_TANGENT_CORRECTION = 0.898` now carries this. Ten measurements, by two methods that cannot
+contaminate each other:
+
+- **Eight known-pitch tilts**, tracking six point features (box corner, box circle, bottle cap, bowl,
+  doorknob, board corner, wall art), in **both directions** at two angles: `tan(V)` from 0.340 to
+  0.364, mean **0.344**. A ~5% directional asymmetry appears (down 0.344, up 0.362) that no single
+  constant can capture — it mirrors the yaw asymmetry where +150 lands at 149 but −150 at −147.
+- **One yaw-only solve at pitch 39.** Yawing at a non-zero pitch sweeps a cone, so features acquire a
+  vertical drift that pins pitch and `tan(V)` jointly. This used **only the yaw motor**, whose 1:1
+  scale was already established, so the pitch motor merely had to *hold* a pose rather than be
+  trusted. Result `tan(V) = 0.327` at 8.2 px RMS; the geometric 0.379 fits distinctly worse, 13.8 px.
+
+**That last measurement is why this became a constant rather than a footnote.** It solved for the
+true pitch as a by-product: **39.55° against a reported 39°**, and that answer held to within 1.4%
+across every `tan(V)` from 0.31 to 0.40. The pitch motor is honest, so the shortfall cannot be blamed
+on the gimbal. Before it, "the lens is short" and "pitch under-reports by 11%" were
+indistinguishable, and choosing either would have been a coin flip dressed as a measurement.
+
+The first attempt at this was rightly distrusted: it tracked the bounding-box *centroid of a tilted
+sheet* through a pitch change, and a tilted plane's projected centroid shifts as it traverses the
+frame vertically. Switching to point features — corners and small objects, which have no extent to
+foreshorten — removed that bias, and barely moved the answer (0.340 → 0.349). That it barely moved is
+itself informative: the bias was real but small, and the effect was never an artifact of it.
+
+Scope: measured on the **16:9 path only**. The aspect term is retained in the formula so the geometry
+stays visible and scales sensibly, but the correction itself is verified at 16:9 alone; a 4:3 capture
+path needs its own measurement.
+
 ### Still open
 
 (The ±130° concern raised during review is **closed** — see the yaw-range entry above. It is not an
@@ -314,20 +347,7 @@ open item.)
   distance). `Optics.zoom` in this module is defined as a linear factor dividing the tangent, so the
   consuming tool must convert rather than passing the UVC ratio through. Whether the relationship is
   exactly quadratic over the whole 1.0–2.0 range is unmeasured — only the endpoint was checked.
-- **Vertical projection — one inconclusive measurement, suggestive of a ~10% error.** A known-pitch
-  tilt (21°) tracking the target's vertical movement solves to `tan(V) ≈ 0.340 ± 0.010`, against the
-  **0.379** that `tan(H) · aspect` predicts — about 10% low, which would be ~2° of half-angle.
-  **Do not act on this number.** The target was a sheet leaning backward on a chair, and the test
-  tracks its bounding-box centroid through a pitch change; a tilted plane's projected centroid
-  shifts as it traverses the frame vertically, biasing precisely this measurement. The horizontal
-  measurements were immune to that bias — a backward lean does not change a sheet's width — which is
-  why they are trusted and this is not.
-
-  Settling it needs a target mounted **flat and perpendicular to the optical axis** (which, given the
-  ~15° downward mount tilt, means leaning the target back to match, not standing it vertical). Until
-  then the module keeps deriving vertical from horizontal by aspect ratio. Note this check is no
-  longer redundant with the FOV-axis question: that was answered from horizontal measurements alone,
-  so the vertical has never been independently confirmed.
+*(The vertical-projection question is now settled — see below.)*
 - **Zoom readback.** The status block decodes `{ awake, hdr, faceAe, aiMode, trackSpeed }` — no
   zoom. `CameraControl_Zoom` is index 3 in the same DirectShow enum that supplies Pan=0, Tilt=1,
   Exposure=4, Focus=6 (`commands.ts:346`), and `camCtrlGet` is already wired. Untested.

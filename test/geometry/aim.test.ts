@@ -1,7 +1,7 @@
 import { expect, test } from "vitest";
 import {
   halfAngles, pixelToOffset, aimAtPixel,
-  HORIZONTAL_FOV_DEG, GIMBAL_YAW_LIMIT_DEG, GIMBAL_PITCH_LIMIT_DEG,
+  HORIZONTAL_FOV_DEG, VERTICAL_TANGENT_CORRECTION, GIMBAL_YAW_LIMIT_DEG, GIMBAL_PITCH_LIMIT_DEG,
 } from "../../src/geometry/aim.js";
 
 const HD = { width: 1280, height: 720 };
@@ -22,14 +22,32 @@ test("the horizontal half-angle is half the measured field of view", () => {
   expect(halfAngles({ fov: "narrow" }, HD).h).toBeCloseTo(25, 9);
 });
 
-test("the vertical half-angle follows the frame aspect ratio", () => {
-  // tan(V) = tan(H) * (height/width) = tan(34deg) * 0.5625 -> V ~= 20.78deg
-  expect(halfAngles({ fov: "wide" }, HD).v).toBeCloseTo(20.78, 2);
+test("the vertical half-angle takes the measured correction, not bare geometry", () => {
+  // Square-pixel geometry would give tan(34deg) * 0.5625 -> V ~= 20.78deg.
+  // Hardware says the vertical field is ~10% shorter than that, so the measured
+  // correction applies and V ~= 18.81deg. See VERTICAL_TANGENT_CORRECTION.
+  expect(halfAngles({ fov: "wide" }, HD).v).toBeCloseTo(18.81, 2);
+  expect(halfAngles({ fov: "wide" }, HD).v).not.toBeCloseTo(20.78, 1);
 });
 
-test("a square frame makes the vertical half-angle equal the horizontal one", () => {
-  const sq = halfAngles({ fov: "narrow" }, { width: 1000, height: 1000 });
-  expect(sq.v).toBeCloseTo(sq.h, 9);
+test("the vertical correction is the measured value, not a no-op", () => {
+  // 0.505 / 0.5625 ~= 0.898. If this ever reads 1, someone has quietly reverted
+  // to square-pixel geometry, which hardware measurement disproved.
+  expect(VERTICAL_TANGENT_CORRECTION).toBeCloseTo(0.898, 3);
+});
+
+test("the measured vertical/horizontal tangent ratio is ~0.505 at 16:9", () => {
+  const { h, v } = halfAngles({ fov: "wide" }, HD);
+  expect(Math.tan(rad(v)) / Math.tan(rad(h))).toBeCloseTo(0.505, 3);
+  // Square-pixel geometry demands 0.5625; the camera does not deliver it.
+  expect(Math.tan(rad(v)) / Math.tan(rad(h))).not.toBeCloseTo(0.5625, 2);
+});
+
+test("the vertical half-angle still scales with the frame aspect ratio", () => {
+  // The correction multiplies the aspect term, it does not replace it.
+  const tall = halfAngles({ fov: "narrow" }, { width: 1000, height: 1000 });
+  const flat = halfAngles({ fov: "narrow" }, { width: 1000, height: 500 });
+  expect(Math.tan(rad(tall.v))).toBeCloseTo(2 * Math.tan(rad(flat.v)), 9);
 });
 
 test("zoom crops the field of view by dividing the tangent, not the angle", () => {
@@ -81,11 +99,11 @@ test("halfway to the edge is NOT half the angle — the mapping is tangent, not 
 });
 
 test("the bottom of the frame tilts down, which is positive pitch", () => {
-  expect(pixelToOffset(640, 720, HD, WIDE).dPitch).toBeCloseTo(20.78, 2);
+  expect(pixelToOffset(640, 720, HD, WIDE).dPitch).toBeCloseTo(18.81, 2);
 });
 
 test("the top of the frame tilts up, which is negative pitch", () => {
-  expect(pixelToOffset(640, 0, HD, WIDE).dPitch).toBeCloseTo(-20.78, 2);
+  expect(pixelToOffset(640, 0, HD, WIDE).dPitch).toBeCloseTo(-18.81, 2);
 });
 
 test("a mirrored capture inverts yaw and leaves pitch untouched", () => {
@@ -162,7 +180,7 @@ test("a yaw target beyond the limit is clamped and reported", () => {
 });
 
 test("a pitch target beyond the limit is clamped and reported", () => {
-  // Bottom edge gives +20.78deg; from pitch 85 that would be 105.78deg.
+  // Bottom edge gives +18.81deg; from pitch 85 that would be 103.81deg.
   const aim = aimAtPixel(640, 720, HD, WIDE, { yaw: 0, pitch: 85 });
   expect(aim.target.pitch).toBe(90);
   expect(aim.clamped).toBe(true);
@@ -185,6 +203,6 @@ test("saturating one axis does not falsely clamp the other", () => {
 test("a target inside the limits is never reported as clamped", () => {
   const aim = aimAtPixel(1280, 720, HD, WIDE, { yaw: 0, pitch: 0 });
   expect(aim.target.yaw).toBeCloseTo(-34, 9);
-  expect(aim.target.pitch).toBeCloseTo(20.78, 2);
+  expect(aim.target.pitch).toBeCloseTo(18.81, 2);
   expect(aim.clamped).toBe(false);
 });

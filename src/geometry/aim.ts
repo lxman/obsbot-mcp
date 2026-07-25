@@ -97,6 +97,42 @@ export const HORIZONTAL_FOV_DEG: Record<FovType, number> = {
   narrow: 50,
 };
 
+/**
+ * Empirical correction applied on top of the aspect-derived vertical half-angle.
+ * MEASURED (2026-07-25), not geometric.
+ *
+ * Square-pixel geometry says tan(V) = tan(H) · (height/width) — for 16:9 that is
+ * 0.5625. Hardware says the vertical field is about 10% shorter than that:
+ * measured tan(V)/tan(H) ≈ 0.505, hence this factor of 0.505/0.5625 ≈ 0.898.
+ *
+ * Ten measurements, two methods that cannot contaminate each other:
+ *   - Eight known-pitch tilts tracking six different point features (box corner,
+ *     box circle, bottle cap, bowl, doorknob, board corner, wall art), in BOTH
+ *     directions and at two angles: tan(V) = 0.340..0.364, mean 0.344. There is a
+ *     ~5% directional asymmetry (down 0.344, up 0.362) that no single constant
+ *     can capture — it mirrors the yaw asymmetry where +150 lands at 149 but
+ *     −150 lands at −147.
+ *   - One yaw-only solve at pitch 39: yawing at a non-zero pitch sweeps a cone,
+ *     so features acquire a vertical drift that pins pitch and tan(V) jointly.
+ *     This used ONLY the yaw motor, whose 1:1 scale was already established, so
+ *     the pitch motor merely had to hold a pose rather than be trusted. Result:
+ *     tan(V) = 0.327 at 8.2 px RMS, with the geometric 0.379 fitting distinctly
+ *     worse at 13.8 px.
+ *
+ * That last measurement is why this constant exists rather than a note in the
+ * docs. It solved for the true pitch as a by-product: 39.55° against a reported
+ * 39°, robust to within 1.4% across every tan(V) from 0.31 to 0.40. **The pitch
+ * motor is honest**, so the shortfall is genuinely optical and cannot be blamed
+ * on the gimbal. Without that, "tan(V) is short" and "pitch under-reports by
+ * 11%" were indistinguishable, and picking either would have been a guess.
+ *
+ * SCOPE: measured on the 16:9 capture path, the only one this server uses. The
+ * aspect term is retained so the geometry stays visible and scales sensibly, but
+ * this correction has been verified at 16:9 ONLY — a 4:3 capture path needs its
+ * own measurement rather than this factor.
+ */
+export const VERTICAL_TANGENT_CORRECTION = 0.898;
+
 const toRad = (deg: number): number => (deg * Math.PI) / 180;
 const toDeg = (rad: number): number => (rad * 180) / Math.PI;
 
@@ -106,9 +142,11 @@ const toDeg = (rad: number): number => (rad * 180) / Math.PI;
 const halfAngleTangents = (optics: Optics, frame: Frame): { tanH: number; tanV: number } => {
   const zoom = optics.zoom ?? 1;
   const tanH = Math.tan(toRad(HORIZONTAL_FOV_DEG[optics.fov] / 2)) / zoom;
-  // Vertical follows from horizontal and the aspect ratio, assuming the same
-  // projection in both axes. True for a rectilinear lens; weakest at the wide end.
-  return { tanH, tanV: tanH * (frame.height / frame.width) };
+  // Vertical starts from the horizontal half-angle scaled by the frame aspect —
+  // what square-pixel geometry predicts — then takes the measured correction,
+  // because hardware says the real vertical field is ~10% shorter than that.
+  // See VERTICAL_TANGENT_CORRECTION for the ten measurements behind it.
+  return { tanH, tanV: tanH * (frame.height / frame.width) * VERTICAL_TANGENT_CORRECTION };
 };
 
 /** Effective half-angles of the visible field, in degrees, after zoom and aspect. */
