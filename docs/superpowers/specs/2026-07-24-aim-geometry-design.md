@@ -125,6 +125,14 @@ this section records an obligation on the *caller*, not a behavior of the module
 tool will have to hold the invariant: tracking off, gimbal settled, snapshot and pose read close
 together.
 
+Also an obligation on the caller: **degenerate input is unguarded.** `width: 0` or `zoom: 0` yields
+`Infinity`/`NaN` inside the module, and because `NaN !== NaN` the clamp path then reports
+`{ target: { yaw: NaN }, clamped: true }` — a garbage pose presented as merely saturated rather than
+as an error. Leaving the pure module unguarded is correct — validation belongs at the boundary, not
+scattered through arithmetic — but the obligation has to land somewhere. The consuming tool must
+enforce `zoom >= 1`, `width`/`height >= 1`, and finite `x`/`y` at its zod boundary, or it inherits
+this failure mode.
+
 Related, and worth stating because it looks like a gap and is not one: **`obsbot_gimbal_move_speed`
 does not exist on Linux.** It is filtered out of the tool list entirely rather than refused at
 runtime (`tools.ts:1290`), because a speed×duration burst has no target to clamp without live
@@ -200,6 +208,30 @@ keeping the module pure. They block the *tool* that will consume it.
 - **FOV readback.** No path exists today. The undecoded offsets in the raw 60-byte status block are
   the obvious place to look. Deferred: the consuming tool takes `fov` as a parameter.
 - **Vertical projection.** Whether `tan(V) = tan(H) · aspect` holds at the wide end.
+- **Yaw limit vs. the UVC pan range.** `GIMBAL_YAW_LIMIT_DEG = 150` is documented as
+  hardware-verified, but `transport/linux.ts` and `transport/macos.ts` both record a
+  hardware-measured `CT_PANTILT_ABSOLUTE` range of ±468000 arcsec pan / ±324000 arcsec tilt at 3600
+  arcsec per degree — **±130° pan, ±90° tilt**. Tilt agrees with the 90° limit above; pan does not.
+  Linux drives absolute moves through that same UVC control, so a yaw target between 130° and 150°
+  passes `aimAtPixel` with `clamped: false` and is then silently truncated to 130° by the driver —
+  the camera lands 10° short while this module reports success, which is exactly the "aimed and
+  missed" failure clamping exists to prevent. On Windows/macOS the vendor V3 frame path may
+  genuinely reach 150°, but `obsbot_gimbal_position` reads back through the same ±130° UVC control,
+  so any pose past 130° reads back saturated and would feed a wrong `current` into the next aim.
+  Not resolved here — `GIMBAL_YAW_LIMIT_DEG` stays at 150 pending a decision on whether the
+  consuming tool should treat ±130° as the practical yaw bound or surface the discrepancy itself.
+- **FOV axis: horizontal or diagonal?** `HORIZONTAL_FOV_DEG` (86°/78°/65°) asserts the axis in its
+  name, but every in-tree source of those numbers (`codec/commands.ts`, `mcp/tools.ts`,
+  `README.md`, `tiny2_specification.md`) states them with no axis qualifier, and they trace to
+  OBSBOT's published spec sheet, where the Tiny series FOV is listed as **diagonal**. If 86° is
+  diagonal, the true horizontal FOV at 16:9 is 78.2° and vertical is 49.1°, against this module's
+  assumed 86°/55.4° — roughly **3.9° of half-angle error**, larger than the 3.5° linear-
+  approximation error the entire tangent mapping exists to eliminate. This would present as a
+  consistent overshoot that grows toward the frame edge. Critically, **the vertical-projection
+  check above would NOT catch this**: a diagonal source makes both axes wrong in a correlated way,
+  so `tan(V) = tan(H) · aspect` still appears to hold. This needs its own check: place an object at
+  the exact right edge of frame on the wide setting and aim at it — one snapshot. A constant sourced
+  from diagonal FOV overshoots past center by a repeatable margin.
 
 ## 9. Out of scope
 

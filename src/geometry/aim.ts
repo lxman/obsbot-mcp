@@ -29,7 +29,22 @@ export interface Optics {
   mirrored?: boolean;
 }
 
-/** Published horizontal field of view for each FOV setting, in degrees. */
+/**
+ * Published horizontal field of view for each FOV setting, in degrees.
+ *
+ * The "horizontal" in the name is an ASSUMPTION, not a confirmed fact. Every
+ * in-tree source of 86/78/65 (`codec/commands.ts`, `mcp/tools.ts`, `README.md`,
+ * `tiny2_specification.md`) states the numbers with no axis qualifier, and they
+ * trace back to OBSBOT's published spec sheet, where the Tiny series field of
+ * view is listed as DIAGONAL. If that is what these numbers are, the true
+ * horizontal/vertical FOV at 16:9 is 78.2°/49.1°, not 86°/55.4° — roughly 3.9°
+ * of half-angle error, which is larger than the 3.5° linear-approximation error
+ * the tangent mapping in this module exists to eliminate. Unresolved, this is
+ * the single largest uncorrected error source in the module. See the spec's
+ * §8 for the hardware check that would settle it (the existing vertical-
+ * projection check does NOT catch this, since a diagonal source makes both
+ * axes wrong in a correlated way that still satisfies tan(V) = tan(H) · aspect).
+ */
 export const HORIZONTAL_FOV_DEG: Record<FovType, number> = {
   wide: 86,
   medium: 78,
@@ -93,6 +108,22 @@ export function pixelToOffset(x: number, y: number, frame: Frame, optics: Optics
  * These live here rather than in the tool layer so there is exactly one
  * definition: `obsbot_gimbal_move` imports them for its own clamping. Two copies
  * of a bound that must agree is a defect waiting to happen.
+ *
+ * KNOWN DISCREPANCY, not yet resolved: `transport/linux.ts` and
+ * `transport/macos.ts` both record a hardware-measured `CT_PANTILT_ABSOLUTE`
+ * (UVC selector 0x0D) range of ±468000/±324000 arc-seconds at 3600 arcsec per
+ * degree, i.e. ±130° pan / ±90° tilt. Tilt agrees with GIMBAL_PITCH_LIMIT_DEG
+ * below, but pan does not — 150 exceeds what the UVC control can carry. On
+ * Linux, absolute moves go through that control, so a yaw target between 130
+ * and 150 passes this module's clamp with `clamped: false` and is then
+ * silently truncated to 130 by the driver: the camera lands short while this
+ * module reports success. On Windows/macOS the vendor V3 frame path may
+ * genuinely reach 150, but `obsbot_gimbal_position` reads back through the
+ * same ±130 UVC control, so any pose past 130 reads back saturated and would
+ * feed a wrong `current` into a subsequent aim. The value is left at 150 here
+ * — this comment records the discrepancy rather than resolving it; the
+ * consuming tool should treat ±130 as the practical yaw bound, or surface the
+ * discrepancy itself. See the spec's §8.
  */
 export const GIMBAL_YAW_LIMIT_DEG = 150;
 export const GIMBAL_PITCH_LIMIT_DEG = 90;
