@@ -263,10 +263,20 @@ within 1°.
   distance). `Optics.zoom` in this module is defined as a linear factor dividing the tangent, so the
   consuming tool must convert rather than passing the UVC ratio through. Whether the relationship is
   exactly quadratic over the whole 1.0–2.0 range is unmeasured — only the endpoint was checked.
-- **Vertical projection.** Whether `tan(V) = tan(H) · aspect` holds. Only the *horizontal* extent was
-  measured; the vertical is still derived from it by aspect ratio. Note this check is now more
-  valuable than it was, not less: it is no longer redundant with the axis question, since the axis
-  question was answered without ever confirming the vertical.
+- **Vertical projection — one inconclusive measurement, suggestive of a ~10% error.** A known-pitch
+  tilt (21°) tracking the target's vertical movement solves to `tan(V) ≈ 0.340 ± 0.010`, against the
+  **0.379** that `tan(H) · aspect` predicts — about 10% low, which would be ~2° of half-angle.
+  **Do not act on this number.** The target was a sheet leaning backward on a chair, and the test
+  tracks its bounding-box centroid through a pitch change; a tilted plane's projected centroid
+  shifts as it traverses the frame vertically, biasing precisely this measurement. The horizontal
+  measurements were immune to that bias — a backward lean does not change a sheet's width — which is
+  why they are trusted and this is not.
+
+  Settling it needs a target mounted **flat and perpendicular to the optical axis** (which, given the
+  ~15° downward mount tilt, means leaning the target back to match, not standing it vertical). Until
+  then the module keeps deriving vertical from horizontal by aspect ratio. Note this check is no
+  longer redundant with the FOV-axis question: that was answered from horizontal measurements alone,
+  so the vertical has never been independently confirmed.
 - **Zoom readback.** The status block decodes `{ awake, hdr, faceAe, aiMode, trackSpeed }` — no
   zoom. `CameraControl_Zoom` is index 3 in the same DirectShow enum that supplies Pan=0, Tilt=1,
   Exposure=4, Focus=6 (`commands.ts:346`), and `camCtrlGet` is already wired. Untested.
