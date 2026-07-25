@@ -243,21 +243,28 @@ reproducible over three features and two pan angles) and the paper measurement (
 67.9°). For the spec-sheet 86° to have been correct, the gimbal would have had to under-report by
 39% *and* the tape measure to be wrong by 13 inches, in mutually compensating directions.
 
-**Yaw range — no ±130° ceiling on Windows.** Commanded/read-back pairs: 120→120, 130→129,
-**145→145**, 150→149, −150→−147. Readback is live, not an echo: a poll mid-slew caught 68° in
-transit to 120°. `GIMBAL_YAW_LIMIT_DEG = 150` is correct for this path. The ±468000 arcsec figure in
-`transport/linux.ts` and `transport/macos.ts` describes the **V4L2/UVC control's advertised range on
-those platforms**, not a universal mechanical stop — Windows reaches ±150 via DirectShow. Minor
-asymmetry worth knowing: the negative end lands ~3° short (−150 → −147) while the positive end is
-within 1°.
+**Yaw range — ±150° is correct, on every platform.** Commanded/read-back pairs measured on Windows:
+120→120, 130→129, **145→145**, 150→149, −150→−147. Readback is live, not an echo: a poll mid-slew
+caught 68° in transit to 120°. Minor asymmetry worth knowing: the negative end lands ~3° short
+(−150 → −147) while the positive end is within 1°.
+
+**The ±130° figure is a red herring, and it is worth understanding why so it does not resurface.**
+`transport/linux.ts:16` and `transport/macos.ts:19` record a hardware-confirmed
+`CT_PANTILT_ABSOLUTE` range of ±468000 arcsec = ±130°. That is what the **V4L2/UVC control
+advertises** — a descriptor value. It is not where the gimbal stops. The mechanical range is ±150°
+on all platforms, and position feedback comes from the camera's **physical encoder**, which is a
+property of the hardware and does not vary by operating system. The descriptor simply under-reports
+the mechanism it describes.
+
+Nothing in the code was ever at risk from this: `LinuxTransport.gimbalSet` writes
+`yawDeg × ARCSEC_PER_DEG` with no clamp against 468000 (`linux.ts:124`), so the arcsec figure lives
+only in comments. The sole clamp on the absolute-move path is `tools.ts`'s ±150, which is right.
+`GIMBAL_YAW_LIMIT_DEG = 150` stands unchanged and is not platform-conditional.
 
 ### Still open
 
-- **The ±130° UVC ceiling on Linux and macOS.** Untested — the measurements above are Windows-only.
-  Linux drives absolute moves through the UVC control whose advertised range is ±130°, so a yaw
-  target between 130° and 150° may still be truncated there while this module reports
-  `clamped: false`. The consuming tool should either clamp to ±130° on those platforms or surface
-  the discrepancy.
+(The ±130° concern raised during review is **closed** — see the yaw-range entry above. It is not an
+open item.)
 - **`obsbot_zoom_uvc` ratio is not linear magnification.** Requesting `ratio: 2.0` produced a
   measured **4.0×** linear magnification (the same sheet went 327 px → 1310 px at a fixed pose and
   distance). `Optics.zoom` in this module is defined as a linear factor dividing the tangent, so the

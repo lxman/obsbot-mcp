@@ -130,21 +130,18 @@ export function pixelToOffset(x: number, y: number, frame: Frame, optics: Optics
  * definition: `obsbot_gimbal_move` imports them for its own clamping. Two copies
  * of a bound that must agree is a defect waiting to happen.
  *
- * KNOWN DISCREPANCY, not yet resolved: `transport/linux.ts` and
- * `transport/macos.ts` both record a hardware-measured `CT_PANTILT_ABSOLUTE`
- * (UVC selector 0x0D) range of ±468000/±324000 arc-seconds at 3600 arcsec per
- * degree, i.e. ±130° pan / ±90° tilt. Tilt agrees with GIMBAL_PITCH_LIMIT_DEG
- * below, but pan does not — 150 exceeds what the UVC control can carry. On
- * Linux, absolute moves go through that control, so a yaw target between 130
- * and 150 passes this module's clamp with `clamped: false` and is then
- * silently truncated to 130 by the driver: the camera lands short while this
- * module reports success. On Windows/macOS the vendor V3 frame path may
- * genuinely reach 150, but `obsbot_gimbal_position` reads back through the
- * same ±130 UVC control, so any pose past 130 reads back saturated and would
- * feed a wrong `current` into a subsequent aim. The value is left at 150 here
- * — this comment records the discrepancy rather than resolving it; the
- * consuming tool should treat ±130 as the practical yaw bound, or surface the
- * discrepancy itself. See the spec's §8.
+ * ±150 is the mechanical yaw range on EVERY platform, and these limits are not
+ * platform-conditional. Measured 2026-07-25: commanded 145 reads back 145, and
+ * 150 reads back 149. Position feedback comes from the camera's physical
+ * encoder, which is a property of the hardware and does not vary by OS.
+ *
+ * Do not "fix" this to 130. `transport/linux.ts` and `transport/macos.ts` record
+ * a `CT_PANTILT_ABSOLUTE` range of ±468000 arcsec = ±130°, which reads like a
+ * conflict and was raised as one during review. It is not: that is the range the
+ * UVC control *advertises* — a descriptor value that under-reports the mechanism
+ * it describes — not where the gimbal stops. Nothing clamps to it either;
+ * `LinuxTransport.gimbalSet` writes `yawDeg * ARCSEC_PER_DEG` unclamped, so the
+ * arcsec figure lives only in comments. See the spec's §8.
  */
 export const GIMBAL_YAW_LIMIT_DEG = 150;
 export const GIMBAL_PITCH_LIMIT_DEG = 90;
