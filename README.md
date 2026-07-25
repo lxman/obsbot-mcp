@@ -60,7 +60,7 @@ With the installed binary, use `"command": "obsbot-mcp"` and `"args": ["--debug"
 
 ## Tools
 
-35 tools total. All names below are current as of v0.4.0 — **every tool was renamed in this
+36 tools total. All names below are current as of v0.4.0 — **every tool was renamed in this
 release and there is no backward-compatible alias**; see [CHANGELOG.md](./CHANGELOG.md) for the
 full old→new mapping if you're updating a caller.
 
@@ -103,6 +103,7 @@ with no serial, since it can't be opened to read one.
 | `obsbot_gimbal_recenter` | `camera`? | Recenter the gimbal — drives it to yaw `0` / pitch `0`. Returns as soon as the command is sent, so poll `obsbot_gimbal_position` if you need to know it arrived. |
 | `obsbot_gimbal_position` | `camera`? | Read the gimbal's current absolute `{ yaw, pitch }` in degrees via standard UVC Pan/Tilt. Valid during a move as well as after one. On Linux this is the last-*commanded* value, not a live in-flight reading — see [limitations](#linux-gimbal-position-feedback-is-not-live). |
 | `obsbot_aim_at_pixel` | `x`, `y`, `frameWidth`, `frameHeight`, `camera`? | Point the camera at a pixel from a frame you just captured. Reads the camera's magnification from its own reported state — a discrete FOV mode or a continuous zoom alike — so it needs no FOV or zoom argument and works at any zoom. Refuses while AI tracking is active, when the FOV mode can't be decoded, or when a corrupt zoom reading would resolve to an implausible magnification, and refuses if the camera had to be woken (waking moves the gimbal, invalidating the frame you measured). It reads the live pose to compute the aim, so on Linux it is affected the same way `obsbot_gimbal_position` is — see [limitations](#linux-gimbal-position-feedback-is-not-live). Returns `clamped:true` if the target was outside the gimbal's range, in which case the camera still moves — to the nearest reachable pose. Refuses (`ok:false`) instead of moving when the pixel lies past vertical from the current pose, since the only rotation that reaches it would swing the camera toward the opposite side of the room; tilt toward the pixel first, then re-aim. |
+| `obsbot_zoom_to_fit` | `x`, `y`, `width`, `height`, `frameWidth`, `frameHeight`, `margin` (default `0.1`), `camera`? | Frame a region of a frame you just captured: centre the gimbal on it and zoom so the region fills the frame. Same refusal conditions as `obsbot_aim_at_pixel` (AI tracking, undecodable FOV/zoom, a woken camera, an over-the-top target), plus a refusal if the region isn't strictly inside the frame or has non-positive size. `margin` backs the zoom off by that fraction so the region isn't framed edge-to-edge; the *tighter* of the region's two axes sets the zoom, so the whole region stays visible rather than being cropped on one side. Moves the gimbal **before** zooming — zoom is centre-preserving but not target-preserving, so zooming first can push the region out of frame. Zoom ramps rather than jumping, so the tool polls for up to 3s and returns `settled:false` (not an error) if the zoom hadn't arrived in time — check it before trusting a follow-up snapshot. |
 
 #### Aiming at what you can see
 
@@ -130,6 +131,41 @@ drives the gimbal and would fight the aim), when the FOV mode can't be decoded, 
 reading would resolve to an implausible magnification, or when the camera had to
 be woken from sleep (waking moves the gimbal, so the frame you measured no longer matches where the
 camera is pointing — take a fresh snapshot and retry).
+
+#### Framing what you can see
+
+`obsbot_zoom_to_fit` extends the same idea from a point to a region: instead of just centring on a
+pixel, it also zooms so that region fills the frame.
+
+1. `obsbot_capture_snapshot` — look at the frame
+2. Pick a bounding box around whatever should fill the frame (a face, a whiteboard, ...)
+3. `obsbot_zoom_to_fit` — pass the box (`x`, `y`, `width`, `height`) and that frame's dimensions
+4. `obsbot_capture_snapshot` again — confirm the framing, and repeat if needed
+
+It shares `obsbot_aim_at_pixel`'s refusals (AI tracking, undecodable FOV/zoom, a woken camera), and
+adds one of its own: the region must be strictly inside the frame with a positive width and height, or
+the call refuses rather than guess what a negative width or an off-frame box was supposed to mean.
+
+`margin` (default `0.1`, i.e. 10%) backs the requested zoom off by that fraction so the region isn't
+framed exactly edge-to-edge — some breathing room around it survives small aim/zoom error. The
+region's two axes rarely need the same zoom to fill the frame; the tool always picks the *smaller* of
+the two required magnifications, because zooming to the larger one would fill one axis by cropping the
+other. The result is clamped to the camera's `[1x, 4x]` magnification range (reported via `clamped`) —
+a region demanding more zoom than the camera has still gets the closest fit available, rather than
+being refused outright.
+
+The gimbal moves before the zoom is commanded. Zoom re-centres what's already in frame but does not
+keep a specific pixel under the crosshair as it changes — zooming first can push the region's centre
+out of frame entirely, which would make the subsequent move aim at a pixel that no longer means what
+it did when the caller measured it.
+
+Zoom is not instantaneous: on this hardware it ramps toward the commanded value rather than jumping to
+it, so a status read taken immediately after commanding it can catch it mid-transit (observed:
+commanding ratio 1.5 read back partway there before settling). `obsbot_zoom_to_fit` polls for up to 3
+seconds waiting for the zoom to arrive and returns `settled:false` — not an error — if it didn't. A
+frame captured while the zoom is still moving is at an unknown magnification, so check `settled`
+before trusting a follow-up snapshot; a `false` just means the camera was moving slower than expected,
+not that anything failed.
 
 ### Gimbal presets
 

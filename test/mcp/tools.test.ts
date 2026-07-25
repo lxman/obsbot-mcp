@@ -8,6 +8,7 @@ import { AmbiguousCameraError } from "../../src/device/manager.js";
 import type { CaptureManager } from "../../src/capture/manager.js";
 import { CaptureError, FfmpegMissingError } from "../../src/capture/manager.js";
 import { buildFrame } from "../../src/codec/frame.js";
+import { aimAtPixel } from "../../src/geometry/aim.js";
 
 // Real awake status block captured from the device (starts 0x25, byte[2]=0 → awake).
 const HEALTHY_STATUS_AWAKE = Buffer.from(
@@ -2120,4 +2121,181 @@ test("string-encoded numeric x/y still work", async () => {
   const r = (await tool.handler({ x: "960", y: "360", ...HD_FRAME })) as { ok: boolean };
   expect(r.ok).toBe(true);
   expect(transport.gimbalSet).toHaveBeenCalled();
+});
+
+// --- obsbot_zoom_to_fit ---
+//
+// Frames a region: centre the gimbal on it, zoom so it fills the frame. Shares
+// obsbot_aim_at_pixel's refusal conditions and its schema style (num().pipe(finite))
+// — see that tool's test block above for the checks this one reuses rather than
+// re-testing independently.
+//
+// HEALTHY_STATUS_AWAKE (top of file) is unmodified wide/m=1/zoomPercent=0, so
+// every test below that doesn't override recvStatus starts from magnification 1.
+
+const FULL_FRAME = { frameWidth: 1920, frameHeight: 1080 };
+// Timings injected so the "never settles" test doesn't actually wait 3s.
+const FAST_ZOOM_SETTLE = { pollMs: 1, timeoutMs: 5 };
+
+test("fitting a region computes the magnification that makes it fill the frame", async () => {
+  // A 480x270 region in a 1920x1080 frame is a quarter of each axis, so it needs
+  // 4x more magnification; the default 10% margin backs that off to 3.6364,
+  // which is ratio 1.8788. Region is centred, so the aim itself is a no-op —
+  // this test is about the magnification arithmetic, not the aim.
+  const transport = makeFakeTransport();
+  const tool = findTool(createTools(makeFakeMgr(transport)), "obsbot_zoom_to_fit");
+  const r = (await tool.handler({ x: 720, y: 405, width: 480, height: 270, ...FULL_FRAME })) as {
+    ok: boolean; magnification: number; ratio: number; clamped: boolean;
+  };
+  expect(r.ok).toBe(true);
+  expect(r.magnification).toBeCloseTo(3.6364, 4);
+  expect(r.ratio).toBeCloseTo(1.8788, 4);
+  expect(r.clamped).toBe(false);
+});
+
+test("the tighter axis wins, so the whole region fits", async () => {
+  // 960x270 needs 2x horizontally and 4x vertically. Taking the MAX would crop
+  // the region's sides; min() fits all of it. -> m' = 2/1.1 = 1.8182
+  const transport = makeFakeTransport();
+  const tool = findTool(createTools(makeFakeMgr(transport)), "obsbot_zoom_to_fit");
+  const r = (await tool.handler({ x: 480, y: 405, width: 960, height: 270, ...FULL_FRAME })) as {
+    ok: boolean; magnification: number; clamped: boolean;
+  };
+  expect(r.ok).toBe(true);
+  expect(r.magnification).toBeCloseTo(1.8182, 4);
+  expect(r.clamped).toBe(false);
+});
+
+test("a fit demanding more than 4x is clamped and reported", async () => {
+  // 192x108 wants 10x. The scale stops at 4. clamped:true, ratio 2.0, and the
+  // camera still moves and still zooms to the limit — a partial fit beats none.
+  const transport = makeFakeTransport();
+  const tool = findTool(createTools(makeFakeMgr(transport)), "obsbot_zoom_to_fit");
+  const r = (await tool.handler({ x: 864, y: 486, width: 192, height: 108, ...FULL_FRAME })) as {
+    ok: boolean; magnification: number; ratio: number; clamped: boolean;
+  };
+  expect(r.ok).toBe(true);
+  expect(r.clamped).toBe(true);
+  expect(r.magnification).toBeCloseTo(4, 4);
+  expect(r.ratio).toBeCloseTo(2.0, 4);
+  expect(transport.gimbalSet).toHaveBeenCalled();
+  expect(transport.zoomSet).toHaveBeenCalled();
+});
+
+test("a region already filling the frame clamps at the wide end", async () => {
+  // From m=1 a full-frame region wants 1/1.1 = 0.909, below the 1.0 floor.
+  // clamped:true, ratio:1.0.
+  const transport = makeFakeTransport();
+  const tool = findTool(createTools(makeFakeMgr(transport)), "obsbot_zoom_to_fit");
+  const r = (await tool.handler({ x: 0, y: 0, width: 1920, height: 1080, ...FULL_FRAME })) as {
+    ok: boolean; magnification: number; ratio: number; clamped: boolean;
+  };
+  expect(r.ok).toBe(true);
+  expect(r.clamped).toBe(true);
+  expect(r.magnification).toBeCloseTo(1, 4);
+  expect(r.ratio).toBeCloseTo(1.0, 4);
+});
+
+test("the region's centre is what gets aimed at", async () => {
+  // Region (100,100,200,200) centres on (200,200), so the aim must match
+  // aimAtPixel(200, 200, ...) for the same optics and pose (current pose is
+  // yaw 0 / pitch 0, magnification 1 — the fake transport's defaults).
+  const transport = makeFakeTransport();
+  const tool = findTool(createTools(makeFakeMgr(transport)), "obsbot_zoom_to_fit");
+  const r = (await tool.handler({ x: 100, y: 100, width: 200, height: 200, ...FULL_FRAME })) as {
+    ok: boolean; target: { yaw: number; pitch: number };
+  };
+  const expected = aimAtPixel(
+    200, 200,
+    { width: FULL_FRAME.frameWidth, height: FULL_FRAME.frameHeight },
+    { magnification: 1 },
+    { yaw: 0, pitch: 0 },
+  );
+  expect(r.ok).toBe(true);
+  expect(r.target.yaw).toBeCloseTo(expected.target.yaw, 6);
+  expect(r.target.pitch).toBeCloseTo(expected.target.pitch, 6);
+});
+
+test.each([
+  ["negative width", { x: 0, y: 0, width: -10, height: 100 }],
+  ["zero height", { x: 0, y: 0, width: 100, height: 0 }],
+  ["off the right edge", { x: 1900, y: 0, width: 100, height: 100 }],
+  ["off the bottom", { x: 0, y: 1000, width: 100, height: 200 }],
+])("rejects a region that is not inside the frame: %s", async (_label, region) => {
+  const transport = makeFakeTransport();
+  const tool = findTool(createTools(makeFakeMgr(transport)), "obsbot_zoom_to_fit");
+  const r = (await tool.handler({ ...region, ...FULL_FRAME })) as { ok: boolean; error: string };
+  expect(r.ok).toBe(false);
+  expect(transport.gimbalSet).not.toHaveBeenCalled();
+  expect(transport.zoomSet).not.toHaveBeenCalled();
+});
+
+test("move happens before zoom — zoom is centre-preserving but not target-preserving", async () => {
+  const transport = makeFakeTransport();
+  const order: string[] = [];
+  transport.gimbalSet = vi.fn(async () => { order.push("move"); });
+  transport.zoomSet = vi.fn(async () => { order.push("zoom"); });
+  const tool = findTool(createTools(makeFakeMgr(transport)), "obsbot_zoom_to_fit");
+  const r = (await tool.handler({ x: 720, y: 405, width: 480, height: 270, ...FULL_FRAME })) as {
+    ok: boolean;
+  };
+  expect(r.ok).toBe(true);
+  expect(order).toEqual(["move", "zoom"]);
+});
+
+test("an over-the-top region centre is refused without moving or zooming", async () => {
+  // Same geometry as obsbot_aim_at_pixel's over-the-top test, ported to this
+  // suite's 1920x1080 fixture: current pose yaw 0 / pitch 85 (tilt.value =
+  // -85). The frame's bottom-centre point (u=0, v=1) resolves past vertical
+  // regardless of frame width, so a region centred there must refuse too.
+  const transport = makeFakeTransport();
+  transport.camCtrlGet = vi.fn(async (p: number) => ({ value: p === 0 ? 0 : -85, flags: 0 }));
+  const tool = findTool(createTools(makeFakeMgr(transport)), "obsbot_zoom_to_fit");
+  // Region (860,1060,200,20) centres on (960,1070), near the frame's
+  // bottom-centre (960,1080), while staying strictly inside the frame itself.
+  const r = (await tool.handler({ x: 860, y: 1060, width: 200, height: 20, ...FULL_FRAME })) as {
+    ok: boolean; error: string;
+  };
+  expect(r.ok).toBe(false);
+  expect(r.error).toMatch(/vertical/i);
+  expect(transport.gimbalSet).not.toHaveBeenCalled();
+  expect(transport.zoomSet).not.toHaveBeenCalled();
+});
+
+test("active AI tracking is refused, naming the mode, and never zooms", async () => {
+  const transport = makeFakeTransport();
+  transport.recvStatus = vi.fn(async () => {
+    const b = Buffer.from(HEALTHY_STATUS_AWAKE);
+    b[0x18] = 2;
+    b[0x1c] = 0;
+    return b;
+  });
+  const tool = findTool(createTools(makeFakeMgr(transport)), "obsbot_zoom_to_fit");
+  const r = (await tool.handler({ x: 720, y: 405, width: 480, height: 270, ...FULL_FRAME })) as {
+    ok: boolean; error: string;
+  };
+  expect(r.ok).toBe(false);
+  expect(r.error).toMatch(/track/i);
+  expect(transport.gimbalSet).not.toHaveBeenCalled();
+  expect(transport.zoomSet).not.toHaveBeenCalled();
+});
+
+test("a fake whose zoomPercent never reaches the target returns settled:false rather than hanging or throwing", async () => {
+  const transport = makeFakeTransport();
+  // zoomPercent is pinned at 0 (block[0x04]) no matter what was commanded —
+  // the ramp never arrives.
+  transport.recvStatus = vi.fn(async () => {
+    const b = Buffer.from(HEALTHY_STATUS_AWAKE);
+    b[0x04] = 0;
+    return b;
+  });
+  const tools = createTools(makeFakeMgr(transport), undefined, false, {}, FAST_ZOOM_SETTLE);
+  const tool = findTool(tools, "obsbot_zoom_to_fit");
+  // This region fits at magnification 3.6364 (ratio 1.8788, target zoomPercent
+  // ~87.88), which the pinned-zero fake will never report.
+  const r = (await tool.handler({ x: 720, y: 405, width: 480, height: 270, ...FULL_FRAME })) as {
+    ok: boolean; settled: boolean;
+  };
+  expect(r.ok).toBe(true);
+  expect(r.settled).toBe(false);
 });
