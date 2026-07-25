@@ -58,9 +58,25 @@ test("buildRecordArgs: video only omits audio input and audio codec", () => {
   ]);
 });
 
-test("buildPreviewArgs opens a titled ffplay window", () => {
+// The preview exists for a human to watch the gimbal move, so smooth motion is
+// its whole point. Left to negotiate, dshow picks 1080p30 — but the Tiny 2
+// advertises mjpeg 1920x1080 up to 60fps (confirmed 2026-07-25 via
+// `ffmpeg -list_options`, and the 60fps stream verified to actually sustain 60).
+// Pinning the codec is what makes 60 reachable: yuyv422 caps at 30 for 1080p, so
+// without -vcodec the negotiation can land on a format that cannot do 60.
+test("buildPreviewArgs asks for 1080p60 mjpeg, not the negotiated 30fps default", () => {
   expect(buildPreviewArgs({ videoName: "OBSBOT Tiny 2 StreamCamera" })).toEqual([
     "-hide_banner", "-loglevel", "warning", "-f", "dshow",
+    "-framerate", "60", "-video_size", "1920x1080", "-vcodec", "mjpeg",
     "-i", "video=OBSBOT Tiny 2 StreamCamera", "-window_title", "OBSBOT preview",
   ]);
+});
+
+test("the v4l2 preview asks for 60fps too", () => {
+  const args = buildPreviewArgs({ videoName: "/dev/video0" });
+  expect(args).toContain("-framerate");
+  expect(args[args.indexOf("-framerate") + 1]).toBe("60");
+  // v4l2 already pinned the codec and size; framerate was the one missing piece.
+  expect(args).toContain("mjpeg");
+  expect(args).toContain("1920x1080");
 });
