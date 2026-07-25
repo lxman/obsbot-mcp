@@ -24,14 +24,25 @@ const HEALTHY_STATUS_ASLEEP = (() => {
 
 function makeFakeTransport() {
   let seq = 0;
+  // Mutable, per-instance copy so zoomSet can echo into it: the real device's
+  // zoomPercent tracks actual travel, and a fake that pins it at 0 forever makes
+  // every zoom_to_fit test that uses the production settle defaults wait out the
+  // full timeout for no reason. Echoing here is both faster AND more faithful to
+  // the real device, which is what makes the settle logic worth testing at all.
+  // zoomSet's `units` arg is already on the 0-100 scale here because zoomRange()
+  // below returns {min:0, max:100} — zoomRatioToUnits(ratio, 0, 100) computes
+  // exactly the target zoomPercent — so no unit conversion is needed to echo it.
+  const status = Buffer.from(HEALTHY_STATUS_AWAKE);
   return {
     sendVendor: vi.fn(async (_frame: Buffer) => {}),
     recvVendor: vi.fn(async (_frame: Buffer, _length?: number) => Buffer.alloc(60)),
-    recvStatus: vi.fn(async (_length?: number) => HEALTHY_STATUS_AWAKE),
+    recvStatus: vi.fn(async (_length?: number) => status),
     xuRaw: vi.fn(async (_selector: number, _data: Buffer) => {}),
     xuGetRaw: vi.fn(async (_selector: number, _length: number) => Buffer.alloc(60)),
     zoomRange: vi.fn(async () => ({ min: 0, max: 100 })),
-    zoomSet: vi.fn(async (_units: number) => {}),
+    zoomSet: vi.fn(async (units: number) => {
+      status[0x04] = Math.max(0, Math.min(255, Math.round(units)));
+    }),
     camCtrlSet: vi.fn(async (_p: number, _v: number, _f: number) => {}),
     camCtrlRange: vi.fn(async (_p: number) => ({ min: 0, max: 100 })),
     camCtrlGet: vi.fn(async (_p: number) => ({ value: 0, flags: 0 })),
@@ -2234,8 +2245,12 @@ test("move happens before zoom — zoom is centre-preserving but not target-pres
   const transport = makeFakeTransport();
   const order: string[] = [];
   transport.gimbalSet = vi.fn(async () => { order.push("move"); });
+  // Overrides the default fake's zoom-echoing zoomSet, so the settle poll below
+  // would otherwise never see the target arrive — this test only cares about
+  // ordering, so give it a short settle bound rather than burning the default 3s.
   transport.zoomSet = vi.fn(async () => { order.push("zoom"); });
-  const tool = findTool(createTools(makeFakeMgr(transport)), "obsbot_zoom_to_fit");
+  const tools = createTools(makeFakeMgr(transport), undefined, false, {}, FAST_ZOOM_SETTLE);
+  const tool = findTool(tools, "obsbot_zoom_to_fit");
   const r = (await tool.handler({ x: 720, y: 405, width: 480, height: 270, ...FULL_FRAME })) as {
     ok: boolean;
   };
@@ -2298,4 +2313,91 @@ test("a fake whose zoomPercent never reaches the target returns settled:false ra
   };
   expect(r.ok).toBe(true);
   expect(r.settled).toBe(false);
+});
+
+// IMPORTANT 1: a transposed frame is undetectable and silently frames the wrong
+// thing. obsbot_zoom_to_fit shares obsbot_aim_at_pixel's 16:9 guard (see that
+// tool's "a non-16:9 frame is refused as a transposition or typo" test above) —
+// this pins that it's actually wired up here too, not just claimed in the docs.
+test("a non-16:9 frame is refused as a transposition or typo, before any move or zoom", async () => {
+  const transport = makeFakeTransport();
+  const tool = findTool(createTools(makeFakeMgr(transport)), "obsbot_zoom_to_fit");
+  // A 1920x1080 snapshot transposed to frameWidth:1080, frameHeight:1920 — this
+  // would also flip which axis Math.min(frameWidth/width, frameHeight/height)
+  // selects, so an undetected transposition frames the wrong region at the wrong
+  // zoom while still reporting ok:true.
+  const r = (await tool.handler({
+    x: 720, y: 405, width: 480, height: 270, frameWidth: 1080, frameHeight: 1920,
+  })) as { ok: boolean; error: string };
+  expect(r.ok).toBe(false);
+  expect(r.error).toMatch(/16:9|aspect/i);
+  expect(transport.gimbalSet).not.toHaveBeenCalled();
+  expect(transport.zoomSet).not.toHaveBeenCalled();
+});
+
+// MINOR 4: the camera-was-asleep and undecodable-fovMode refusals had no
+// dedicated test, mirroring obsbot_aim_at_pixel's equivalent tests above ("a
+// sleeping camera is woken, then refused..." and "an unrecognised FOV mode is
+// refused rather than guessed").
+test("a sleeping camera is woken, then refused — the wake invalidated the caller's frame", async () => {
+  const transport = makeFakeTransport();
+  let first = true;
+  transport.recvStatus = vi.fn(async () => {
+    if (first) { first = false; return HEALTHY_STATUS_ASLEEP; }
+    return HEALTHY_STATUS_AWAKE;
+  });
+  const tool = findTool(createTools(makeFakeMgr(transport)), "obsbot_zoom_to_fit");
+  const r = (await tool.handler({ x: 720, y: 405, width: 480, height: 270, ...FULL_FRAME })) as {
+    ok: boolean; error: string;
+  };
+  expect(r.ok).toBe(false);
+  expect(r.error).toMatch(/fresh snapshot/i);
+  expect(transport.gimbalSet).not.toHaveBeenCalled();
+  expect(transport.zoomSet).not.toHaveBeenCalled();
+});
+
+test("an unrecognised FOV mode is refused rather than guessed, and never zooms", async () => {
+  const transport = makeFakeTransport();
+  transport.recvStatus = vi.fn(async () => {
+    const b = Buffer.from(HEALTHY_STATUS_AWAKE);
+    b[0x11] = 9; // no known FovType maps to this
+    return b;
+  });
+  const tool = findTool(createTools(makeFakeMgr(transport)), "obsbot_zoom_to_fit");
+  const r = (await tool.handler({ x: 720, y: 405, width: 480, height: 270, ...FULL_FRAME })) as {
+    ok: boolean; error: string;
+  };
+  expect(r.ok).toBe(false);
+  expect(transport.gimbalSet).not.toHaveBeenCalled();
+  expect(transport.zoomSet).not.toHaveBeenCalled();
+});
+
+// MINOR 3: a transient status-read failure inside the settle loop must resolve
+// to settled:false rather than throwing — by this point the gimbal move and the
+// zoom write have already happened, so throwing would lose the target/ratio the
+// caller needs to know what the camera just did.
+test("a status read that throws during the settle poll resolves to settled:false, not a thrown error", async () => {
+  const transport = makeFakeTransport();
+  // The first two recvStatus calls (the readiness gate's awake probe, then the
+  // handler's own aiMode/fovMode read) must still succeed — only the reads
+  // INSIDE the settle loop, which runs after the gimbal move and zoom write,
+  // should throw. That is the state this finding is about: by the time this
+  // throws, the tool has already committed the moves it needs to report.
+  let calls = 0;
+  transport.recvStatus = vi.fn(async () => {
+    calls += 1;
+    if (calls <= 2) return HEALTHY_STATUS_AWAKE;
+    throw new Error("transient USB read failure");
+  });
+  const tools = createTools(makeFakeMgr(transport), undefined, false, {}, FAST_ZOOM_SETTLE);
+  const tool = findTool(tools, "obsbot_zoom_to_fit");
+  const r = (await tool.handler({ x: 720, y: 405, width: 480, height: 270, ...FULL_FRAME })) as {
+    ok: boolean; settled: boolean; target: { yaw: number }; ratio: number;
+  };
+  expect(r.ok).toBe(true);
+  expect(r.settled).toBe(false);
+  expect(r.target).toBeDefined();
+  expect(r.ratio).toBeCloseTo(1.8788, 4);
+  expect(transport.gimbalSet).toHaveBeenCalled();
+  expect(transport.zoomSet).toHaveBeenCalled();
 });

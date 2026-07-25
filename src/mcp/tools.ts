@@ -121,6 +121,34 @@ export function resolveMagnification(
   return { ok: true, magnification: FOV_MAGNIFICATION[status.fovMode] };
 }
 
+/**
+ * Refuse a frameWidth/frameHeight pair that isn't 16:9. Shared by
+ * `obsbot_aim_at_pixel` and `obsbot_zoom_to_fit` — both take frame dimensions
+ * from the same `obsbot_capture_snapshot` result, and both are equally exposed
+ * to a caller that swaps width and height.
+ *
+ * 16:9 is preserved by the capture path at every resolution (verified at
+ * 256x144, 1280x720, 1920x1080), so a non-16:9 pair did not come from that path
+ * as-is — it was transposed (width/height swapped) or came from somewhere else
+ * entirely, since passing the values through unchanged always yields 16:9. For
+ * `obsbot_zoom_to_fit` a transposed pair is worse than a bad aim: it also flips
+ * which axis `Math.min(frameWidth/width, frameHeight/height)` selects, so the
+ * camera would frame the wrong region at the wrong zoom while still reporting
+ * `ok: true`.
+ */
+function refuseIfNot169(frameWidth: number, frameHeight: number): { ok: false; error: string } | null {
+  if (Math.abs(frameWidth / frameHeight - 16 / 9) > 0.02) {
+    return {
+      ok: false,
+      error:
+        `frame ${frameWidth}x${frameHeight} is not 16:9, but obsbot_capture_snapshot always ` +
+        `returns 16:9 frames. This looks like frameWidth/frameHeight were transposed, or came ` +
+        `from something other than that tool's result.`,
+    };
+  }
+  return null;
+}
+
 // Some MCP clients serialize numbers and booleans as strings when the advertised
 // inputSchema lacks type info. We now advertise a proper JSON Schema (see
 // mcp/server.ts), but also accept string-encoded values defensively so the tools
@@ -449,6 +477,13 @@ const ZOOM_SETTLE_TOLERANCE_PCT = 1;
  * that overshoots/undershoots slightly) is information the caller needs, not a
  * failure — the caller decides what to do with `settled:false`, this function
  * just refuses to lie about it.
+ *
+ * A transient read failure inside the loop is swallowed the same way: by the
+ * time this runs, the gimbal move and the zoom write have already happened, so
+ * throwing here would lose the `target`/`ratio` the caller needs to know what
+ * the camera just did. A read that throws is treated as "not settled yet" —
+ * the loop keeps polling until the deadline and resolves `false` rather than
+ * rejecting, so the tool still returns its normal result.
  */
 async function waitForZoomSettle(
   t: ObsbotTransport,
@@ -459,8 +494,12 @@ async function waitForZoomSettle(
   const targetPct = (targetRatio - 1) * 100;
   const deadline = Date.now() + timeoutMs;
   for (;;) {
-    const status = decodeStatus(await t.recvStatus());
-    if (Math.abs(status.zoomPercent - targetPct) <= ZOOM_SETTLE_TOLERANCE_PCT) return true;
+    try {
+      const status = decodeStatus(await t.recvStatus());
+      if (Math.abs(status.zoomPercent - targetPct) <= ZOOM_SETTLE_TOLERANCE_PCT) return true;
+    } catch {
+      // Transient read failure — treat as not-yet-settled rather than propagating.
+    }
     if (Date.now() >= deadline) return false;
     await napMs(pollMs);
   }
@@ -968,20 +1007,8 @@ export function createTools(
       handler: async (args: unknown) => {
         const { x, y, frameWidth, frameHeight, camera } = aimAtPixelSchema.parse(args);
 
-        // 16:9 is preserved by the capture path at every resolution (verified at
-        // 256x144, 1280x720, 1920x1080), so a non-16:9 pair did not come from that
-        // path as-is — it was transposed (width/height swapped) or came from
-        // somewhere else entirely, since passing the values through unchanged
-        // always yields 16:9.
-        if (Math.abs(frameWidth / frameHeight - 16 / 9) > 0.02) {
-          return {
-            ok: false,
-            error:
-              `frame ${frameWidth}x${frameHeight} is not 16:9, but obsbot_capture_snapshot always ` +
-              `returns 16:9 frames. This looks like frameWidth/frameHeight were transposed, or came ` +
-              `from something other than that tool's result.`,
-          };
-        }
+        const aspectRefusal = refuseIfNot169(frameWidth, frameHeight);
+        if (aspectRefusal) return aspectRefusal;
         if (x < 0 || x > frameWidth || y < 0 || y > frameHeight) {
           return { ok: false, error: `pixel (${x},${y}) is outside the ${frameWidth}x${frameHeight} frame` };
         }
@@ -1111,11 +1138,13 @@ export function createTools(
         "region's centre out of frame. Refuses on the same conditions as obsbot_aim_at_pixel: AI " +
         "tracking active, the camera was asleep (waking it moves the gimbal and invalidates the " +
         "frame), the FOV mode can't be decoded, a corrupt zoom reading, or the region's centre lying " +
-        "past vertical from the current pose. Also refuses a region that isn't strictly inside the " +
-        "frame, or has non-positive width/height. The requested zoom is clamped to the camera's " +
-        "[1x, 4x] magnification range and reported via `clamped`; a partial fit still moves and " +
-        "zooms to the limit. Zoom ramps rather than jumping, so the tool polls the status block for " +
-        "up to 3s waiting for it to arrive and returns `settled:false` (not an error) if it didn't — " +
+        "past vertical from the current pose, or a frame that isn't 16:9 (obsbot_capture_snapshot " +
+        "always returns 16:9; a non-16:9 pair looks transposed). Also refuses a region that isn't " +
+        "within the frame (edges included), or has non-positive width/height. The requested zoom is " +
+        "clamped to the camera's [1x, 4x] magnification range and reported via `clamped`; a partial " +
+        "fit still moves and zooms to the limit. Zoom ramps rather than jumping, so the tool polls " +
+        "the status block for up to 3s waiting for it to arrive and returns `settled:false` (not an " +
+        "error) if it didn't — " +
         "a frame captured mid-ramp is at an unknown magnification, so check `settled` before trusting " +
         "a follow-up snapshot.",
       schema: zoomToFitSchema,
@@ -1124,8 +1153,14 @@ export function createTools(
           zoomToFitSchema.parse(args);
 
         // Pure input validation first, no I/O — same placement as obsbot_aim_at_pixel's
-        // own frame/pixel checks. "Strictly inside" allows touching the frame's own
-        // edges (a region that already IS the full frame is valid) but not crossing them.
+        // own frame/pixel checks, and the same order: the aspect check runs before
+        // the region-bounds check, matching obsbot_aim_at_pixel.
+        const aspectRefusal = refuseIfNot169(frameWidth, frameHeight);
+        if (aspectRefusal) return aspectRefusal;
+        // The region must lie within the frame, edges included: a region touching
+        // the frame's own edges is valid (a region that already IS the full frame
+        // must pass — the full-frame fit test depends on it), only crossing them
+        // is refused.
         if (
           width <= 0 || height <= 0 ||
           x < 0 || y < 0 ||
