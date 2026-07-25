@@ -98,11 +98,22 @@ export class LinuxTransport implements ObsbotTransport {
     // V4L2 pan_absolute/tilt_absolute return arc-seconds, but the rest of
     // the codebase expects degrees (Windows DirectShow convention). This is
     // the last-commanded value, not a live reading — see the class comment.
-    // Degrees as a float. Rounding to whole degrees here threw away precision
-    // the device already gave us — aimAtPixel adds its offset to this value,
-    // so every discarded fraction became aim error. The RANGE above still
-    // rounds: min/max are advertised bounds, not a live pose, and no
-    // arithmetic accumulates on them.
+    //
+    // Degrees as a float, NOT rounded. UVC specifies CT_PANTILT_ABSOLUTE in
+    // arc-seconds, but this device's GET_RES is 3600 asec = 1 degree
+    // (PROTOCOL.md's CT_PANTILT_ABSOLUTE table, tiny2_specification.md
+    // section 2.1) and the firmware streams whole-degree steps — the device
+    // never emits a fraction, so rounding here would not recover any
+    // precision the hardware actually has. What NOT rounding preserves is
+    // precision on Linux SPECIFICALLY: uvcvideo caches this control and
+    // returns the value our own gimbalSet last wrote (round(deg *
+    // ARCSEC_PER_DEG)), so a fractional COMMANDED pose (e.g. from
+    // aimAtPixel's composed target) survives this round trip instead of being
+    // flattened to an integer here. It costs nothing either way, and avoids
+    // re-introducing a lossy step if a future device or firmware reports
+    // finer than a degree. The RANGE above still rounds: min/max are
+    // advertised bounds, not a live pose, and no arithmetic accumulates on
+    // them.
     if (property === 0 || property === 1) {
       result.value = result.value / ARCSEC_PER_DEG;
     }

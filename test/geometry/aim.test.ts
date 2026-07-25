@@ -197,8 +197,16 @@ test("a purely vertical target is exact even from a tilted pose", () => {
 });
 
 test("from a level pose the composition reduces to the simple sum", () => {
-  // pitch=0 is the case where yaw and pitch DO commute. If this drifts, the
-  // rotation order or a sign is wrong.
+  // pitch=0 is the case where YAW reduces to the old sum, for any pixel — yaw
+  // and pitch commute at zero tilt. The resulting pitch of 0 here is NOT
+  // general evidence that pitch reduces to the sum from a level pose: it holds
+  // only because v=0 (this pixel sits on the horizontal centre line, x=960 is
+  // u=0.5). Away from u=0, composed pitch (asin(dy/n), where n includes dx)
+  // differs from the old atan(dy) even when the starting pitch is 0 — see "a
+  // purely vertical target is exact even from a tilted pose" above, which pins
+  // the actual condition (u=0), and the level-pose case is testable directly
+  // in "the offset matches pixelToOffset only when one axis is zero" below. If
+  // this drifts, the rotation order or a sign is wrong.
   const aim = aimAtPixel(960, 360, HD, WIDE, { yaw: 10, pitch: 0 });
   expect(aim.target.yaw).toBeCloseTo(-8.311589, 5);
   expect(aim.target.pitch).toBeCloseTo(0, 9);
@@ -255,6 +263,26 @@ test("aiming past vertical yields the over-the-top solution, and clamps", () => 
   expect(aim.target.pitch).toBeCloseTo(75.388952, 5);
   expect(aim.target.yaw).toBe(-150);
   expect(aim.clamped).toBe(true);
+});
+
+test("the past-vertical case reports overTheTop, not just clamped", () => {
+  // Same geometry as above: the target ray points behind the camera's current
+  // heading, so this is not an ordinary out-of-range clamp — clamping the yaw
+  // to the nearest limit would slew 150 degrees toward the opposite side of
+  // the room, not toward the target. Callers must check this separately from
+  // `clamped` and refuse rather than move.
+  const aim = aimAtPixel(640, 720, HD, WIDE, { yaw: 0, pitch: 85 });
+  expect(aim.overTheTop).toBe(true);
+});
+
+test("an ordinary out-of-range clamp is NOT overTheTop", () => {
+  // Left edge from yaw 149 clamps to 150, but the target is still roughly
+  // where the camera is already heading — a little past the yaw limit, not
+  // behind the camera. Ordinary clamping must keep moving to the nearest
+  // reachable pose.
+  const aim = aimAtPixel(0, 360, HD, WIDE, { yaw: 149, pitch: 0 });
+  expect(aim.clamped).toBe(true);
+  expect(aim.overTheTop).toBe(false);
 });
 
 test("clamping at the negative end is reported too", () => {

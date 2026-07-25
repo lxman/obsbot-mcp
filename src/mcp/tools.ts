@@ -350,6 +350,14 @@ const PRESET_READ_DEFAULTS: Required<PresetReadOpts> = { attempts: 3, backoffMs:
 
 const napMs = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
+// Pan/tilt readback is a float now (see transport/linux.ts, transport/macos.ts),
+// which can carry many more digits than the hardware's ±1° accuracy justifies —
+// e.g. 5.975277777777778 from an arc-second division. Round to 2 decimal places
+// for reporting: enough to show sub-degree structure (useful on Linux, where it
+// reflects the last commanded pose) without implying precision the readout
+// doesn't have.
+const round2 = (deg: number): number => Math.round(deg * 100) / 100;
+
 const allEmpty = (slots: PresetSlot[]): boolean => slots.every((s) => !s.occupied);
 
 /**
@@ -813,7 +821,8 @@ export function createTools(
       description:
         "Read the gimbal's current absolute yaw/pitch in degrees (positive yaw = camera's " +
         "left, positive pitch = down) via the standard UVC Pan/Tilt controls. This is a live " +
-        "hardware readout accurate to ±1°: it is valid during a move as well as after one, " +
+        "hardware readout accurate to ±1°, reported rounded to 2 decimal places (finer digits " +
+        "would be noise, not precision): it is valid during a move as well as after one, " +
         "and reflects motion the host did not command (speed moves, recenter, tracking).",
       schema: gimbalPositionSchema,
       handler: async (args: unknown) => {
@@ -823,7 +832,7 @@ export function createTools(
         const tilt = await t.camCtrlGet(CAMERA_CONTROL_TILT);
         // UVC pan value is degrees, same sign as our yaw (+ = camera-left). UVC tilt
         // is degrees but positive = up, so negate to match our +pitch = down convention.
-        return { yaw: pan.value, pitch: -tilt.value };
+        return { yaw: round2(pan.value), pitch: round2(-tilt.value) };
       },
     },
     {
@@ -839,8 +848,11 @@ export function createTools(
         "is set (the zoom magnification is not calibrated), so it never aims on an assumption it " +
         "cannot check. If the camera was asleep, waking it moves the gimbal and invalidates the " +
         "frame you measured, so the call refuses instead of aiming on stale geometry — take a fresh " +
-        "snapshot and retry. Returns clamped:true if the target was past the gimbal's range and the " +
-        "camera landed short.",
+        "snapshot and retry. Returns clamped:true if the target was outside the gimbal's range; the " +
+        "camera still moves, to the nearest reachable pose. Refuses (ok:false) instead of moving when " +
+        "the pixel lies past vertical from the current pose — reachable only by an \"over the top\" " +
+        "rotation that would swing the camera toward the opposite side of the room, not toward the " +
+        "target; tilt toward the pixel first, then re-aim.",
       schema: aimAtPixelSchema,
       handler: async (args: unknown) => {
         const { x, y, frameWidth, frameHeight, camera } = aimAtPixelSchema.parse(args);
@@ -931,6 +943,23 @@ export function createTools(
           { fov: status.fovMode, zoom: 1 },
           { yaw, pitch },
         );
+
+        // Over the top is not an ordinary clamp: the target ray points behind
+        // the camera's current heading, so the nearest reachable yaw is on the
+        // FAR side of the gimbal's range, not near the target. Moving there
+        // would slew ~150 degrees into the opposite corner of the room while
+        // reporting clamped:true, which reads as "landed short" rather than
+        // "went the wrong way" — refuse instead of moving.
+        if (aim.overTheTop) {
+          return {
+            ok: false,
+            error:
+              `pixel (${x},${y}) lies past vertical from the current pose (yaw ${yaw.toFixed(1)}, ` +
+              `pitch ${pitch.toFixed(1)}); it is not reachable while keeping the image upright, only ` +
+              `by an "over the top" rotation that would swing the camera the opposite way. Tilt toward ` +
+              `the pixel first (e.g. obsbot_gimbal_move), then re-aim from the new pose.`,
+          };
+        }
 
         await t.gimbalSet(aim.target.yaw, aim.target.pitch, 0);
         return {

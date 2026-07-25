@@ -1215,6 +1215,21 @@ test("obsbot_gimbal_position maps UVC pan->yaw and negates tilt->pitch", async (
   expect(result).toEqual({ yaw: 30, pitch: 19 });
 });
 
+test("obsbot_gimbal_position rounds a long float readout to 2 decimal places", async () => {
+  // Linux/macOS now report the pan/tilt float unrounded (arc-seconds / 3600),
+  // which can produce many more digits than ±1° accuracy justifies.
+  const transport = makeFakeTransport();
+  transport.camCtrlGet = vi.fn(async (p: number) =>
+    p === 0 ? { value: 5.975277777777778, flags: 2 } : { value: -3.001, flags: 2 },
+  );
+  const tools = createTools(makeFakeMgr(transport));
+  const tool = findTool(tools, "obsbot_gimbal_position");
+
+  const result = await tool.handler({});
+
+  expect(result).toEqual({ yaw: 5.98, pitch: 3 });
+});
+
 // --- obsbot_preset_save ---
 
 test("obsbot_preset_save rejects an occupied slot", async () => {
@@ -2007,6 +2022,37 @@ test("saturation is reported and never commands an out-of-range pose", async () 
   expect(r.clamped).toBe(true);
   expect(r.target.yaw).toBe(150);
   expect(transport.gimbalSet).toHaveBeenCalledWith(150, expect.any(Number), expect.any(Number));
+});
+
+test("an over-the-top target is refused without moving the gimbal, even though it would clamp", async () => {
+  // Current pose yaw 0 / pitch 85 (tilt.value = -85 since pitch = -tilt).
+  // Aiming at the bottom-centre pixel resolves to yaw -180 / pitch 75.4, which
+  // clamps to yaw -150 — a legitimate-looking clamp that actually points 150
+  // degrees away from the target. This must refuse, not move-and-report-clamped.
+  const transport = makeFakeTransport();
+  transport.camCtrlGet = vi.fn(async (p: number) => ({ value: p === 0 ? 0 : -85, flags: 0 }));
+  const tool = findTool(createTools(makeFakeMgr(transport)), "obsbot_aim_at_pixel");
+  const r = (await tool.handler({ x: 640, y: 720, ...HD_FRAME })) as { ok: boolean; error: string };
+  expect(r.ok).toBe(false);
+  expect(r.error).toMatch(/vertical/i);
+  expect(r.error).toMatch(/tilt/i);
+  expect(transport.gimbalSet).not.toHaveBeenCalled();
+});
+
+test("an ordinary out-of-range clamp (not over the top) still moves and reports clamped: true", async () => {
+  // Current yaw 149, pitch 0. The left frame edge adds ~+34deg, past the yaw
+  // limit — an ordinary clamp toward the target's own side, not an
+  // over-the-top reversal, so the camera should still move.
+  const transport = makeFakeTransport();
+  transport.camCtrlGet = vi.fn(async (p: number) => ({ value: p === 0 ? 149 : 0, flags: 0 }));
+  const tool = findTool(createTools(makeFakeMgr(transport)), "obsbot_aim_at_pixel");
+  const r = (await tool.handler({ x: 0, y: 360, ...HD_FRAME })) as {
+    ok: boolean; clamped: boolean; target: { yaw: number };
+  };
+  expect(r.ok).toBe(true);
+  expect(r.clamped).toBe(true);
+  expect(r.target.yaw).toBe(150);
+  expect(transport.gimbalSet).toHaveBeenCalled();
 });
 
 test("a sleeping camera is woken, then refused — the wake invalidated the caller's frame", async () => {
