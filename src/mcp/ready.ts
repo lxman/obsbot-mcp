@@ -16,7 +16,7 @@ export interface ReconnectCtl {
 }
 
 export type ReadyResult =
-  | { ok: true; transport: ObsbotTransport; reconnected: boolean }
+  | { ok: true; transport: ObsbotTransport; reconnected: boolean; woke: boolean }
   | { ok: false; reason: "unreachable" | "wake-timeout"; error: string };
 
 export interface ReadyOpts {
@@ -81,7 +81,9 @@ export async function ensureReady(
     }
   }
 
+  let woke = false;
   if (!awake) {
+    woke = true;
     await t.sendVendor(encodeSetRunStatus("run").buildFrame(t.nextSeq()));
     let waited = 0;
     while (waited < wakeTimeoutMs) {
@@ -102,5 +104,5 @@ export async function ensureReady(
     await sleep(settleMs); // let the gimbal finish rising before we drive it
   }
 
-  return { ok: true, transport: t, reconnected: reconnect?.takeReconnected() ?? false };
+  return { ok: true, transport: t, reconnected: reconnect?.takeReconnected() ?? false, woke };
 }

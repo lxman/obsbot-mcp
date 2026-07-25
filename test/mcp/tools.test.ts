@@ -2009,7 +2009,7 @@ test("saturation is reported and never commands an out-of-range pose", async () 
   expect(transport.gimbalSet).toHaveBeenCalledWith(150, expect.any(Number), expect.any(Number));
 });
 
-test("a sleeping camera is woken, not refused", async () => {
+test("a sleeping camera is woken, then refused — the wake invalidated the caller's frame", async () => {
   const transport = makeFakeTransport();
   let first = true;
   transport.recvStatus = vi.fn(async () => {
@@ -2017,13 +2017,35 @@ test("a sleeping camera is woken, not refused", async () => {
     return HEALTHY_STATUS_AWAKE;
   });
   const tool = findTool(createTools(makeFakeMgr(transport)), "obsbot_aim_at_pixel");
-  const r = (await tool.handler({ x: 640, y: 360, ...HD_FRAME })) as { ok: boolean };
-  expect(r.ok).toBe(true);
-  expect(transport.gimbalSet).toHaveBeenCalled();
+  const r = (await tool.handler({ x: 640, y: 360, ...HD_FRAME })) as { ok: boolean; error: string };
+  expect(r.ok).toBe(false);
+  expect(r.error).toMatch(/fresh snapshot/i);
+  expect(transport.gimbalSet).not.toHaveBeenCalled();
 });
 
 test("the tool description warns that the frame size must match the pixel's frame", () => {
   const tool = findTool(createTools(makeFakeMgr()), "obsbot_aim_at_pixel");
   expect(tool.description).toMatch(/same/i);
   expect(tool.description).toMatch(/obsbot_capture_snapshot/);
+});
+
+// z.coerce.number() silently turns null/true/[]/"" into 0, which would let
+// {x: null, y: null, ...} through as a (wrong) aim at the frame's top-left corner
+// and command a real gimbal move. num() (the schema's usual numeric coercion,
+// used everywhere else in this file) accepts numeric strings but rejects those.
+test("non-numeric x/y (null) are rejected, not coerced to 0, and never move the gimbal", async () => {
+  const transport = makeFakeTransport();
+  const tool = findTool(createTools(makeFakeMgr(transport)), "obsbot_aim_at_pixel");
+  await expect(
+    tool.handler({ x: null, y: null, frameWidth: 1280, frameHeight: 720 }),
+  ).rejects.toThrow();
+  expect(transport.gimbalSet).not.toHaveBeenCalled();
+});
+
+test("string-encoded numeric x/y still work", async () => {
+  const transport = makeFakeTransport();
+  const tool = findTool(createTools(makeFakeMgr(transport)), "obsbot_aim_at_pixel");
+  const r = (await tool.handler({ x: "960", y: "360", ...HD_FRAME })) as { ok: boolean };
+  expect(r.ok).toBe(true);
+  expect(transport.gimbalSet).toHaveBeenCalled();
 });

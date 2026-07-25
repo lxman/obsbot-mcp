@@ -58,20 +58,29 @@ as the image, so passing them back is a copy.
 
 ## 4. Preconditions — all refusals, none silent
 
-**Sleep is handled by the existing gate, not by refusing.** `obsbot_gimbal_move` already goes through
-`gate(camera)` → `ensureReady`, which wakes a sleeping camera, waits for it to settle, and self-heals
-a dropped connection. This tool uses the same gate, so the §2 stale-block hazard is removed *by
-construction*: **status is read after the gate returns**, when the camera is known awake. An earlier
-draft refused on `awake: false`, which would have been both unfriendly and redundant.
+**Sleep is handled by the existing gate, and refused if it had to wake the camera.**
+`obsbot_gimbal_move` already goes through `gate(camera)` → `ensureReady`, which wakes a sleeping
+camera, waits for it to settle, and self-heals a dropped connection. This tool uses the same gate,
+so the §2 stale-*status-block* hazard is removed by construction: status is read after the gate
+returns, when the camera is known awake.
 
-Note that waking moves the gimbal — it un-stows and levels. That is fine here because the pose is
-read after the gate, never before.
+That removes only one of the two staleness problems here, though. Waking the gimbal un-stows and
+levels it — a real physical move — and this tool's pose reading happens *after* that move, while the
+caller's `x`/`y` were measured against a frame captured *before* it. Reading the pose after the gate
+makes the status block fresh, but it does nothing for the frame's provenance: the frame and the pose
+now describe two different moments, and the tool would aim confidently at the wrong place with no way
+to tell. So `ensureReady` reports whether it had to wake the camera (`woke`), and this tool refuses
+when it did, rather than silently aiming on a pose the caller's frame doesn't match. An earlier draft
+refused on `awake: false` before the gate ran, which would have been both unfriendly (refusing a case
+the gate can just handle) and insufficient (it didn't address the frame-provenance problem the wake
+itself creates).
 
 One `recvStatus()` call then supplies the remaining checks.
 
 | condition | action |
 |---|---|
 | gate fails (`unreachable` / `wake-timeout`) | return the gate's own error unchanged |
+| gate succeeded but had to wake the camera (`woke: true`) | refuse — the wake moved the gimbal after the caller's frame was captured; ask for a fresh snapshot |
 | `aiMode` ≠ `no-tracking` | refuse, naming the mode, and point at `obsbot_ai_track` |
 | `fovMode` is 0/1/2 | proceed, using that mode's measured constant |
 | `fovMode` is 3 | refuse — custom zoom active, magnification uncalibrated |
@@ -142,8 +151,9 @@ Against fakes, in the existing `test/mcp/tools.test.ts` style:
 
 - Each refusal path returns `ok: false` with a message naming the cause: tracking active (with the
   mode), custom zoom, unrecognised FOV mode.
-- A sleeping camera is **woken**, not refused: a fake whose first status read reports asleep and
-  whose later reads report awake must still produce a successful aim.
+- A sleeping camera is woken by the gate and then **refused**: a fake whose first status read reports
+  asleep must produce `ok:false` with an error mentioning a fresh snapshot, and must never call
+  `gimbalSet` — the wake moved the gimbal out from under the frame the caller measured.
 - Each discrete FOV mode selects the matching constant — a fake reporting narrow must produce an
   offset consistent with 50°, not 68°. This is the test that would have caught the original
   parameter-guessing design.

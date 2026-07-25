@@ -60,7 +60,7 @@ With the installed binary, use `"command": "obsbot-mcp"` and `"args": ["--debug"
 
 ## Tools
 
-34 tools total. All names below are current as of v0.4.0 — **every tool was renamed in this
+35 tools total. All names below are current as of v0.4.0 — **every tool was renamed in this
 release and there is no backward-compatible alias**; see [CHANGELOG.md](./CHANGELOG.md) for the
 full old→new mapping if you're updating a caller.
 
@@ -92,7 +92,7 @@ with no serial, since it can't be opened to read one.
 | `obsbot_devices` | — | List attached OBSBOT cameras with each one's serial (where obtainable), name, and status (`available`/`bound`/`busy`). A `busy` camera is held by another process. |
 | `obsbot_wake` | `camera`? | Wake the camera/gimbal (sends `"run"`). **Moves the camera:** un-stows the gimbal back to level (pitch ~0). Most control commands also wake it implicitly. |
 | `obsbot_sleep` | `camera`? | Sleep the camera/gimbal (sends `"sleep"`). **Moves the camera:** stows the gimbal face-down at roughly pitch `84`, so `obsbot_gimbal_position` reads ~84 rather than the pose you left. |
-| `obsbot_status` | `camera`? | Read the live status block: `{ awake, hdr, faceAe, aiMode, trackSpeed }` (`faceAe` = auto-exposure metering for a detected face). Under `--debug`, also returns the raw 60-byte block as hex. |
+| `obsbot_status` | `camera`? | Read the live status block: `{ awake, hdr, faceAe, aiMode, trackSpeed, fovMode, zoomPercent }` (`faceAe` = auto-exposure metering for a detected face; `fovMode` = `wide`\|`medium`\|`narrow`\|`custom`\|`unknown`, where `custom` means a continuous zoom overrode the discrete modes; `zoomPercent` = zoom position, `0`-`100`). Under `--debug`, also returns the raw 60-byte block as hex. |
 
 ### Gimbal (PTZ)
 
@@ -102,7 +102,7 @@ with no serial, since it can't be opened to read one.
 | `obsbot_gimbal_move_speed` | `yaw`, `pitch`, `roll` (deg/s, clamped to `±150`, `roll` defaults `0`), `autoStopMs` (default `800`), `camera`? | Drive the gimbal at a speed, then auto-stop after `autoStopMs` so it can't run away. Same yaw/pitch sign convention as `gimbal_move`. Returns the speeds actually used. Past its limit the firmware ignores the command outright rather than saturating — 180 deg/s and above move the gimbal exactly 0° — so requests are clamped into the hardware-verified band. **Not available on Linux** — see [limitations](#linux-gimbal-position-feedback-is-not-live). |
 | `obsbot_gimbal_recenter` | `camera`? | Recenter the gimbal — drives it to yaw `0` / pitch `0`. Returns as soon as the command is sent, so poll `obsbot_gimbal_position` if you need to know it arrived. |
 | `obsbot_gimbal_position` | `camera`? | Read the gimbal's current absolute `{ yaw, pitch }` in degrees via standard UVC Pan/Tilt. Valid during a move as well as after one. On Linux this is the last-*commanded* value, not a live in-flight reading — see [limitations](#linux-gimbal-position-feedback-is-not-live). |
-| `obsbot_aim_at_pixel` | `x`, `y`, `frameWidth`, `frameHeight`, `camera`? | Point the camera at a pixel from a frame you just captured. Reads the camera's own FOV mode rather than taking one. Refuses while AI tracking or a custom zoom is active. Returns `clamped:true` if the target was out of range and the camera landed short. |
+| `obsbot_aim_at_pixel` | `x`, `y`, `frameWidth`, `frameHeight`, `camera`? | Point the camera at a pixel from a frame you just captured. Reads the camera's own FOV mode rather than taking one. Refuses while AI tracking or a custom zoom is active, and refuses if the camera had to be woken (waking moves the gimbal, invalidating the frame you measured). It reads the live pose to compute the aim, so on Linux it is affected the same way `obsbot_gimbal_position` is — see [limitations](#linux-gimbal-position-feedback-is-not-live). Returns `clamped:true` if the target was out of range and the camera landed short. |
 
 #### Aiming at what you can see
 
@@ -116,9 +116,18 @@ locate something in the picture and then point the camera at it:
 Pass the `frameWidth`/`frameHeight` from the same snapshot the pixel came from. Mixing a pixel from
 one frame with dimensions from another aims at the wrong place, and nothing can detect it.
 
+**The snapshot must be `source: "device"`.** `obsbot_capture_snapshot` can also read from
+`source: "virtual"` or `"ndi"`, which come from OBSBOT Center's own output rather than the camera's
+raw stream. Those are framed and cropped by OBSBOT Center, not by this camera's optics, so the
+measured field-of-view constants this tool relies on don't describe them — aiming from a virtual or
+NDI frame lands in the wrong place with no way to detect it. Only use a `device`-source snapshot's
+pixel and dimensions here.
+
 The tool reads the camera's field-of-view mode itself, so there is no FOV argument to get wrong. It
 refuses rather than guessing when AI tracking is on (tracking drives the gimbal and would fight the
-aim) or when a custom zoom is set (the zoom magnification is not calibrated).
+aim), when a custom zoom is set (the zoom magnification is not calibrated), or when the camera had to
+be woken from sleep (waking moves the gimbal, so the frame you measured no longer matches where the
+camera is pointing — take a fresh snapshot and retry).
 
 ### Gimbal presets
 
@@ -368,6 +377,8 @@ What has actually been exercised against hardware, and what hasn't:
   there as a result.** See ["Linux gimbal position feedback is not live"](#linux-gimbal-position-feedback-is-not-live)
   above — a kernel patch to fix this at the source is being worked on. `obsbot_gimbal_move` and
   `obsbot_gimbal_recenter` are unaffected; both are hardware-verified to work normally.
+  `obsbot_aim_at_pixel` **is** affected — it depends on a live pose reading to compute the aim, the
+  same way `obsbot_gimbal_position` does.
 - **`obsbot_zoom_vendor`'s ratio scale doesn't match `obsbot_zoom_uvc`'s at the same `ratio`.** A
   hardware snapshot comparison at `ratio: 2.0` showed the vendor path framed tighter than the UVC
   path. Whether the vendor-side ratio encoding is off by a scale factor, or the two zoom controls

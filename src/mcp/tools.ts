@@ -183,10 +183,10 @@ const imageExposureManualSchema = withCamera({
 });
 const gimbalPositionSchema = withCamera({});
 const aimAtPixelSchema = withCamera({
-  x: z.coerce.number().finite(),
-  y: z.coerce.number().finite(),
-  frameWidth: z.coerce.number().finite().min(1),
-  frameHeight: z.coerce.number().finite().min(1),
+  x: num().pipe(z.number().finite()),
+  y: num().pipe(z.number().finite()),
+  frameWidth: num().pipe(z.number().finite().min(1)),
+  frameHeight: num().pipe(z.number().finite().min(1)),
 });
 const presetListSchema = withCamera({});
 const presetSaveSchema = withCamera({
@@ -656,10 +656,13 @@ export function createTools(
     {
       name: "obsbot_status",
       description:
-        "Read the camera's live status block. Returns { awake, hdr, faceAe, aiMode, trackSpeed }: " +
+        "Read the camera's live status block. Returns { awake, hdr, faceAe, aiMode, trackSpeed, " +
+        "fovMode, zoomPercent }: " +
         "faceAe is whether auto-exposure is metering for a detected face; " +
         "aiMode is the current AI framing (no-tracking|normal|upper-body|close-up|headless|" +
-        "lower-body|desk|whiteboard|hand|group|unknown); trackSpeed is standard|sport|unknown. " +
+        "lower-body|desk|whiteboard|hand|group|unknown); trackSpeed is standard|sport|unknown; " +
+        "fovMode is the field-of-view mode (wide|medium|narrow|custom|unknown), where custom means " +
+        "a continuous zoom overrode the discrete modes; zoomPercent is the zoom position, 0-100. " +
         "Under --debug the result also carries `raw`: the full 60-byte status block as hex " +
         "(for reverse-engineering undecoded offsets).",
       schema: getStatusSchema,
@@ -829,37 +832,63 @@ export function createTools(
         "Point the camera at a specific pixel in a frame you just captured. Give the pixel's x/y " +
         "and the frameWidth/frameHeight from THE SAME obsbot_capture_snapshot result — mixing a " +
         "pixel from one frame with dimensions from another aims at the wrong place and cannot be " +
-        "detected. Takes no field-of-view argument: it reads the camera's actual FOV mode. Refuses " +
-        "when AI tracking is active (tracking moves the gimbal itself and would fight the aim) and " +
-        "when a custom zoom is set (the zoom magnification is not calibrated), so it never aims on " +
-        "an assumption it cannot check. Returns clamped:true if the target was past the gimbal's " +
-        "range and the camera landed short.",
+        "detected. The frame must come from a source:\"device\" snapshot — virtual and ndi frames " +
+        "are framed by OBSBOT Center, not this camera's own optics, and will aim wrongly. Takes no " +
+        "field-of-view argument: it reads the camera's actual FOV mode. Refuses when AI tracking is " +
+        "active (tracking moves the gimbal itself and would fight the aim) and when a custom zoom " +
+        "is set (the zoom magnification is not calibrated), so it never aims on an assumption it " +
+        "cannot check. If the camera was asleep, waking it moves the gimbal and invalidates the " +
+        "frame you measured, so the call refuses instead of aiming on stale geometry — take a fresh " +
+        "snapshot and retry. Returns clamped:true if the target was past the gimbal's range and the " +
+        "camera landed short.",
       schema: aimAtPixelSchema,
       handler: async (args: unknown) => {
         const { x, y, frameWidth, frameHeight, camera } = aimAtPixelSchema.parse(args);
 
         // 16:9 is preserved by the capture path at every resolution (verified at
-        // 256x144, 1280x720, 1920x1080), so anything else is a transposition or
-        // a typo rather than a real frame.
+        // 256x144, 1280x720, 1920x1080), so a non-16:9 pair did not come from that
+        // path as-is — it was transposed (width/height swapped) or came from
+        // somewhere else entirely, since passing the values through unchanged
+        // always yields 16:9.
         if (Math.abs(frameWidth / frameHeight - 16 / 9) > 0.02) {
           return {
             ok: false,
             error:
-              `frame ${frameWidth}x${frameHeight} is not 16:9. Pass the width and height exactly ` +
-              `as obsbot_capture_snapshot reported them.`,
+              `frame ${frameWidth}x${frameHeight} is not 16:9, but obsbot_capture_snapshot always ` +
+              `returns 16:9 frames. This looks like frameWidth/frameHeight were transposed, or came ` +
+              `from something other than that tool's result.`,
           };
         }
         if (x < 0 || x > frameWidth || y < 0 || y > frameHeight) {
           return { ok: false, error: `pixel (${x},${y}) is outside the ${frameWidth}x${frameHeight} frame` };
         }
 
-        // The gate wakes a sleeping camera and waits for it to settle, so the
-        // status read below is never served from a stale block.
+        // The gate wakes a sleeping camera and waits for it to settle. If it had
+        // to wake the camera, the gimbal just moved out from under the frame the
+        // caller measured — refuse below rather than read a pose that no longer
+        // corresponds to that frame.
         const ready = await gate(camera);
         if (!ready.ok) return ready;
         const t = ready.transport;
+        if (ready.woke) {
+          return {
+            ok: false,
+            error:
+              "the camera was asleep and waking it moved the gimbal, so the frame you measured no " +
+              "longer matches where the camera is pointing. Take a fresh snapshot and aim again.",
+          };
+        }
 
-        const status = decodeStatus(await t.recvStatus());
+        const block = await t.recvStatus();
+        const status = decodeStatus(block);
+        if (status.aiMode === "unknown") {
+          return {
+            ok: false,
+            error:
+              "could not read the camera's AI-tracking mode (the status block didn't decode this " +
+              "read — this can happen during a brief mode-switch transient); retry the aim.",
+          };
+        }
         if (status.aiMode !== "no-tracking") {
           return {
             ok: false,
@@ -873,11 +902,20 @@ export function createTools(
             ok: false,
             error:
               `a custom zoom is active (zoom ${status.zoomPercent}%), and the zoom-to-magnification ` +
-              `mapping is not calibrated. Set obsbot_zoom_uvc {ratio:1} first.`,
+              `mapping is not calibrated. Set obsbot_image_fov {fov:"wide"} (or any discrete mode) ` +
+              `to clear it — resetting zoom with obsbot_zoom_uvc {ratio:1} is not guaranteed to.`,
           };
         }
         if (status.fovMode === "unknown") {
-          return { ok: false, error: "could not read the camera's FOV mode; refusing to guess it" };
+          // block[0x11] is STATUS_OFF_FOV_MODE (src/codec/commands.ts) — same offset
+          // decodeStatus reads to produce fovMode, surfaced raw since "unknown" means
+          // it didn't match any known value.
+          return {
+            ok: false,
+            error:
+              `could not read the camera's FOV mode (raw byte 0x${block[0x11].toString(16).padStart(2, "0")}); ` +
+              `refusing to guess it. Set a known mode with obsbot_image_fov (e.g. {fov:"wide"}) and retry.`,
+          };
         }
 
         // Same read path as obsbot_gimbal_position: UVC pan is degrees with our
