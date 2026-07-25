@@ -233,6 +233,8 @@ test("decodeStatus reads awake (0x02===0) and hdr (0x06!==0)", () => {
     faceAe: false,
     aiMode: "no-tracking",
     trackSpeed: "standard",
+    fovMode: "wide",
+    zoomPercent: 0,
   });
 });
 
@@ -243,6 +245,8 @@ test("decodeStatus reports sleep and hdr-off", () => {
     faceAe: false,
     aiMode: "no-tracking",
     trackSpeed: "standard",
+    fovMode: "wide",
+    zoomPercent: 0,
   });
 });
 
@@ -339,4 +343,54 @@ test("decodeSerial reads 14 ASCII chars from the payload", () => {
 });
 test("decodeSerial trims a trailing NUL", () => {
   expect(decodeSerial(Buffer.from("RMOWAHG3293TTL\0", "ascii"))).toBe("RMOWAHG3293TTL");
+});
+
+// --- FOV mode and zoom position (status block, measured on hardware 2026-07-25) ---
+//
+// Diffing the raw 60-byte block across control changes gave:
+//   state           block[0x04]   block[0x11]
+//   wide, 1x            0             0
+//   medium, 1x          5             1
+//   narrow, 1x         15             2
+//   wide, 1.5x         50             3
+//   wide, 2.0x        100             3
+// block[0x11] is the FOV mode enum (matching FOV_VALUE), where 3 is the vendor
+// SDK's FovTypeNull — reported when a continuous zoom overrides the discrete
+// modes. block[0x04] is zoom position, 0-100 across the UVC 1.0-2.0 range.
+
+const statusWith = (fovByte: number, zoomByte: number): Buffer => {
+  const b = Buffer.alloc(60);
+  b[0x00] = 0x25;
+  b[0x04] = zoomByte;
+  b[0x11] = fovByte;
+  return b;
+};
+
+test("status decodes the FOV mode from block[0x11]", () => {
+  expect(decodeStatus(statusWith(0, 0)).fovMode).toBe("wide");
+  expect(decodeStatus(statusWith(1, 5)).fovMode).toBe("medium");
+  expect(decodeStatus(statusWith(2, 15)).fovMode).toBe("narrow");
+});
+
+test("FOV mode 3 is 'custom' — a continuous zoom overrode the discrete modes", () => {
+  expect(decodeStatus(statusWith(3, 50)).fovMode).toBe("custom");
+  expect(decodeStatus(statusWith(3, 100)).fovMode).toBe("custom");
+});
+
+test("an unrecognised FOV mode byte decodes to 'unknown', never a guess", () => {
+  expect(decodeStatus(statusWith(9, 0)).fovMode).toBe("unknown");
+});
+
+test("status decodes zoom position from block[0x04]", () => {
+  expect(decodeStatus(statusWith(0, 0)).zoomPercent).toBe(0);
+  expect(decodeStatus(statusWith(3, 50)).zoomPercent).toBe(50);
+  expect(decodeStatus(statusWith(3, 100)).zoomPercent).toBe(100);
+});
+
+test("the discrete FOV modes carry their own inherent zoom", () => {
+  // medium and narrow report non-zero zoom position. The measured
+  // HORIZONTAL_FOV_DEG constants already include this crop, which is why the
+  // aim tool passes zoom:1 rather than deriving a factor from zoomPercent.
+  expect(decodeStatus(statusWith(1, 5)).zoomPercent).toBe(5);
+  expect(decodeStatus(statusWith(2, 15)).zoomPercent).toBe(15);
 });

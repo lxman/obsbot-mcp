@@ -395,6 +395,15 @@ const STATUS_OFF_AI_MODE_N = 0x1c; // AI mode tuple, second value
 // hardware 2026-07-13 against the OBSBOT Center Standard/Sport control.
 const STATUS_OFF_TRACK_SPEED = 0x24;
 
+// Measured on hardware 2026-07-25 by diffing the raw status block across control
+// changes. block[0x11] is the FOV mode enum (same values as FOV_VALUE), with 3 =
+// the vendor SDK's FovTypeNull, reported when a continuous zoom has overridden
+// the discrete modes. block[0x04] is zoom position, 0-100 over the UVC 1.0-2.0
+// range. NOTE: a sleeping camera serves a stale block — read these only after
+// the readiness gate.
+const STATUS_OFF_FOV_MODE = 0x11;
+const STATUS_OFF_ZOOM_PCT = 0x04;
+
 // The device-reported AI framing mode, decoded from the (m, n) tuple at offsets
 // 0x18/0x1c. These are the CAMERA'S status semantics (from Tiny4Linux status.rs),
 // a different space from our AI_TRACK_VIEW *set* payload.
@@ -443,12 +452,23 @@ const TRACK_SPEED_TABLE: Record<number, TrackSpeedStatus> = {
   2: "sport",
 };
 
+export type FovModeStatus = "wide" | "medium" | "narrow" | "custom" | "unknown";
+
+const FOV_MODE_TABLE: Record<number, FovModeStatus> = {
+  0: "wide",
+  1: "medium",
+  2: "narrow",
+  3: "custom",
+};
+
 export interface CameraStatus {
   awake: boolean;
   hdr: boolean;
   faceAe: boolean;
   aiMode: AiModeStatus;
   trackSpeed: TrackSpeedStatus;
+  fovMode: FovModeStatus;
+  zoomPercent: number;
 }
 
 export const decodeStatus = (block: Buffer): CameraStatus => {
@@ -463,5 +483,7 @@ export const decodeStatus = (block: Buffer): CameraStatus => {
     faceAe: block[STATUS_OFF_FACE_AE] === 1,
     aiMode: AI_MODE_TABLE[`${m},${n}`] ?? "unknown",
     trackSpeed: TRACK_SPEED_TABLE[block[STATUS_OFF_TRACK_SPEED]] ?? "unknown",
+    fovMode: FOV_MODE_TABLE[block[STATUS_OFF_FOV_MODE]] ?? "unknown",
+    zoomPercent: block[STATUS_OFF_ZOOM_PCT],
   };
 };
