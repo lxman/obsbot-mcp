@@ -1670,7 +1670,15 @@ export function createTools(
               { type: "image", data: snap.base64, mimeType: snap.mime },
               {
                 type: "text",
-                text: JSON.stringify({ width: snap.width, height: snap.height, source }),
+                text: JSON.stringify({
+                  width: snap.width,
+                  height: snap.height,
+                  source,
+                  // Frame rate picks the field of view on this camera, so the
+                  // negotiated format is part of what a pixel means. Reported
+                  // when the platform helper knows it; see Snapshot.sourceFormat.
+                  ...(snap.sourceFormat ? { sourceFormat: snap.sourceFormat } : {}),
+                }),
               },
             ],
           };

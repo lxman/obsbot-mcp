@@ -1,5 +1,49 @@
 # Changelog
 
+## [Unreleased]
+
+### Added: frame a region, not just a pixel
+
+**`obsbot_zoom_to_fit`** — give it a rectangle and the frame dimensions from the same
+`obsbot_capture_snapshot` result, and the camera moves *and* zooms so that rectangle fills the
+frame, with a `margin` (default 0.1) of breathing room. That brings the tool surface to 36. It
+refuses on the same terms as `obsbot_aim_at_pixel`, and validates the rectangle **before** the
+readiness gate on purpose: the gate wakes a sleeping camera, waking self-centres the gimbal, so
+checking second would let a negative-width call physically move the camera before refusing it.
+
+Verified on hardware: a 640×360 region of a 1920×1080 frame at magnification 1 returned ratio
+1.5758, magnification 2.7273, `clamped: false`, `settled: true` — matching the hand calculation
+exactly — and the region then measurably filled the frame (homography over 375 inliers, region
+occupying 0.86×0.88 of each axis against an ideal 0.909, the shortfall accounted for by the
+gimbal's whole-degree landing and the perspective of a 13° pan). `settled: true` means it:
+a snapshot taken with `settleMs: 0` the instant the call returned matched one taken 3s later at
+scale 0.99993 over 847 inliers, so the zoom ramp really had finished.
+
+**`obsbot_aim_at_pixel` now works at any zoom.** It previously refused when a continuous zoom
+was set, because the magnification was not applied. It now composes zoom into the geometry and
+aims correctly at any magnification, and the FOV modes and the zoom control are modelled as one
+magnification scale rather than two that multiply.
+
+**`obsbot_capture_snapshot` now reports `sourceFormat`** (e.g. `"MJPG 1920x1080@30.00"`) — the
+format the capture graph negotiated upstream, not the JPEG it hands back. Windows only for now;
+absent means unknown, not wrong. See the correction below for why a frame without a stated
+format cannot safely be turned into an angle.
+
+### Fixed
+
+- **The 1080p field-of-view difference is set by frame rate, not by codec.** 0.5.0 recorded that
+  "MJPEG 1920×1080 is a 1.201× crop of YUYV 1920×1080". That comparison was MJPEG@60 against
+  YUYV@30, and it charged the codec for what the frame rate did. Measured at one pose and one
+  zoom: MJPEG@30 vs YUYV@30 came out at scale 1.00001, translation (0.2, 0.0) over 2382 inliers
+  at 0.12 px residual — the same field to within a fifth of a pixel — while MJPEG@60 is a 1.214×
+  crop of *both* (1.21422 and 1.21404).
+
+  **The user-facing warning from 0.5.0 still stands**, because `obsbot_capture_preview` pins
+  60fps: the preview really does show ~21% less than snapshots, and framing by eye in the
+  preview then aiming at a pixel from a snapshot still will not agree. Only the mechanism was
+  wrong. `obsbot_capture_snapshot` negotiates 1080p**30**, so the geometry constants — which
+  describe the 30fps field — are the right ones for the frames it returns.
+
 ## [0.5.0] — 2026-07-25
 
 ### Added: point the camera at what the model sees

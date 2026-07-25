@@ -81,6 +81,18 @@ rl.on("line", (line) => {
       if (req.path === "busy") {
         return send({ ok: false, busy: true, error: "camera in use by another application" });
       }
+      if (req.path === "withformat") {
+        return send({
+          ok: true, mime: "image/jpeg", width: 640, height: 360, base64: "QUJD",
+          sourceFormat: "MJPG 1920x1080@30.00", sourcePin: "preview",
+        });
+      }
+      if (req.path === "blankformat") {
+        return send({
+          ok: true, mime: "image/jpeg", width: 640, height: 360, base64: "QUJD",
+          sourceFormat: "",
+        });
+      }
       return send({ ok: true, mime: "image/jpeg", width: 640, height: 360, base64: "QUJD" });
     case "camctrl_get":
       return send({ ok: true, value: 300, flags: 2 });

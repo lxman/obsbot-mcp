@@ -3,6 +3,20 @@ export interface Snapshot {
   width: number;
   height: number;
   base64: string;
+  /**
+   * The format the capture graph actually negotiated upstream, e.g.
+   * "MJPG 1920x1080@30.00" — NOT the format the frame is delivered in, which is
+   * always JPEG by the time it reaches here.
+   *
+   * It matters because frame rate selects the field of view on this camera:
+   * 1920x1080@30 and 1920x1080@60 are different windows onto the sensor (a
+   * 1.214x crop), so the angle a pixel corresponds to depends on it. The
+   * geometry constants in geometry/aim.ts describe the 30fps field.
+   *
+   * Optional: only the Windows helper reports it today, so absence means
+   * "unknown", not "wrong".
+   */
+  sourceFormat?: string;
 }
 
 export interface SnapshotOpts {

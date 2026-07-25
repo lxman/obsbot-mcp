@@ -43,6 +43,7 @@
 #include <vector>
 #include <iostream>
 #include <sstream>
+#include <iomanip>        // setprecision (negotiated-format framerate)
 #include <stdexcept>
 #include <mutex>
 #include <algorithm>
@@ -752,6 +753,68 @@ static HRESULT encodeJpegBase64(const BYTE* data, UINT srcW, UINT srcH, bool bot
 }
 
 // Mean luma over a subsampled RGB24 buffer, to detect the cold-start black frame.
+// Name a video media subtype. Most of them encode a FOURCC in Data1 with a
+// fixed tail; the ones we actually care about get spelled out so the snapshot
+// reply is readable without a GUID lookup.
+static std::string subtypeName(const GUID& g) {
+  if (g == MEDIASUBTYPE_RGB24) return "RGB24";
+  static const BYTE tail[8] = {0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71};
+  if (g.Data2 == 0x0000 && g.Data3 == 0x0010 && memcmp(g.Data4, tail, 8) == 0) {
+    char f[5] = {(char)(g.Data1 & 0xff), (char)((g.Data1 >> 8) & 0xff),
+                 (char)((g.Data1 >> 16) & 0xff), (char)((g.Data1 >> 24) & 0xff), 0};
+    for (int i = 0; i < 4; ++i)
+      if (f[i] < 0x20 || f[i] > 0x7e) return guidToString(g);
+    return std::string(f);
+  }
+  return guidToString(g);
+}
+
+// Report the format the DEVICE pin negotiated, not the one the grabber was
+// handed. The graph is free to insert a decoder or a colour converter, so the
+// grabber always says RGB24 while upstream could be mjpeg, yuyv422 or h264 --
+// and on this camera those are different fields of view (mjpeg 1080p is a
+// ~1.2x crop of yuyv 1080p) that respond differently to zoom. A frame whose
+// format is unknown cannot be turned into an angle, so every snapshot states
+// which one it came from.
+static std::string describeSourceFormat(IBaseFilter* src) {
+  if (!src) return {};
+  IEnumPins* pins = nullptr;
+  if (FAILED(src->EnumPins(&pins)) || !pins) return {};
+
+  std::string out;
+  IPin* pin = nullptr;
+  while (out.empty() && pins->Next(1, &pin, nullptr) == S_OK) {
+    PIN_DIRECTION dir;
+    IPin* peer = nullptr;
+    if (SUCCEEDED(pin->QueryDirection(&dir)) && dir == PINDIR_OUTPUT &&
+        SUCCEEDED(pin->ConnectedTo(&peer)) && peer) {
+      AM_MEDIA_TYPE mt{};
+      if (SUCCEEDED(pin->ConnectionMediaType(&mt))) {
+        std::ostringstream o;
+        o << subtypeName(mt.subtype);
+        if (mt.formattype == FORMAT_VideoInfo && mt.pbFormat &&
+            mt.cbFormat >= sizeof(VIDEOINFOHEADER)) {
+          VIDEOINFOHEADER* vih = (VIDEOINFOHEADER*)mt.pbFormat;
+          LONG h = vih->bmiHeader.biHeight;
+          o << " " << vih->bmiHeader.biWidth << "x" << (h > 0 ? h : -h);
+          if (vih->AvgTimePerFrame > 0) {
+            double fps = 10000000.0 / (double)vih->AvgTimePerFrame;
+            o << "@" << std::fixed << std::setprecision(2) << fps;
+          }
+        }
+        out = o.str();
+        if (mt.pbFormat) CoTaskMemFree(mt.pbFormat);
+        if (mt.pUnk) mt.pUnk->Release();
+      }
+      peer->Release();
+    }
+    pin->Release();
+    pin = nullptr;
+  }
+  pins->Release();
+  return out;
+}
+
 static double meanLuma(const BYTE* buf, size_t n) {
   if (n < 3) return 0.0;
   double sum = 0.0; size_t count = 0;
@@ -773,6 +836,8 @@ static void doSnapshot(const std::string& pathArg, long maxDim, long quality, lo
   IBaseFilter* nullF = nullptr;
   ISampleGrabber* grabber = nullptr;
   IMediaControl* control = nullptr;
+  std::string srcFormat;
+  const char* pinUsed = "preview";
 
   HRESULT hr = CoCreateInstance(CLSID_FilterGraph, nullptr, CLSCTX_INPROC_SERVER,
                                 IID_IGraphBuilder, (void**)&graph);
@@ -808,8 +873,10 @@ static void doSnapshot(const std::string& pathArg, long maxDim, long quality, lo
 
   // Connect: source -> grabber -> null. Try PREVIEW pin first, then CAPTURE.
   hr = builder->RenderStream(&PIN_CATEGORY_PREVIEW, &MEDIATYPE_Video, src, grabberF, nullF);
-  if (FAILED(hr))
+  if (FAILED(hr)) {
+    pinUsed = "capture";
     hr = builder->RenderStream(&PIN_CATEGORY_CAPTURE, &MEDIATYPE_Video, src, grabberF, nullF);
+  }
   if (FAILED(hr)) {
     // Failure to connect the capture pin is the contention signal.
     {
@@ -819,6 +886,8 @@ static void doSnapshot(const std::string& pathArg, long maxDim, long quality, lo
     }
     goto cleanup;
   }
+
+  srcFormat = describeSourceFormat(src);
 
   hr = graph->QueryInterface(IID_IMediaControl, (void**)&control);
   if (SUCCEEDED(hr)) hr = control->Run();
@@ -887,6 +956,8 @@ static void doSnapshot(const std::string& pathArg, long maxDim, long quality, lo
 
     std::ostringstream o;
     o << ",\"mime\":\"image/jpeg\",\"width\":" << outW << ",\"height\":" << outH
+      << ",\"sourceFormat\":\"" << jsonEscape(srcFormat) << "\""
+      << ",\"sourcePin\":\"" << pinUsed << "\""
       << ",\"base64\":\"" << b64 << "\"";
     ok(o.str());
   }

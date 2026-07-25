@@ -77,12 +77,24 @@ const toDeg = (rad: number): number => (rad * 180) / Math.PI;
  * the constant differing: a target at u = +0.91 left a yaw residual of -0.823
  * degrees under the old 68 and -0.274 under 67.
  *
- * CAPTURE FORMAT WARNING: MJPEG 1920x1080 is a 1.201x crop of YUYV 1920x1080 on
- * this camera — same resolution, different window onto the sensor. These
- * constants describe the WIDE field, which is what `obsbot_capture_snapshot`
- * delivers. `obsbot_capture_preview` pins MJPEG and therefore shows ~20% less.
- * Any future measurement through ffmpeg must state its pixel format; a
- * resolution alone does not identify the field.
+ * CAPTURE FORMAT WARNING: at 1920x1080 this camera has two different windows
+ * onto the sensor, and FRAME RATE selects between them — not the codec.
+ * MEASURED 2026-07-25 at one pose and one zoom: MJPEG@30 vs YUYV@30 came out at
+ * scale 1.00001, t (0.2, 0.0) over 2382 inliers at 0.12 px, i.e. the same field
+ * to within a fifth of a pixel; MJPEG@60 is a 1.214x crop of BOTH (1.21422 and
+ * 1.21404). An earlier revision recorded this as "MJPEG is a 1.201x crop of
+ * YUYV" — that comparison was MJPEG@60 against YUYV@30 and charged the codec
+ * for what the frame rate did.
+ *
+ * These constants describe the WIDE (30fps) field. That is what
+ * `obsbot_capture_snapshot` delivers: its graph negotiates MJPG 1920x1080@30,
+ * which the reply now states outright in `sourceFormat`.
+ * `obsbot_capture_preview` pins 60fps to buy smooth motion and therefore shows
+ * ~21% less — so preview pixels are NOT interchangeable with snapshot pixels
+ * for aiming.
+ *
+ * Any future measurement must state pixel format AND frame rate; neither a
+ * resolution nor a codec alone identifies the field.
  *
  * SCOPE: 16:9 capture at any resolution. A 4:3 path would need re-measuring.
  */
