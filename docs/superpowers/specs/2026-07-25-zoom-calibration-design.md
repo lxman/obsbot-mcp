@@ -313,6 +313,57 @@ Whether it lands in this increment or the next is a scoping call, but it must
 not be silently inherited: `zoom_to_fit` magnifies the consequence, since after
 zooming by `m` a residual of this size is `m` times more visible in frame.
 
+### 4.2 The pose that aim adds its offset to is floored, not rounded
+
+`aimAtPixel` computes `target = current + offset`, where `current` comes from
+`camCtrlGet` on the UVC Pan/Tilt controls. That readback **floors** the true
+position rather than rounding it, so the fractional degree is lost in one
+direction only — aim always under-rotates, never over.
+
+The readback is not lying and the gimbal is not inaccurate. Both were tested:
+
+- Commanded/readback pairs (-17,7)->(-16,6), (-16,6)->(-15,5), (-16.5,6.5)->
+  (-16,6), (-16.05,6.05)->(-15,5), (-40,20)->(-39,19) all fit `floor(actual)`
+  with the true position sitting slightly below the command.
+- The gimbal tracks commands faithfully: a commanded 0.45 degree pitch step
+  produced 0.4387 degrees of real rotation (11.6 px measured against 11.90 px
+  predicted at fy = 1515), where a full degree would have been 26.4 px.
+- Floor rather than round is confirmed independently, not merely pattern-fitted:
+  the end-to-end residual below implies a true start pitch of 5.956 where the
+  readback reported 5. A rounding readback would have reported 6.
+
+**Measured end-to-end through `obsbot_aim_at_pixel`** at a target of
+u = -0.074, v = -0.765, with the corrected constants of section 3: pitch
+residual **+0.956** degrees, yaw **+1.176**. The pitch figure is the quantisation
+loss almost exactly, leaving ~0.006 degrees attributable to the constants. (This
+also re-confirms section 3 through the shipped tool: the old constants would have
+computed a 0.638 degree smaller rotation and left a residual near +0.32.)
+
+The cause differs by platform, and so does the fix:
+
+| platform | readback path | sub-degree precision |
+|---|---|---|
+| Linux, macOS | device reports arcseconds; `linux.ts:96-102` / `macos.ts:97-100` then do `Math.round(value / 3600)` | **available, and discarded by our own code** |
+| Windows | `windows.ts:73-74` passes the helper straight through; the helper uses `IAMCameraControl`, whose pan/tilt units are whole degrees | not available through that interface |
+
+So on Linux and macOS this is lossless to fix: stop rounding, carry degrees as a
+float. On Windows the root-cause fix is to read `CT_PANTILT_ABSOLUTE` off the
+Camera Terminal node through `IKsControl` — the same UVC control Linux reads via
+V4L2, in the same arcsecond units. The helper already holds an `IKsControl` and
+already walks the topology for the XU node, so this is a new read against
+existing infrastructure rather than a new subsystem.
+
+Do NOT paper over this with a +0.5 degree constant. That would be a plausible
+estimator for a floored quantity, but it treats the symptom while real precision
+sits unread one interface away, and it would leave Linux and macOS still
+discarding data they already have.
+
+Note the interaction with section 4.1: both defects push aim off target, they are
+independent, and they are of comparable size (about a degree each in the geometry
+measured here). Fixing one alone will roughly halve the end-to-end error, not
+eliminate it, so neither is verifiable by "the residual got smaller" — each needs
+its own predicted magnitude checked.
+
 ## 5. `obsbot_zoom_to_fit`
 
 Frames a region of a captured frame.
@@ -374,6 +425,14 @@ ends; region-validation rejections.
 a discrete mode and a custom zoom; a fit against a known object, verifying it
 lands inside the frame with margin; a fit demanding more than 4x, verifying
 `clamped: true` and that the pose still changed.
+
+**A note on verifying anything through `obsbot_aim_at_pixel` before sections 4.1
+and 4.2 are fixed.** Two systematics of about a degree each sit in that path, so
+an end-to-end residual is not a clean signal about anything else. Verify by
+predicting the residual and checking the measurement against the prediction —
+which is what section 3.2 and section 4.2 both did — or bypass the tool and drive
+the gimbal directly from commanded angles, which is what section 3.2's A/B did.
+"The residual looks small" is not a result.
 
 ## 7. Out of scope
 
