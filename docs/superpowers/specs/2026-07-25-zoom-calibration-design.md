@@ -240,6 +240,51 @@ axes, which translates the lens as the gimbal turns; that is depth-dependent and
 no intrinsic matrix can absorb it. Sampling was symmetric, so it should not bias
 fx or fy, but it caps the precision claimable here.
 
+### 3.1a Reconciling with the vendor's published figures
+
+Checked against primary sources 2026-07-25, not recalled.
+
+OBSBOT publishes **DFOV 85.5 degrees and HFOV 72.9 degrees** for the Tiny 2
+(26 mm equivalent). Those two are self-consistent only for a 4:3 frame:
+
+    tan(85.5/2) / tan(72.9/2) = 1.2515  ->  implied h/w = 0.7525
+
+which is 4:3 (0.7500) within 0.3%, and nothing like 16:9 (0.5625). **The
+vendor's own published pair therefore describes the full-sensor 4:3 mode** —
+corroborating, from the manufacturer's numbers alone, what section 1 concluded
+from measurement.
+
+That settles what the SDK header means. `libdev`'s `FovType86 / FovType78 /
+FovType65` are **diagonals**, not horizontals. Converting them to 4:3
+horizontals with the same factor, and comparing against the measured 16:9
+values:
+
+| SDK (diagonal) | as 4:3 HFOV | measured 16:9 HFOV | tangent ratio |
+|---|---|---|---|
+| 86 | 73.380 | 67.000 | 0.8883 |
+| 78 | 65.809 | 59.819 | 0.8891 |
+| 65 | 53.955 | 48.459 | 0.8841 |
+
+A constant **0.887 +/- 0.003**: the 16:9 stream is about 11% narrower than the
+full-sensor 4:3 width. That is an ordinary windowed readout, and it is the whole
+of the discrepancy.
+
+Earlier revisions of `aim.ts` compared the measurements against 86/78/65 **as
+though those were horizontal**, and recorded a ratio of 0.710 +/- 0.002. That
+ratio is also constant — so the observation that the SDK has the right relative
+structure and a uniformly wrong absolute scale held either way — but it
+overstated the gap by comparing a horizontal measurement against a diagonal
+figure, and made an ordinary crop look like a large unexplained one. Do not
+reintroduce that comparison.
+
+The published gimbal range corroborates `GIMBAL_YAW_LIMIT_DEG` and
+`GIMBAL_PITCH_LIMIT_DEG`: OBSBOT describes the hardware as panning 150 degrees
+each way and tilting 90 degrees up or down, while its own software restricts
+this to 140 degrees of pan and -70 to +30 of tilt. The code's limits match the
+hardware figures, which is what it should clamp to.
+
+Sources: <https://www.obsbot.com/obsbot-tiny-2-4k-webcam/specs>.
+
 ### 3.2 Both constants verified head-to-head on hardware
 
 Same feature, same start pose, same approach direction, only the constant
@@ -344,14 +389,39 @@ The cause differs by platform, and so does the fix:
 | platform | readback path | sub-degree precision |
 |---|---|---|
 | Linux, macOS | device reports arcseconds; `linux.ts:96-102` / `macos.ts:97-100` then do `Math.round(value / 3600)` | **available, and discarded by our own code** |
-| Windows | `windows.ts:73-74` passes the helper straight through; the helper uses `IAMCameraControl`, whose pan/tilt units are whole degrees | not available through that interface |
+| Windows | `windows.ts:73-74` passes the helper straight through; the helper uses `IAMCameraControl` | **not available through that interface** |
+
+Both halves of that table are confirmed against primary documentation, not
+recalled:
+
+- UVC's `CT_PANTILT_ABSOLUTE` is specified in **arc seconds**, 1/3600 of a
+  degree, ranging +/-180*3600. So the sub-degree data genuinely reaches the
+  Linux and macOS transports, and rounding it away is our own loss.
+- Windows' `CameraControl_Pan` is documented as *"the camera's pan setting, in
+  degrees. Values range from -180 to +180"*, and the underlying
+  `KSPROPERTY_CAMERACONTROL_PAN` as *"a LONG that specifies a camera's pan
+  setting. This value is expressed in degrees."* A `LONG` in degrees cannot
+  carry a fraction. The device's own readbacks confirm it: they come back at
+  degree scale (-15, -39), not arcsecond scale.
 
 So on Linux and macOS this is lossless to fix: stop rounding, carry degrees as a
-float. On Windows the root-cause fix is to read `CT_PANTILT_ABSOLUTE` off the
-Camera Terminal node through `IKsControl` — the same UVC control Linux reads via
-V4L2, in the same arcsecond units. The helper already holds an `IKsControl` and
-already walks the topology for the XU node, so this is a new read against
-existing infrastructure rather than a new subsystem.
+float.
+
+**On Windows there is no known interface that exposes the fraction**, which is
+why no Windows fix is specified here. The obvious candidate — reading
+`CT_PANTILT_ABSOLUTE` through `IKsControl` — does not obviously help, because
+Windows' UVC driver is what performs the arcsecond-to-degree conversion and
+exposes only the degree-valued KS property. One caveat leaves the door ajar:
+Microsoft notes that *"some drivers define a custom range of pan values and
+custom step values that might not be based on typical units"*, so what this
+particular driver exposes is an empirical question. Answer it by reading the
+advertised range and step before writing any native code — a range near
++/-468000 would mean arcseconds are reaching us after all, whereas +/-180 means
+they are not.
+
+Sources:
+<https://learn.microsoft.com/windows/win32/api/strmif/ne-strmif-cameracontrolproperty>,
+<https://learn.microsoft.com/windows-hardware/drivers/stream/ksproperty-cameracontrol-pan>.
 
 Do NOT paper over this with a +0.5 degree constant. That would be a plausible
 estimator for a floored quantity, but it treats the symptom while real precision
