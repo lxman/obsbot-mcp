@@ -86,3 +86,48 @@ export function pixelToOffset(x: number, y: number, frame: Frame, optics: Optics
     dPitch: toDeg(Math.atan(v * tanV)),
   };
 }
+
+/**
+ * Mechanical limits of the Tiny 2's gimbal, in degrees. Hardware-verified.
+ *
+ * These live here rather than in the tool layer so there is exactly one
+ * definition: `obsbot_gimbal_move` imports them for its own clamping. Two copies
+ * of a bound that must agree is a defect waiting to happen.
+ */
+export const GIMBAL_YAW_LIMIT_DEG = 150;
+export const GIMBAL_PITCH_LIMIT_DEG = 90;
+
+export interface Aim {
+  target: Pose;
+  offset: Offset;
+  /** True if either axis saturated, meaning the target was not reachable. */
+  clamped: boolean;
+}
+
+const clampTo = (value: number, limit: number): number =>
+  Math.min(limit, Math.max(-limit, value));
+
+/**
+ * Absolute pose that brings the given pixel to the center of frame.
+ *
+ * Saturation is REPORTED, not silent: if the target lies outside the gimbal's
+ * range the caller has to know it landed short rather than assume the aim
+ * succeeded, since a silent clamp presents as "the camera aimed and missed".
+ *
+ * `current` must be where the camera actually was when the frame was captured.
+ * The module cannot verify that — see the spec's section 5 for what breaks it.
+ */
+export function aimAtPixel(
+  x: number,
+  y: number,
+  frame: Frame,
+  optics: Optics,
+  current: Pose,
+): Aim {
+  const offset = pixelToOffset(x, y, frame, optics);
+  const rawYaw = current.yaw + offset.dYaw;
+  const rawPitch = current.pitch + offset.dPitch;
+  const yaw = clampTo(rawYaw, GIMBAL_YAW_LIMIT_DEG);
+  const pitch = clampTo(rawPitch, GIMBAL_PITCH_LIMIT_DEG);
+  return { target: { yaw, pitch }, offset, clamped: yaw !== rawYaw || pitch !== rawPitch };
+}

@@ -1,5 +1,8 @@
 import { expect, test } from "vitest";
-import { halfAngles, pixelToOffset, HORIZONTAL_FOV_DEG } from "../../src/geometry/aim.js";
+import {
+  halfAngles, pixelToOffset, aimAtPixel,
+  HORIZONTAL_FOV_DEG, GIMBAL_YAW_LIMIT_DEG, GIMBAL_PITCH_LIMIT_DEG,
+} from "../../src/geometry/aim.js";
 
 const HD = { width: 1280, height: 720 };
 const rad = (deg: number) => (deg * Math.PI) / 180;
@@ -106,4 +109,73 @@ test("zooming in shrinks the offset for the same pixel", () => {
   const oneX = pixelToOffset(960, 360, HD, WIDE).dYaw;
   const twoX = pixelToOffset(960, 360, HD, { ...WIDE, zoom: 2 }).dYaw;
   expect(Math.abs(twoX)).toBeLessThan(Math.abs(oneX));
+});
+
+// --- absolute aim ---
+//
+// aimAtPixel computes target = current + offset. That is sound only if `current`
+// is where the camera actually was when the snapshot fired; AI tracking, an
+// unsettled gimbal, or another controller all break it silently. The module
+// takes `current` as a parameter and cannot police any of that — holding the
+// invariant is the calling tool's job. See spec section 5.
+
+test("the gimbal limits are the hardware-verified bounds", () => {
+  expect(GIMBAL_YAW_LIMIT_DEG).toBe(150);
+  expect(GIMBAL_PITCH_LIMIT_DEG).toBe(90);
+});
+
+test("the target is the current pose plus the offset", () => {
+  const aim = aimAtPixel(960, 360, HD, WIDE, { yaw: 10, pitch: 5 });
+  expect(aim.target.yaw).toBeCloseTo(10 - 25.0, 2);
+  expect(aim.target.pitch).toBeCloseTo(5, 9);
+  expect(aim.clamped).toBe(false);
+});
+
+test("aiming at the center pixel leaves the pose alone", () => {
+  const aim = aimAtPixel(640, 360, HD, WIDE, { yaw: -37, pitch: 12 });
+  expect(aim.target.yaw).toBeCloseTo(-37, 9);
+  expect(aim.target.pitch).toBeCloseTo(12, 9);
+  expect(aim.clamped).toBe(false);
+});
+
+test("the returned offset matches pixelToOffset for the same inputs", () => {
+  const direct = pixelToOffset(300, 200, HD, WIDE);
+  const aim = aimAtPixel(300, 200, HD, WIDE, { yaw: 0, pitch: 0 });
+  expect(aim.offset.dYaw).toBeCloseTo(direct.dYaw, 9);
+  expect(aim.offset.dPitch).toBeCloseTo(direct.dPitch, 9);
+});
+
+test("a yaw target beyond the limit is clamped and reported", () => {
+  // Left edge gives +43deg; from yaw 149 that would be 192deg.
+  const aim = aimAtPixel(0, 360, HD, WIDE, { yaw: 149, pitch: 0 });
+  expect(aim.target.yaw).toBe(150);
+  expect(aim.clamped).toBe(true);
+});
+
+test("a pitch target beyond the limit is clamped and reported", () => {
+  // Bottom edge gives +27.68deg; from pitch 85 that would be 112.68deg.
+  const aim = aimAtPixel(640, 720, HD, WIDE, { yaw: 0, pitch: 85 });
+  expect(aim.target.pitch).toBe(90);
+  expect(aim.clamped).toBe(true);
+});
+
+test("clamping at the negative end is reported too", () => {
+  const aim = aimAtPixel(1280, 0, HD, WIDE, { yaw: -140, pitch: -80 });
+  expect(aim.target.yaw).toBe(-150);
+  expect(aim.target.pitch).toBe(-90);
+  expect(aim.clamped).toBe(true);
+});
+
+test("saturating one axis does not falsely clamp the other", () => {
+  const aim = aimAtPixel(0, 360, HD, WIDE, { yaw: 149, pitch: 3 });
+  expect(aim.target.yaw).toBe(150);
+  expect(aim.target.pitch).toBeCloseTo(3, 9);
+  expect(aim.clamped).toBe(true);
+});
+
+test("a target inside the limits is never reported as clamped", () => {
+  const aim = aimAtPixel(1280, 720, HD, WIDE, { yaw: 0, pitch: 0 });
+  expect(aim.target.yaw).toBeCloseTo(-43, 9);
+  expect(aim.target.pitch).toBeCloseTo(27.68, 2);
+  expect(aim.clamped).toBe(false);
 });

@@ -32,6 +32,7 @@ import {
   UVC_FLAG_MANUAL,
 } from "../codec/commands.js";
 import type { AiTrackSpeed, AiFramingMode, AiSceneMode, AiModeStatus, FovType, ImageControl } from "../codec/commands.js";
+import { GIMBAL_YAW_LIMIT_DEG, GIMBAL_PITCH_LIMIT_DEG } from "../geometry/aim.js";
 import { verifyFraming } from "./framing.js";
 import { parseFrame } from "../codec/frame.js";
 import { OP_BY_NAME } from "../codec/opcodes.js";
@@ -472,13 +473,15 @@ export function createTools(
       name: "obsbot_gimbal_move",
       description:
         "Move the gimbal to an absolute yaw/pitch angle (degrees); positive yaw pans to the " +
-        "camera's left, positive pitch tilts down. Yaw is clamped to [-150,150], pitch to " +
-        "[-90,90]. Absolute positioning (1:1 degrees), verified on hardware.",
+        `camera's left, positive pitch tilts down. Yaw is clamped to ` +
+        `[-${GIMBAL_YAW_LIMIT_DEG},${GIMBAL_YAW_LIMIT_DEG}], pitch to ` +
+        `[-${GIMBAL_PITCH_LIMIT_DEG},${GIMBAL_PITCH_LIMIT_DEG}]. ` +
+        "Absolute positioning (1:1 degrees), verified on hardware.",
       schema: ptzMoveAngleSchema,
       handler: async (args: unknown) => {
         const parsed = ptzMoveAngleSchema.parse(args);
-        const yaw = clamp(parsed.yaw, -150, 150);
-        const pitch = clamp(parsed.pitch, -90, 90);
+        const yaw = clamp(parsed.yaw, -GIMBAL_YAW_LIMIT_DEG, GIMBAL_YAW_LIMIT_DEG);
+        const pitch = clamp(parsed.pitch, -GIMBAL_PITCH_LIMIT_DEG, GIMBAL_PITCH_LIMIT_DEG);
         const roll = parsed.roll;
         const ready = await gate(parsed.camera);
         if (!ready.ok) return ready;
