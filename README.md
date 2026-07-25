@@ -268,8 +268,12 @@ device: streaming and control share one kernel-managed USB function, so pulling 
 takes both down together. That makes a libusb-based workaround incompatible with anything actually
 using the camera as a webcam at the same time, which ruled it out as a shipped default.
 
-**A kernel patch is being worked on.** If one lands, `obsbot_gimbal_position` would become live
-through plain V4L2 with no code changes needed here. Until then:
+**A kernel patch has been submitted upstream** ([`media: uvcvideo: query pan/tilt position from
+the device on every read`](https://lore.kernel.org/linux-media/20260725212332.64927-1-jordan.mymail@gmail.com/),
+July 2026 — awaiting review, not merged). It marks `CT_PANTILT_ABSOLUTE` volatile so the driver
+queries the device on every read; verified on this hardware to track a live slew through plain
+`VIDIOC_G_CTRL`, concurrently with streaming. If it is accepted, `obsbot_gimbal_position` becomes
+live on Linux with no code changes needed here. Until it ships in a kernel near you:
 
 - `obsbot_gimbal_move` and `obsbot_gimbal_recenter` work normally — hardware-verified,
   repeatedly, via direct V4L2 `VIDIOC_S_CTRL` writes. Their target values are known and clamped
@@ -376,7 +380,8 @@ What has actually been exercised against hardware, and what hasn't:
   wasn't available). Single-camera use is unaffected either way.
 - **Linux gimbal position feedback is not live, and `obsbot_gimbal_move_speed` is unavailable
   there as a result.** See ["Linux gimbal position feedback is not live"](#linux-gimbal-position-feedback-is-not-live)
-  above — a kernel patch to fix this at the source is being worked on. `obsbot_gimbal_move` and
+  above — a kernel patch fixing this at the source [has been submitted upstream](https://lore.kernel.org/linux-media/20260725212332.64927-1-jordan.mymail@gmail.com/)
+  (July 2026, awaiting review). `obsbot_gimbal_move` and
   `obsbot_gimbal_recenter` are unaffected; both are hardware-verified to work normally.
   `obsbot_aim_at_pixel` **is** affected — it depends on a live pose reading to compute the aim, the
   same way `obsbot_gimbal_position` does.

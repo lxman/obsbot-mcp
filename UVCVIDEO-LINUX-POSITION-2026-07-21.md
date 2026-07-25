@@ -10,7 +10,10 @@ submitting a patch to the `uvcvideo` kernel driver.
 pan/tilt writes and its central justification was wrong. A corrected patch has
 since been written, compiled, and verified against hardware; see §9.**
 
-Nothing has yet been sent to the `linux-media` mailing list.
+**Sent to `linux-media` 2026-07-25**, Message-ID
+`<20260725212332.64927-1-jordan.mymail@gmail.com>`
+([lore](https://lore.kernel.org/linux-media/20260725212332.64927-1-jordan.mymail@gmail.com/)).
+Awaiting review.
 
 > **Update 2026-07-25.** Sections 1–4 and 7 stand as written. Section 5's
 > "what must be built first" is done (§9). Section 8 contained an error and has
@@ -323,7 +326,7 @@ correctly documented as such.
 
 `README.md` previously stated that a kernel patch **"has been submitted
 upstream."** That was false and had been released. It was corrected on its own
-merits in v0.4.1, which now says a patch "is being worked on," with a CHANGELOG
+merits in v0.4.1, which softened it to a patch "is being worked on," with a CHANGELOG
 entry owning the error. The same release removed a second fabrication: the claim
 that `UVC_QUIRK_OBSBOT_MIN_SETTINGS` was merged precedent — that macro has never
 existed (§7).
@@ -405,7 +408,12 @@ Developed and hardware-tested on mainline `3dab139d4` (v7.2-rc4 era; the
 running kernel). The mailable patch is rebased onto **media.git `next`** @
 `a52e6f792` — the tree uvcvideo patches are actually applied to — applies
 cleanly there, and `uvc_ctrl.c` compile-checks against it. `base-commit:`
-trailer included. **Not yet sent.**
+trailer included. **Sent 2026-07-25** to Laurent Pinchart, Hans de Goede,
+Mauro Carvalho Chehab, linux-media and linux-kernel via `git send-email`
+(SMTP accepted, 250). Message-ID
+`<20260725212332.64927-1-jordan.mymail@gmail.com>`, archived at
+[lore](https://lore.kernel.org/linux-media/20260725212332.64927-1-jordan.mymail@gmail.com/).
+Replies arrive on the thread (author auto-CC'd).
 
 A first version of this section described the pre-respin patch. A self-review
 before sending found one real defect and several gaps; the respin fixed:
