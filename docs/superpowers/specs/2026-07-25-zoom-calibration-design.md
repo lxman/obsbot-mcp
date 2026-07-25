@@ -147,6 +147,43 @@ Sharpness drops ~3x at ratio 2.0 (Laplacian variance 141 -> 44), consistent with
 digital zoom upscaling rather than a native sensor crop. Partly confounded by
 differing content, so it is noted, not claimed.
 
+### 2.2 The 1080p pixel formats do not share a field of view
+
+**MJPEG 1920x1080 is a 1.201x crop of YUYV 1920x1080.** Measured directly by
+fitting one against the other on a fixed scene: scale 0.83265, 621 inliers,
+0.46 px residual. Same camera, same resolution, same instant — different window
+onto the sensor.
+
+This is not a curiosity, it is a trap that cost this investigation an entire
+solve. An intrinsics fit over MJPEG frames returned HFOV 57.8 degrees against an
+established 68, which looks exactly like a broken model until the format is
+suspected. Dividing by the crop gives 67.1 — the right answer all along, viewed
+through the wrong window.
+
+Which path sees which:
+
+| path | format | field |
+|---|---|---|
+| `obsbot_capture_preview` | MJPEG, pinned | **narrow (cropped)** |
+| `obsbot_capture_record` | negotiated | wide |
+| `obsbot_capture_snapshot` | native helper, `MEDIASUBTYPE_RGB24`, negotiated upstream | wide |
+
+The snapshot path is confirmed wide by evidence already on record rather than
+assumption: `obsbot_aim_at_pixel` was hardware-verified at u = -0.97 and landed
+1.21 degrees off. Through the MJPEG crop the computed angle at that pixel would
+be 33.2 degrees instead of the true 28.1 — a 5 degree miss. It measured 1.2, so
+snapshots are on the wide field and the geometry constants apply to them.
+
+**Consequence: the preview shows ~20% less of the room than snapshots, aiming
+and recording do.** A user frames by eye in the preview, then aims at a pixel
+from a snapshot that sees more than they were looking at. This arrived with the
+1080p60 change: pinning `-vcodec mjpeg` is what makes 60fps reachable, and it
+silently changed the field of view along with the frame rate. `buildRecordArgs`
+pins nothing, so preview and record disagree too.
+
+Any future measurement through ffmpeg must state its pixel format. A resolution
+alone does not identify the field.
+
 ## 3. Derive the FOV constants from a single anchor
 
 `HORIZONTAL_FOV_DEG` currently holds three independently measured values at
@@ -156,22 +193,67 @@ precision away and lets the three drift out of proportion with each other.
 
 Replace them with one anchor plus measured ratios:
 
-    WIDE_HFOV_DEG = 68            // absolute anchor, +/-3, unchanged
+    WIDE_HFOV_DEG = 67            // re-measured, see 3.1
     FOV_MAGNIFICATION = { wide: 1, medium: 1.15060, narrow: 1.47073 }
     hfov(mode) = 2 * atan(tan(WIDE_HFOV_DEG/2) / FOV_MAGNIFICATION[mode])
 
 | mode | was | derived |
 |---|---|---|
-| wide | 68 | 68.00 |
-| medium | 60 | **60.76** |
-| narrow | 50 | **49.27** |
+| wide | 68 | **67.00** |
+| medium | 60 | **59.82** |
+| narrow | 50 | **48.46** |
 
-Both new values fall inside the old stated uncertainty, so nothing shipped was
-wrong. This removes two error sources and makes the relative structure exact.
+### 3.1 The anchor and the vertical correction, re-measured
 
-The anchor's +/-3 degrees still propagates — at 65/68/71 the derived medium is
-57.95/60.76/63.59 — but it now moves all three together, which is the honest
-representation of what is known.
+A pure camera rotation induces an exact homography `H = K R K^-1`, so frames
+captured at known gimbal angles determine the intrinsics outright. No distance
+enters anywhere: the gimbal angle is the ruler. That is what makes this tighter
+than the tape-measured letter sheet behind the original +/-3 degrees.
+
+Six rotations (pitch +/-10, +/-20; yaw +/-10) about a static scene, 313-1243
+inliers each:
+
+| solved from | fx (HFOV) | fy | implied vertical correction |
+|---|---|---|---|
+| 4 rotations | 1453 (66.90) | 1512 | 0.961 |
+| up-tilt only | 1452 | 1518 | 0.957 |
+| down-tilt only | 1452 | 1502 | 0.967 |
+| 6 rotations incl. +/-20 | 1455 (66.84) | 1520 | 0.957 |
+
+fx varies by 0.2% across every configuration and fy by 1%.
+
+**`VERTICAL_TANGENT_CORRECTION` becomes 0.957, from 0.898** — a 7% correction.
+The old value came from a measurement this project's own history records as
+inconclusive.
+
+**The up/down asymmetry is ~1%, not the ~5% previously recorded, and one
+constant captures it.** Up-only and down-only solves differ by 1.0% (0.957 vs
+0.967). Do not build a two-branch vertical constant.
+
+Neither candidate explanation for an asymmetry survived: the principal point is
+effectively centred (cx, cy within a few px of 960, 540 in every solve) and
+radial distortion is negligible (k1 ~= -0.02).
+
+Caveat kept in view: rms is 2.4-2.8 px, not sub-pixel, so something is
+unmodelled. The likeliest cause is the entrance pupil sitting off the rotation
+axes, which translates the lens as the gimbal turns; that is depth-dependent and
+no intrinsic matrix can absorb it. Sampling was symmetric, so it should not bias
+fx or fy, but it caps the precision claimable here.
+
+### 3.2 Both constants verified head-to-head on hardware
+
+Same feature, same start pose, same approach direction, only the constant
+differing. Residual measured by locating the feature after the move and
+converting its miss from centre through the solved focal lengths.
+
+| test | target | shipped (0.898 / 68) | measured (0.957 / 67) |
+|---|---|---|---|
+| vertical | u=-0.14, v=-0.83 | pitch **-0.597** | pitch **+0.072** |
+| horizontal | u=+0.91, v=+0.03 | yaw **-0.823** | yaw **-0.274** |
+
+Vertical error falls 8x, horizontal 3x. The shipped vertical constant missed in
+the direction a too-small `tanV` predicts (undershoot), and the shipped anchor
+overshot, both as expected.
 
 ## 4. Aiming composes with zoom
 
@@ -189,6 +271,47 @@ then compute from the wide half-angle divided by `m`. One path, no
 double-counting, and the custom-zoom refusal is deleted rather than special-cased.
 
 `fovMode: unknown` still refuses — an undecodable state is not a state to aim on.
+
+### 4.1 Yaw and pitch do not compose by addition
+
+`aimAtPixel` computes `dYaw` and `dPitch` independently and adds each to the
+current pose. The gimbal's yaw axis is world-vertical, so yawing while pitched
+sweeps a **cone**: the two rotations do not commute, and adding them separately
+is exact only for small angles or at zero pitch.
+
+Measured during the constant verification above. A target at v = +0.03 — where
+the vertical term is almost nothing — still landed 0.98 degrees off in pitch,
+identically under both constant sets, so it is not a constants error:
+
+| | shipped | measured |
+|---|---|---|
+| yaw residual | -0.823 | -0.274 |
+| pitch residual | **-0.980** | **-0.986** |
+
+The error is predictable as `pitch * (1 - cos yaw)`: at pitch 7.6 and yaw 31.1
+that is 1.09 degrees against 0.98 measured.
+
+| | yaw 10 | yaw 20 | yaw 30 | yaw 45 |
+|---|---|---|---|---|
+| pitch 5 | 0.08 | 0.30 | 0.67 | 1.46 |
+| pitch 10 | 0.15 | 0.60 | 1.34 | 2.93 |
+| pitch 20 | 0.30 | 1.21 | 2.68 | 5.86 |
+
+Negligible near frame centre or near level, and the dominant error term for a
+far-off-axis target on a tilted camera. It also explains the original aim
+verification's 1.21 degree yaw residual at u = -0.97, which was attributed to
+accumulated edge error; the pose was pitched 7 degrees and the yaw offset large,
+which this predicts almost exactly.
+
+**Fix: compose the rotation properly** — build the target orientation from the
+current orientation and the pixel's ray, then read yaw and pitch off the
+composed result, instead of adding two independently computed scalars. This is a
+change to `aimAtPixel` and therefore to `obsbot_aim_at_pixel` and
+`obsbot_zoom_to_fit` alike.
+
+Whether it lands in this increment or the next is a scoping call, but it must
+not be silently inherited: `zoom_to_fit` magnifies the consequence, since after
+zooming by `m` a residual of this size is `m` times more visible in frame.
 
 ## 5. `obsbot_zoom_to_fit`
 
@@ -235,10 +358,10 @@ ratio, with a bounded timeout, and report `settled: false` if the timeout wins
 rather than pretending otherwise. The camera moving slower than expected is
 information the caller needs, not an error to swallow.
 
-**The default margin absorbs the vertical asymmetry.** Fitting a box leans on
-`tanV` at both edges, where the ~5% up/down asymmetry lives (down 0.344, up
-0.362). A 10% margin covers it. Do not add a two-branch vertical constant on the
-strength of the existing measurement.
+**The default margin covers the residual vertical asymmetry**, which §3.1
+measured at ~1% rather than the ~5% previously believed. A 10% margin absorbs it
+comfortably. The larger vertical error was never the asymmetry — it was the
+constant, and that is now fixed.
 
 ## 6. Testing
 
@@ -254,18 +377,30 @@ lands inside the frame with margin; a fit demanding more than 4x, verifying
 
 ## 7. Out of scope
 
-- **Re-measuring `VERTICAL_TANGENT_CORRECTION`.** The method built here could
-  measure the up/down asymmetry properly for the first time, against known
-  tilts. Worth doing; not this increment.
 - **The vendor/UVC zoom discrepancy.** `obsbot_zoom_vendor` uses a different
   ratio scale. It can now be characterised by exactly this method, which is what
   the calibration makes cheap. Separate increment.
 - **A direction-dependent hysteresis correction** (§1.4).
+- **The preview's cropped field** (§2.2). A real defect, but in the capture
+  subsystem rather than the geometry one, and fixing it means re-opening the
+  60fps trade: the MJPEG pin is what buys 60fps, so restoring the full field may
+  cost the frame rate that change was made for. It deserves its own decision
+  rather than being bundled here.
+
+Now settled, previously listed here: re-measuring `VERTICAL_TANGENT_CORRECTION`
+and the up/down asymmetry (§3.1, §3.2).
 
 ## 8. Documentation this obligates
 
 `README.md` (the new tool, aim no longer refusing on zoom, the magnification
-table), `tiny2_specification.md` (the `0x04` FOV write tag still presents 86/78/65
-unqualified — those are diagonal full-sensor figures and reading them as 16:9
-horizontal is the exact error this project already corrected once), and
-`CHANGELOG.md`.
+table, and the preview/snapshot field-of-view difference in §2.2 —
+that one is a user-visible trap and belongs with the other two live-testing
+traps already documented there), `tiny2_specification.md` (the `0x04` FOV write
+tag still presents 86/78/65 unqualified — those are diagonal full-sensor figures
+and reading them as 16:9 horizontal is the exact error this project already
+corrected once), and `CHANGELOG.md`.
+
+The constants change in §3 also obliges updating the measurement narrative in
+`src/geometry/aim.ts`'s comments, which currently document the letter-sheet
+method and the ~5% asymmetry as the state of knowledge. Leaving that prose in
+place beside corrected values would be worse than not correcting them.
