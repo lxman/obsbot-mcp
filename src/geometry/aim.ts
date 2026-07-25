@@ -55,3 +55,34 @@ export function halfAngles(optics: Optics, frame: Frame): { h: number; v: number
   const { tanH, tanV } = halfAngleTangents(optics, frame);
   return { h: toDeg(Math.atan(tanH)), v: toDeg(Math.atan(tanV)) };
 }
+
+export interface Offset {
+  dYaw: number;
+  dPitch: number;
+}
+
+/**
+ * Convert a pixel in a captured frame to the yaw/pitch delta that would bring
+ * that point to the center of frame.
+ *
+ * A rectilinear lens maps angle through a tangent: tan(theta) = u * tan(hfov/2),
+ * where u is the normalized offset from center. The linear approximation is
+ * exact at the center and again at the edge, and wrong in between — always low,
+ * peaking near 3.5 degrees at u ~= 0.53 on the wide setting. That error is the
+ * difference between landing on target and visibly hunting, so the tangent form
+ * is not optional.
+ *
+ * Signs: +yaw pans camera-LEFT and image x grows rightward, so the yaw term is
+ * negated. +pitch tilts DOWN and image y grows downward, so the pitch term is
+ * not. Both conventions are hardware-verified.
+ */
+export function pixelToOffset(x: number, y: number, frame: Frame, optics: Optics): Offset {
+  const { tanH, tanV } = halfAngleTangents(optics, frame);
+  const u = (2 * x) / frame.width - 1;
+  const v = (2 * y) / frame.height - 1;
+  const uEff = optics.mirrored ? -u : u;
+  return {
+    dYaw: -toDeg(Math.atan(uEff * tanH)),
+    dPitch: toDeg(Math.atan(v * tanV)),
+  };
+}
