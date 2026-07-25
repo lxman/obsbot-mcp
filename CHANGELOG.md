@@ -1,5 +1,83 @@
 # Changelog
 
+## [0.5.0] — 2026-07-25
+
+### Added: point the camera at what the model sees
+
+**`obsbot_aim_at_pixel`** — give it a pixel and the frame dimensions from the same
+`obsbot_capture_snapshot` result, and the camera moves so that pixel is at the centre of
+frame. It takes **no optics arguments**: it reads the camera's own FOV mode and live pose
+instead of being told them, so it cannot be aimed on a stale assumption the caller supplied.
+That brings the tool surface to 35.
+
+It refuses rather than guessing, whenever it cannot check its own assumptions: AI tracking is
+active (tracking drives the gimbal itself and would fight the aim); the camera was asleep,
+because waking moves the gimbal and invalidates the frame you measured; the frame came from a
+`virtual` or `ndi` source, which OBSBOT Center has already reframed, or is not 16:9; the FOV
+mode reads back undecodable; a continuous zoom is set, because the magnification is not applied
+yet (see *Measured* below); or the pixel lies **past vertical** from the current pose, where the
+geometry has a valid answer that would slew the camera 150° across the room.
+
+**`obsbot_status`** now also reports `fovMode` (`wide|medium|narrow|custom|unknown`) and
+`zoomPercent` (0–100), both decoded from the status block.
+
+### Changed
+
+- **`obsbot_capture_preview` now requests 1080p60**, where it previously negotiated 1080p30 —
+  the preview exists for a human to watch the gimbal move, so smooth motion is its point.
+  Pinning the codec is what makes 60 reachable, since yuyv422 caps at 30 for 1080p.
+
+  **This narrows the preview's field of view.** MJPEG 1920×1080 is a 1.201× crop of YUYV
+  1920×1080 on this camera — same resolution, different window onto the sensor (measured, 621
+  inliers, 0.46 px residual). So the preview now shows about 20% less of the room than
+  snapshots, recordings, and `obsbot_aim_at_pixel` see. Framing by eye in the preview and then
+  aiming at a pixel from a snapshot will not agree. Tracked as a known limitation below.
+
+- **`obsbot_gimbal_position` reports fractional degrees**, rounded to two decimal places, where
+  it previously returned whole numbers. This is not new precision from the hardware — the
+  device's own `GET_RES` for the pan/tilt control is 3600 arc-seconds, i.e. 1°, on every
+  platform. What it preserves is the fractional pose on Linux, where `uvcvideo` caches the
+  control and returns the setpoint this server wrote.
+
+### Measured
+
+The geometry behind aiming, all measured against a physical Tiny 2 on 2026-07-25 rather than
+taken from the vendor SDK. The method solves the camera intrinsics from **pure gimbal
+rotations** (`H = K·R·K⁻¹`): the gimbal angle is the ruler, and no distance is measured
+anywhere, which is what makes it tighter than the tape-measured method it replaces.
+
+- **Horizontal field of view: 67° wide**, from fx = 1452–1455 px across six independent
+  rotations — a 0.2% spread. Medium and narrow are **derived** from that single anchor via
+  measured per-mode magnifications of 1.15060 and 1.47073, giving 59.82° and 48.46°, rather
+  than carried as three independent figures. The ratios between modes are known ~60× better
+  than the absolutes, so three free values would let the modes drift out of proportion.
+- **Vertical tangent correction: 0.957.** The up/down asymmetry is ~1%, so a single constant
+  captures it; the principal point is effectively centred and radial distortion is negligible,
+  so neither explains it away.
+- **Zoom magnification is linear in the UVC ratio: `m = 3r − 2`**, holding to better than 0.05%,
+  so ratio 2.0 really is 4× linear. The zoom is centre-preserving to within 3 px, and it is
+  *absolute* rather than a multiplier on the FOV mode — the discrete modes and the continuous
+  zoom are two ways of writing to one scale, which is why `obsbot_zoom_uvc {ratio:1}` does not
+  reliably clear `custom`. **Measured but not yet applied**, which is why `obsbot_aim_at_pixel`
+  still refuses on a custom zoom.
+- The vendor's published **85.5° DFOV / 72.9° HFOV** pair is self-consistent only for a 4:3
+  frame (implied h/w = 0.7525), so it describes the full-sensor 4:3 mode. The SDK's
+  `FovType86/78/65` are therefore **diagonals**; converted to 4:3 horizontals they sit at a
+  constant 0.887 ± 0.003 of the measured 16:9 values — an ordinary windowed readout, not the
+  large unexplained crop that reading them as horizontal implies.
+
+### Known limitations
+
+- **The preview shows a narrower field than everything else** (above). Restoring the full field
+  means giving up the pinned MJPEG codec, and with it 60fps.
+- **The pose readout is 1° on every platform.** `GET_RES` is 3600 arc-seconds, so no platform
+  offers a finer live pose to read. `obsbot_aim_at_pixel` adds its offset to that value, which
+  costs up to a degree.
+- **Zoom hysteresis**: commanded ratio 1.75 lands 0.8% apart depending on approach direction
+  (reproducible). That is 0.09° of aim error at the frame edge — an order of magnitude below
+  what the gimbal position readback can resolve, and deliberately not corrected.
+- `obsbot_aim_at_pixel` refuses on a custom zoom, per *Measured* above.
+
 ## [0.4.1] — 2026-07-21
 
 ### Fixed

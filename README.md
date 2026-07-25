@@ -125,7 +125,8 @@ pixel and dimensions here.
 
 The tool reads the camera's field-of-view mode itself, so there is no FOV argument to get wrong. It
 refuses rather than guessing when AI tracking is on (tracking drives the gimbal and would fight the
-aim), when a custom zoom is set (the zoom magnification is not calibrated), or when the camera had to
+aim), when a custom zoom is set (the magnification is measured — `3*ratio-2` — but not applied here
+yet), or when the camera had to
 be woken from sleep (waking moves the gimbal, so the frame you measured no longer matches where the
 camera is pointing — take a fresh snapshot and retry).
 

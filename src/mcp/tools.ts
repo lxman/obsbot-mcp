@@ -845,7 +845,7 @@ export function createTools(
         "are framed by OBSBOT Center, not this camera's own optics, and will aim wrongly. Takes no " +
         "field-of-view argument: it reads the camera's actual FOV mode. Refuses when AI tracking is " +
         "active (tracking moves the gimbal itself and would fight the aim) and when a custom zoom " +
-        "is set (the zoom magnification is not calibrated), so it never aims on an assumption it " +
+        "is set (the zoom magnification is measured but not applied yet), so it never aims on an assumption it " +
         "cannot check. If the camera was asleep, waking it moves the gimbal and invalidates the " +
         "frame you measured, so the call refuses instead of aiming on stale geometry — take a fresh " +
         "snapshot and retry. Returns clamped:true if the target was outside the gimbal's range; the " +
@@ -913,9 +913,12 @@ export function createTools(
           return {
             ok: false,
             error:
-              `a custom zoom is active (zoom ${status.zoomPercent}%), and the zoom-to-magnification ` +
-              `mapping is not calibrated. Set obsbot_image_fov {fov:"wide"} (or any discrete mode) ` +
-              `to clear it — resetting zoom with obsbot_zoom_uvc {ratio:1} is not guaranteed to.`,
+              `a custom zoom is active (zoom ${status.zoomPercent}%). The zoom-to-magnification ` +
+              `mapping IS measured — magnification is 3*ratio-2, so this zoom is about ` +
+              `${(1 + 0.03 * status.zoomPercent).toFixed(2)}x — but it is not applied here yet, and ` +
+              `aiming without it would be wrong by that factor. Set obsbot_image_fov {fov:"wide"} ` +
+              `(or any discrete mode) to clear it. obsbot_zoom_uvc {ratio:1} will NOT clear it: ` +
+              `ratio 1.0 is the same optical state as wide, so the camera stays in custom mode.`,
           };
         }
         if (status.fovMode === "unknown") {
