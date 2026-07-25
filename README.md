@@ -102,6 +102,23 @@ with no serial, since it can't be opened to read one.
 | `obsbot_gimbal_move_speed` | `yaw`, `pitch`, `roll` (deg/s, clamped to `±150`, `roll` defaults `0`), `autoStopMs` (default `800`), `camera`? | Drive the gimbal at a speed, then auto-stop after `autoStopMs` so it can't run away. Same yaw/pitch sign convention as `gimbal_move`. Returns the speeds actually used. Past its limit the firmware ignores the command outright rather than saturating — 180 deg/s and above move the gimbal exactly 0° — so requests are clamped into the hardware-verified band. **Not available on Linux** — see [limitations](#linux-gimbal-position-feedback-is-not-live). |
 | `obsbot_gimbal_recenter` | `camera`? | Recenter the gimbal — drives it to yaw `0` / pitch `0`. Returns as soon as the command is sent, so poll `obsbot_gimbal_position` if you need to know it arrived. |
 | `obsbot_gimbal_position` | `camera`? | Read the gimbal's current absolute `{ yaw, pitch }` in degrees via standard UVC Pan/Tilt. Valid during a move as well as after one. On Linux this is the last-*commanded* value, not a live in-flight reading — see [limitations](#linux-gimbal-position-feedback-is-not-live). |
+| `obsbot_aim_at_pixel` | `x`, `y`, `frameWidth`, `frameHeight`, `camera`? | Point the camera at a pixel from a frame you just captured. Reads the camera's own FOV mode rather than taking one. Refuses while AI tracking or a custom zoom is active. Returns `clamped:true` if the target was out of range and the camera landed short. |
+
+#### Aiming at what you can see
+
+`obsbot_capture_snapshot` returns the frame as an image plus its `width`/`height`, so a model can
+locate something in the picture and then point the camera at it:
+
+1. `obsbot_capture_snapshot` — look at the frame
+2. `obsbot_aim_at_pixel` — pass the target's pixel and that frame's dimensions
+3. `obsbot_capture_snapshot` again — confirm it landed, and repeat if needed
+
+Pass the `frameWidth`/`frameHeight` from the same snapshot the pixel came from. Mixing a pixel from
+one frame with dimensions from another aims at the wrong place, and nothing can detect it.
+
+The tool reads the camera's field-of-view mode itself, so there is no FOV argument to get wrong. It
+refuses rather than guessing when AI tracking is on (tracking drives the gimbal and would fight the
+aim) or when a custom zoom is set (the zoom magnification is not calibrated).
 
 ### Gimbal presets
 
