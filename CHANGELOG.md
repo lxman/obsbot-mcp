@@ -77,6 +77,14 @@ anywhere, which is what makes it tighter than the tape-measured method it replac
   (reproducible). That is 0.09° of aim error at the frame edge — an order of magnitude below
   what the gimbal position readback can resolve, and deliberately not corrected.
 - `obsbot_aim_at_pixel` refuses on a custom zoom, per *Measured* above.
+- **Linux gimbal position feedback is still not live**, so `obsbot_gimbal_move_speed` remains
+  unavailable there and `obsbot_aim_at_pixel` inherits the same limitation. The 0.4.1 entry below
+  said a kernel patch was being worked on; it has since been [submitted
+  upstream](https://lore.kernel.org/linux-media/20260725212332.64927-1-jordan.mymail@gmail.com/)
+  (2026-07-25, awaiting review, not merged). It marks `CT_PANTILT_ABSOLUTE` volatile so `uvcvideo`
+  queries the device on every read, and was verified on this hardware to track a live slew through
+  plain `VIDIOC_G_CTRL` while streaming. If it lands, `obsbot_gimbal_position` becomes live on Linux
+  with **no change needed in this package**.
 
 ## [0.4.1] — 2026-07-21
 
