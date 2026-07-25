@@ -384,19 +384,30 @@ loss almost exactly, leaving ~0.006 degrees attributable to the constants. (This
 also re-confirms section 3 through the shipped tool: the old constants would have
 computed a 0.638 degree smaller rotation and left a residual near +0.32.)
 
+**Correction (2026-07-25, post-fix review):** the row below originally read
+"available, and discarded by our own code" for Linux/macOS. That is false and
+contradicted by this repository's own hardware-verified protocol docs: the
+device's `CT_PANTILT_ABSOLUTE` `GET_RES` is 3600 asec = exactly 1 degree
+(`PROTOCOL.md` section 2.1, `tiny2_specification.md`'s `CT_PANTILT_ABSOLUTE`
+table), and the firmware streams whole-degree steps. No platform's readback
+ever carries a fraction the device didn't already flatten — there was nothing
+sub-degree to discard. See the corrected table and the paragraph after it.
+
 The cause differs by platform, and so does the fix:
 
 | platform | readback path | sub-degree precision |
 |---|---|---|
-| Linux, macOS | device reports arcseconds; `linux.ts:96-102` / `macos.ts:97-100` then do `Math.round(value / 3600)` | **available, and discarded by our own code** |
-| Windows | `windows.ts:73-74` passes the helper straight through; the helper uses `IAMCameraControl` | **not available through that interface** |
+| Linux, macOS | device reports arcseconds; `linux.ts` / `macos.ts` previously did `Math.round(value / 3600)` | **not available anywhere — `GET_RES` is 3600 asec (1°), so the live readout is whole degrees regardless of the wire units** |
+| Windows | `windows.ts:73-74` passes the helper straight through; the helper uses `IAMCameraControl` | **not available through that interface either** |
 
 Both halves of that table are confirmed against primary documentation, not
 recalled:
 
 - UVC's `CT_PANTILT_ABSOLUTE` is specified in **arc seconds**, 1/3600 of a
-  degree, ranging +/-180*3600. So the sub-degree data genuinely reaches the
-  Linux and macOS transports, and rounding it away is our own loss.
+  degree, ranging +/-180*3600 — but this device's own `GET_RES` is 3600 asec,
+  i.e. one whole degree. The wire unit being arc-seconds does not mean the
+  device's resolution is sub-degree; here it is not. Nothing sub-degree
+  "reaches" the Linux and macOS transports to be rounded away.
 - Windows' `CameraControl_Pan` is documented as *"the camera's pan setting, in
   degrees. Values range from -180 to +180"*, and the underlying
   `KSPROPERTY_CAMERACONTROL_PAN` as *"a LONG that specifies a camera's pan
@@ -404,8 +415,20 @@ recalled:
   carry a fraction. The device's own readbacks confirm it: they come back at
   degree scale (-15, -39), not arcsecond scale.
 
-So on Linux and macOS this is lossless to fix: stop rounding, carry degrees as a
-float.
+**Consequence:** because the device reports whole degrees on every platform,
+there is no platform where a finer LIVE pose can simply be read — that
+candidate fix does not exist. Not rounding on Linux/macOS is still worth
+keeping, but for a different reason than originally claimed: it is not
+lossless recovery of hardware precision, it is tracking the COMMANDED pose
+rather than reading a finer one. On Linux specifically, `uvcvideo` caches the
+control and echoes back exactly what `gimbalSet` last wrote
+(`round(deg * 3600)` asec), so leaving the read as a float lets a fractional
+commanded pose (e.g. from `aimAtPixel`'s composed target) survive that round
+trip instead of being flattened to an integer by an unnecessary round here.
+On macOS the read is live from the firmware, already whole-degree-quantized,
+so there is nothing fractional to preserve there either — not rounding is
+harmless, not a fix. On Windows there is no analogous cache to preserve
+anything from, so no code change applies there; see below.
 
 **On Windows there is no known interface that exposes the fraction**, which is
 why no Windows fix is specified here. The obvious candidate — reading
@@ -423,10 +446,13 @@ Sources:
 <https://learn.microsoft.com/windows/win32/api/strmif/ne-strmif-cameracontrolproperty>,
 <https://learn.microsoft.com/windows-hardware/drivers/stream/ksproperty-cameracontrol-pan>.
 
-Do NOT paper over this with a +0.5 degree constant. That would be a plausible
-estimator for a floored quantity, but it treats the symptom while real precision
-sits unread one interface away, and it would leave Linux and macOS still
-discarding data they already have.
+Do NOT paper over this with a +0.5 degree constant on Windows. That would be a
+plausible estimator for a floored quantity, but it treats the symptom while
+the actual fix — carrying Linux/macOS's readback as an unrounded float so it
+tracks the commanded pose instead of flattening it — is free and already
+identified above. (Earlier drafts of this section justified the Linux/macOS
+fix by claiming real precision "sits unread" there; per the correction above,
+none does — the device itself reports whole degrees.)
 
 Note the interaction with section 4.1: both defects push aim off target, they are
 independent, and they are of comparable size (about a degree each in the geometry

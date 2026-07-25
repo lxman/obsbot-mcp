@@ -96,8 +96,20 @@ export class MacosTransport implements ObsbotTransport {
    */
   async camCtrlGet(property: number): Promise<{ value: number; flags: number }> {
     const result = await this.helper.camCtrlGet(property);
+    // Degrees as a float, NOT rounded. UVC specifies CT_PANTILT_ABSOLUTE in
+    // arc-seconds, but this device's GET_RES is 3600 asec = 1 degree
+    // (PROTOCOL.md's CT_PANTILT_ABSOLUTE table, tiny2_specification.md
+    // section 2.1) and the firmware streams whole-degree steps — the device
+    // never emits a fraction, so rounding here would not recover any
+    // precision the hardware actually has. Unlike linux.ts, this read is
+    // LIVE from the firmware, not a cached echo of a commanded value, so
+    // there is no fractional commanded pose being preserved here either —
+    // not rounding is simply harmless, and avoids re-introducing a lossy
+    // step if a future device or firmware reports finer than a degree.
+    // camCtrlRange above still rounds: min/max are advertised bounds, not a
+    // live pose, and no arithmetic accumulates on them.
     if (isGimbalAxis(property)) {
-      result.value = Math.round(result.value / ARCSEC_PER_DEG);
+      result.value = result.value / ARCSEC_PER_DEG;
     }
     return result;
   }

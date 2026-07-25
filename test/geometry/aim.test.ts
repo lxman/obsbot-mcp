@@ -173,11 +173,53 @@ test("the gimbal limits are the hardware-verified bounds", () => {
   expect(GIMBAL_PITCH_LIMIT_DEG).toBe(90);
 });
 
-test("the target is the current pose plus the offset", () => {
+test("the target composes the current pose with the pixel's ray", () => {
+  // Pitch moves even though the pixel is on the horizontal centre line: yawing
+  // from a tilted pose sweeps a cone.
   const aim = aimAtPixel(960, 360, HD, WIDE, { yaw: 10, pitch: 5 });
-  expect(aim.target.yaw).toBeCloseTo(10 - 18.3116, 2);
-  expect(aim.target.pitch).toBeCloseTo(5, 9);
+  expect(aim.target.yaw).toBeCloseTo(-8.376845, 5);
+  expect(aim.target.pitch).toBeCloseTo(4.746213, 5);
   expect(aim.clamped).toBe(false);
+});
+
+test("aiming at the centre pixel leaves any pose untouched, however tilted", () => {
+  const aim = aimAtPixel(640, 360, HD, WIDE, { yaw: 10, pitch: 5 });
+  expect(aim.target.yaw).toBeCloseTo(10, 9);
+  expect(aim.target.pitch).toBeCloseTo(5, 9);
+});
+
+test("a purely vertical target is exact even from a tilted pose", () => {
+  // u=0 means the ray lies in the camera's vertical plane, so yawing is not
+  // involved and the composed answer must equal the simple sum.
+  const aim = aimAtPixel(640, 540, HD, WIDE, { yaw: 10, pitch: 5 });
+  expect(aim.target.yaw).toBeCloseTo(10, 9);
+  expect(aim.target.pitch).toBeCloseTo(15.101305, 5);
+});
+
+test("from a level pose the composition reduces to the simple sum", () => {
+  // pitch=0 is the case where YAW reduces to the old sum, for any pixel — yaw
+  // and pitch commute at zero tilt. The resulting pitch of 0 here is NOT
+  // general evidence that pitch reduces to the sum from a level pose: it holds
+  // only because v=0 (this pixel sits on the horizontal centre line, x=960 is
+  // u=0.5). Away from u=0, composed pitch (asin(dy/n), where n includes dx)
+  // differs from the old atan(dy) even when the starting pitch is 0 — see "a
+  // purely vertical target is exact even from a tilted pose" above, which pins
+  // the actual condition (u=0), and the level-pose case is testable directly
+  // in "the offset matches pixelToOffset only when one axis is zero" below. If
+  // this drifts, the rotation order or a sign is wrong.
+  const aim = aimAtPixel(960, 360, HD, WIDE, { yaw: 10, pitch: 0 });
+  expect(aim.target.yaw).toBeCloseTo(-8.311589, 5);
+  expect(aim.target.pitch).toBeCloseTo(0, 9);
+});
+
+test("yawing from a tilted pose sweeps a cone, so pitch changes too", () => {
+  // THE BUG THIS TASK FIXES. Adding scalars gives (-8.311589, 20); the gimbal's
+  // yaw axis is world-vertical, so the real answer is over a degree away in both
+  // axes. Hardware measured 0.98 deg of pitch error at a comparable geometry.
+  const aim = aimAtPixel(960, 360, HD, WIDE, { yaw: 10, pitch: 20 });
+  expect(aim.target.yaw).toBeCloseTo(-9.401344, 5);
+  expect(aim.target.pitch).toBeCloseTo(18.947456, 5);
+  expect(aim.target.pitch).not.toBeCloseTo(20, 1);
 });
 
 test("aiming at the center pixel leaves the pose alone", () => {
@@ -187,11 +229,21 @@ test("aiming at the center pixel leaves the pose alone", () => {
   expect(aim.clamped).toBe(false);
 });
 
-test("the returned offset matches pixelToOffset for the same inputs", () => {
-  const direct = pixelToOffset(300, 200, HD, WIDE);
-  const aim = aimAtPixel(300, 200, HD, WIDE, { yaw: 0, pitch: 0 });
+test("the offset matches pixelToOffset only when one axis is zero", () => {
+  // Same thing along a single axis from a level pose...
+  const direct = pixelToOffset(960, 360, HD, WIDE);
+  const aim = aimAtPixel(960, 360, HD, WIDE, { yaw: 0, pitch: 0 });
   expect(aim.offset.dYaw).toBeCloseTo(direct.dYaw, 9);
   expect(aim.offset.dPitch).toBeCloseTo(direct.dPitch, 9);
+
+  // ...but NOT for a target offset in both axes, even from a level pose: the
+  // vertical angle to an off-axis point is smaller than the on-axis mapping
+  // says, because the ray is longer. pixelToOffset is per-axis by definition;
+  // aimAtPixel composes. This divergence is correct, not a regression.
+  const both = aimAtPixel(300, 200, HD, WIDE, { yaw: 0, pitch: 0 });
+  expect(both.target.yaw).toBeCloseTo(19.373036, 5);
+  expect(both.target.pitch).toBeCloseTo(-8.496571, 5);
+  expect(both.target.pitch).not.toBeCloseTo(-8.998417, 2);
 });
 
 test("a yaw target beyond the limit is clamped and reported", () => {
@@ -201,30 +253,68 @@ test("a yaw target beyond the limit is clamped and reported", () => {
   expect(aim.clamped).toBe(true);
 });
 
-test("a pitch target beyond the limit is clamped and reported", () => {
-  // Bottom edge gives +19.61deg; from pitch 85 that would be 104.61deg.
+test("aiming past vertical yields the over-the-top solution, and clamps", () => {
+  // From pitch 85, the bottom edge of frame is 104.6 deg down — past straight
+  // down. That direction is reachable only by yawing 180 and pitching 75.4,
+  // which is geometrically correct and beyond the yaw limit, so it clamps
+  // there instead of on pitch. The additive model produced pitch 104.6 and
+  // clamped it to 90, which pointed somewhere the target was not.
   const aim = aimAtPixel(640, 720, HD, WIDE, { yaw: 0, pitch: 85 });
-  expect(aim.target.pitch).toBe(90);
+  expect(aim.target.pitch).toBeCloseTo(75.388952, 5);
+  expect(aim.target.yaw).toBe(-150);
   expect(aim.clamped).toBe(true);
 });
 
+test("the past-vertical case reports overTheTop, not just clamped", () => {
+  // Same geometry as above: the target ray points behind the camera's current
+  // heading, so this is not an ordinary out-of-range clamp — clamping the yaw
+  // to the nearest limit would slew 150 degrees toward the opposite side of
+  // the room, not toward the target. Callers must check this separately from
+  // `clamped` and refuse rather than move.
+  const aim = aimAtPixel(640, 720, HD, WIDE, { yaw: 0, pitch: 85 });
+  expect(aim.overTheTop).toBe(true);
+});
+
+test("an ordinary out-of-range clamp is NOT overTheTop", () => {
+  // Left edge from yaw 149 clamps to 150, but the target is still roughly
+  // where the camera is already heading — a little past the yaw limit, not
+  // behind the camera. Ordinary clamping must keep moving to the nearest
+  // reachable pose.
+  const aim = aimAtPixel(0, 360, HD, WIDE, { yaw: 149, pitch: 0 });
+  expect(aim.clamped).toBe(true);
+  expect(aim.overTheTop).toBe(false);
+});
+
 test("clamping at the negative end is reported too", () => {
+  // The top-right corner from pitch -80 is likewise past vertical: the
+  // composed solution goes over the top, clamping on yaw and leaving pitch
+  // unclamped, rather than the additive model's pitch beyond -90.
   const aim = aimAtPixel(1280, 0, HD, WIDE, { yaw: -140, pitch: -80 });
   expect(aim.target.yaw).toBe(-150);
-  expect(aim.target.pitch).toBe(-90);
+  expect(aim.target.pitch).toBeCloseTo(-56.789344, 5);
   expect(aim.clamped).toBe(true);
 });
 
 test("saturating one axis does not falsely clamp the other", () => {
+  // Pitch no longer comes through unchanged even though the pixel sits on the
+  // horizontal centre line (v=0): the target is off-axis in x (the left
+  // edge), so the composed ray's y-component is diluted by that horizontal
+  // offset before the asin, same cone effect as the invariant tests above.
+  // Only zero pitch or zero horizontal offset reproduces the additive value.
   const aim = aimAtPixel(0, 360, HD, WIDE, { yaw: 149, pitch: 3 });
   expect(aim.target.yaw).toBe(150);
-  expect(aim.target.pitch).toBeCloseTo(3, 9);
+  expect(aim.target.pitch).toBeCloseTo(2.501309, 5);
   expect(aim.clamped).toBe(true);
 });
 
 test("a target inside the limits is never reported as clamped", () => {
+  // Pitch is not the simple sum here either: the target (bottom-right corner)
+  // is off-axis in both x and y, so even from a level pose the composed
+  // vertical angle is smaller than pixelToOffset's per-axis atan() — the ray
+  // to a corner is longer than the ray to an edge, same effect documented on
+  // "the offset matches pixelToOffset only when one axis is zero" above.
   const aim = aimAtPixel(1280, 720, HD, WIDE, { yaw: 0, pitch: 0 });
   expect(aim.target.yaw).toBeCloseTo(-33.5, 9);
-  expect(aim.target.pitch).toBeCloseTo(19.6110, 2);
+  expect(aim.target.pitch).toBeCloseTo(16.547452, 5);
   expect(aim.clamped).toBe(false);
 });

@@ -2,7 +2,7 @@ import { expect, test, vi } from "vitest";
 import { LinuxTransport } from "../../src/transport/linux.js";
 import type { HelperProcess } from "../../src/transport/helper-process.js";
 
-function makeFakeHelper() {
+function makeFakeHelper(camCtrlGetValue = 288000) {
   return {
     xuSet: vi.fn(async (_selector: number, _data: Buffer) => {}),
     xuGet: vi.fn(async (_selector: number, _length: number) => Buffer.from([0xaa, 0x25])),
@@ -16,7 +16,7 @@ function makeFakeHelper() {
     })),
     camCtrlSet: vi.fn(async (_p: number, _v: number, _f: number) => {}),
     camCtrlRange: vi.fn(async (_p: number) => ({ min: 0, max: 100 })),
-    camCtrlGet: vi.fn(async (_p: number) => ({ value: 288000, flags: 2 })),
+    camCtrlGet: vi.fn(async (_p: number) => ({ value: camCtrlGetValue, flags: 2 })),
     procAmpSet: vi.fn(async (_p: number, _v: number, _f: number) => {}),
     procAmpRange: vi.fn(async (_p: number) => ({ min: 0, max: 100 })),
     close: vi.fn(async () => {}),
@@ -77,6 +77,16 @@ test("camCtrl delegated to helper", async () => {
   const r = await t.camCtrlGet(0);
   // 288000 arc-seconds / 3600 per degree = 80°.
   expect(r).toEqual({ value: 80, flags: 2 });
+});
+
+test("pan/tilt keep their sub-degree precision", async () => {
+  // The device reports arcseconds. 3600 arcsec = 1 deg, so 21510 arcsec is
+  // 5.975 deg. Rounding that to 6 discards real precision the hardware gave
+  // us, and aimAtPixel adds its offset to whatever this returns.
+  const helper = makeFakeHelper(21510);
+  const t = new LinuxTransport(helper);
+  const r = await t.camCtrlGet(0);
+  expect(r).toEqual({ value: 5.975, flags: 2 });
 });
 
 test("gimbalSet writes pan/tilt via V4L2 camCtrlSet, in parallel", async () => {

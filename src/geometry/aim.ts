@@ -170,7 +170,17 @@ export interface Offset {
 
 /**
  * Convert a pixel in a captured frame to the yaw/pitch delta that would bring
- * that point to the center of frame.
+ * that point to the center of frame, treating each axis independently.
+ *
+ * PER-AXIS ONLY — this does NOT account for axis coupling. The gimbal's yaw
+ * axis is world-vertical, so yawing while pitched sweeps a cone; the two axes
+ * commute only at zero pitch or zero horizontal offset (see `aimAtPixel`,
+ * which composes a rotation instead and is what every tool actually points
+ * the camera with). Adding this function's dYaw/dPitch to a pose that is not
+ * level reproduces the additive bug `aimAtPixel` was fixed to remove. It is
+ * used only by tests now, to pin the per-axis tangent mapping in isolation
+ * from the coupling — do not reach for it as a general "point the camera"
+ * answer.
  *
  * A rectilinear lens maps angle through a tangent: tan(theta) = u * tan(hfov/2),
  * where u is the normalized offset from center. The linear approximation is
@@ -219,16 +229,46 @@ export const GIMBAL_PITCH_LIMIT_DEG = 90;
 
 export interface Aim {
   target: Pose;
+  /**
+   * The rotation REQUESTED to reach the raw, unclamped target —
+   * `rawTarget - current` — not the rotation actually applied. When `clamped`
+   * is true, `target` stops short of `current + offset`; `offset` still
+   * reports what was asked for, not what the gimbal was told to do.
+   */
   offset: Offset;
   /** True if either axis saturated, meaning the target was not reachable. */
   clamped: boolean;
+  /**
+   * True when the target ray's horizontal direction points opposite the
+   * camera's current heading — an "over the top" solution. The pixel lies
+   * past vertical from the current pose and is not reachable by any rotation
+   * that keeps the image upright; clamping it to the nearest yaw would slew
+   * the camera toward the far side of the room, not toward the target.
+   */
+  overTheTop: boolean;
 }
 
 const clampTo = (value: number, limit: number): number =>
   Math.min(limit, Math.max(-limit, value));
 
 /**
- * Absolute pose that brings the given pixel to the center of frame.
+ * Absolute pose that brings the given pixel to the centre of frame.
+ *
+ * Composes a rotation rather than adding two scalars. The gimbal's yaw axis is
+ * world-vertical, so yawing while pitched sweeps a CONE: the two rotations do
+ * not commute, and `target = current + offset` is exact only at zero pitch or
+ * zero horizontal offset. Adding them cost 0.98 degrees at pitch 7.6 / yaw 31 on
+ * hardware, against `pitch * (1 - cos yaw)` = 1.09 predicted.
+ *
+ * The ray to the target in camera coordinates (x right, y down, z forward) is
+ * rotated into world coordinates by the current orientation, and the target pose
+ * is read back off that direction. The two axes reduce to the old additive sum
+ * under DIFFERENT conditions, not the same one: yaw reduces exactly to the old
+ * sum whenever pitch = 0, for any pixel, because yaw and pitch commute at zero
+ * tilt. Pitch reduces to the old sum only when u = 0 (the pixel sits on the
+ * vertical centre line) — composed pitch is asin(dy/n) where n includes dx, so
+ * away from u = 0 it differs from the old atan(dy) even when pitch is 0. That is
+ * what the invariant tests pin.
  *
  * Saturation is REPORTED, not silent: if the target lies outside the gimbal's
  * range the caller has to know it landed short rather than assume the aim
@@ -236,6 +276,9 @@ const clampTo = (value: number, limit: number): number =>
  *
  * `current` must be where the camera actually was when the frame was captured.
  * The module cannot verify that — see the spec's section 5 for what breaks it.
+ * Note that on Windows the pose the caller reads is FLOORED to whole degrees
+ * (spec section 4.2), which costs up to another degree; that is a separate
+ * defect in the pose source, not in this function.
  */
 export function aimAtPixel(
   x: number,
@@ -244,10 +287,64 @@ export function aimAtPixel(
   optics: Optics,
   current: Pose,
 ): Aim {
-  const offset = pixelToOffset(x, y, frame, optics);
-  const rawYaw = current.yaw + offset.dYaw;
-  const rawPitch = current.pitch + offset.dPitch;
+  const { tanH, tanV } = halfAngleTangents(optics, frame);
+  const u = (2 * x) / frame.width - 1;
+  const v = (2 * y) / frame.height - 1;
+  const uEff = optics.mirrored ? -u : u;
+
+  // Ray to the target, in camera coordinates: x right, y down, z forward.
+  const dx = uEff * tanH;
+  const dy = v * tanV;
+  const dz = 1;
+  const n = Math.sqrt(dx * dx + dy * dy + dz * dz);
+
+  const cy = Math.cos(toRad(current.yaw));
+  const sy = Math.sin(toRad(current.yaw));
+  const cp = Math.cos(toRad(current.pitch));
+  const sp = Math.sin(toRad(current.pitch));
+
+  // Pitch first, about the camera's own x-axis (+pitch tilts DOWN)...
+  const px = dx / n;
+  const py = (dy * cp + dz * sp) / n;
+  const pz = (-dy * sp + dz * cp) / n;
+  // ...then yaw, about the world vertical (+yaw pans camera-LEFT).
+  const wx = px * cy - pz * sy;
+  const wy = py;
+  const wz = px * sy + pz * cy;
+
+  const rawPitch = toDeg(Math.asin(Math.max(-1, Math.min(1, wy))));
+  // atan2 returns [-180, 180] — -180 IS included, and is exactly the case the
+  // following paragraph handles. Pick the representative nearest the current
+  // yaw so a target past +150 reads as +183 rather than -177. Without this a
+  // saturating aim clamps to the WRONG END of the range.
+  //
+  // This is a modulo wrap rather than `Math.round((current.yaw - rawYaw) /
+  // 360)`: at an exact 180-degree difference — dead behind the camera, which
+  // happens for real at u = 0 aiming past vertical — that rounds ties toward
+  // +Infinity regardless of sign (JS's Math.round(0.5) is 1, not 0), which
+  // silently flips -180 to +180 and clamps on the wrong end. The wrap below
+  // always resolves an exact tie to the lower edge of the window instead.
+  const rawYawAtan2 = toDeg(Math.atan2(-wx, wz));
+  const rawYaw = current.yaw + (((rawYawAtan2 - current.yaw + 180) % 360 + 360) % 360 - 180);
+
   const yaw = clampTo(rawYaw, GIMBAL_YAW_LIMIT_DEG);
   const pitch = clampTo(rawPitch, GIMBAL_PITCH_LIMIT_DEG);
-  return { target: { yaw, pitch }, offset, clamped: yaw !== rawYaw || pitch !== rawPitch };
+
+  // Over the top: the target ray's horizontal direction points opposite the
+  // camera's current heading. (hx, hz) is that heading; (wx, wz) is the target
+  // direction, both already computed above. A negative dot product means the
+  // only way to face the target while keeping the image upright is to go past
+  // vertical — clamping the resulting yaw to the nearest limit would slew the
+  // camera toward the OPPOSITE side of the room, not toward the target, so the
+  // caller must refuse this case rather than clamp-and-move it.
+  const hx = -sy;
+  const hz = cy;
+  const overTheTop = hx * wx + hz * wz < 0;
+
+  return {
+    target: { yaw, pitch },
+    offset: { dYaw: rawYaw - current.yaw, dPitch: rawPitch - current.pitch },
+    clamped: yaw !== rawYaw || pitch !== rawPitch,
+    overTheTop,
+  };
 }
