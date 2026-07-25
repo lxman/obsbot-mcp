@@ -1922,13 +1922,13 @@ test("aiming at the center pixel leaves the pose unchanged", async () => {
 test("an off-center pixel commands the offset the geometry module computes", async () => {
   const transport = makeFakeTransport();
   const tool = findTool(createTools(makeFakeMgr(transport)), "obsbot_aim_at_pixel");
-  // x=960 is u=0.5 on a 1280-wide frame; on wide (68deg) that is -18.64deg.
+  // x=960 is u=0.5 on a 1280-wide frame; on wide (67deg) that is -18.31deg.
   const r = (await tool.handler({ x: 960, y: 360, ...HD_FRAME })) as {
     ok: boolean; target: { yaw: number }; offset: { dYaw: number };
   };
   expect(r.ok).toBe(true);
-  expect(r.offset.dYaw).toBeCloseTo(-18.64, 2);
-  expect(r.target.yaw).toBeCloseTo(-18.64, 2);
+  expect(r.offset.dYaw).toBeCloseTo(-18.3116, 2);
+  expect(r.target.yaw).toBeCloseTo(-18.3116, 2);
 });
 
 test("the FOV mode is READ, not assumed — narrow gives a different angle than wide", async () => {
@@ -1940,10 +1940,10 @@ test("the FOV mode is READ, not assumed — narrow gives a different angle than 
   };
   expect(r.ok).toBe(true);
   expect(r.fovMode).toBe("narrow");
-  // narrow is 50deg, so u=0.5 gives -13.12deg, NOT wide's -18.64deg. This is the
-  // test that would have caught the original parameter-guessing design.
-  expect(r.offset.dYaw).toBeCloseTo(-13.12, 2);
-  expect(r.offset.dYaw).not.toBeCloseTo(-18.64, 1);
+  // narrow is 48.46deg, so u=0.5 gives -12.68deg, NOT wide's -18.31deg. This is
+  // the whole point of reading fovMode instead of assuming it.
+  expect(r.offset.dYaw).toBeCloseTo(-12.6805, 2);
+  expect(r.offset.dYaw).not.toBeCloseTo(-18.3116, 1);
 });
 
 test("active AI tracking is refused, naming the mode", async () => {
