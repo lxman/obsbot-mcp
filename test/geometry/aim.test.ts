@@ -7,19 +7,24 @@ import {
 const HD = { width: 1280, height: 720 };
 const rad = (deg: number) => (deg * Math.PI) / 180;
 
-test("each FOV setting carries its published horizontal angle", () => {
-  expect(HORIZONTAL_FOV_DEG).toEqual({ wide: 86, medium: 78, narrow: 65 });
+// The FOV angles are MEASURED against a physical Tiny 2, not taken from OBSBOT's
+// spec sheet — the sheet's 86/78/65 do not describe the horizontal extent of the
+// capture stream. See the HORIZONTAL_FOV_DEG doc comment for the measurements and
+// the two independent methods that agree on them.
+
+test("each FOV setting carries its measured horizontal angle", () => {
+  expect(HORIZONTAL_FOV_DEG).toEqual({ wide: 68, medium: 60, narrow: 50 });
 });
 
-test("the horizontal half-angle is half the published field of view", () => {
-  expect(halfAngles({ fov: "wide" }, HD).h).toBeCloseTo(43, 9);
-  expect(halfAngles({ fov: "medium" }, HD).h).toBeCloseTo(39, 9);
-  expect(halfAngles({ fov: "narrow" }, HD).h).toBeCloseTo(32.5, 9);
+test("the horizontal half-angle is half the measured field of view", () => {
+  expect(halfAngles({ fov: "wide" }, HD).h).toBeCloseTo(34, 9);
+  expect(halfAngles({ fov: "medium" }, HD).h).toBeCloseTo(30, 9);
+  expect(halfAngles({ fov: "narrow" }, HD).h).toBeCloseTo(25, 9);
 });
 
 test("the vertical half-angle follows the frame aspect ratio", () => {
-  // tan(V) = tan(H) * (height/width) = tan(43deg) * 0.5625 -> V ~= 27.68deg
-  expect(halfAngles({ fov: "wide" }, HD).v).toBeCloseTo(27.68, 2);
+  // tan(V) = tan(H) * (height/width) = tan(34deg) * 0.5625 -> V ~= 20.78deg
+  expect(halfAngles({ fov: "wide" }, HD).v).toBeCloseTo(20.78, 2);
 });
 
 test("a square frame makes the vertical half-angle equal the horizontal one", () => {
@@ -30,10 +35,10 @@ test("a square frame makes the vertical half-angle equal the horizontal one", ()
 test("zoom crops the field of view by dividing the tangent, not the angle", () => {
   const oneX = halfAngles({ fov: "wide" }, HD).h;
   const twoX = halfAngles({ fov: "wide", zoom: 2 }, HD).h;
-  // If zoom divided the ANGLE, 2x would give 21.5deg. It divides the TANGENT.
+  // If zoom divided the ANGLE, 2x would give 17deg. It divides the TANGENT.
   expect(Math.tan(rad(twoX))).toBeCloseTo(Math.tan(rad(oneX)) / 2, 9);
-  expect(twoX).toBeCloseTo(25.0, 2);
-  expect(twoX).not.toBeCloseTo(21.5, 1);
+  expect(twoX).toBeCloseTo(18.64, 2);
+  expect(twoX).not.toBeCloseTo(17.0, 1);
 });
 
 test("omitted zoom is treated as 1x", () => {
@@ -47,6 +52,10 @@ test("omitted zoom is treated as 1x", () => {
 // and y grows downward. So a target on the RIGHT of frame needs a NEGATIVE yaw
 // delta, and a target BELOW center needs a POSITIVE pitch delta. That asymmetry
 // is the single most likely place for a sign bug.
+//
+// Not-mirrored is confirmed on hardware (2026-07-25): panning the gimbal to
+// negative yaw swept the scene LEFT across the frame, which is what an unmirrored
+// capture path does.
 
 const WIDE = { fov: "wide" as const };
 
@@ -57,26 +66,26 @@ test("the center pixel needs no correction", () => {
 });
 
 test("the right frame edge maps to exactly the horizontal half-angle, negated", () => {
-  expect(pixelToOffset(1280, 360, HD, WIDE).dYaw).toBeCloseTo(-43, 9);
+  expect(pixelToOffset(1280, 360, HD, WIDE).dYaw).toBeCloseTo(-34, 9);
 });
 
 test("the left frame edge maps to a positive yaw of the same size", () => {
-  expect(pixelToOffset(0, 360, HD, WIDE).dYaw).toBeCloseTo(43, 9);
+  expect(pixelToOffset(0, 360, HD, WIDE).dYaw).toBeCloseTo(34, 9);
 });
 
 test("halfway to the edge is NOT half the angle — the mapping is tangent, not linear", () => {
-  // x=960 is u=0.5. Tangent mapping gives -25.0deg; a linear one would say -21.5deg.
+  // x=960 is u=0.5. Tangent mapping gives -18.64deg; a linear one would say -17deg.
   const dYaw = pixelToOffset(960, 360, HD, WIDE).dYaw;
-  expect(dYaw).toBeCloseTo(-25.0, 2);
-  expect(dYaw).not.toBeCloseTo(-21.5, 1);
+  expect(dYaw).toBeCloseTo(-18.64, 2);
+  expect(dYaw).not.toBeCloseTo(-17.0, 1);
 });
 
 test("the bottom of the frame tilts down, which is positive pitch", () => {
-  expect(pixelToOffset(640, 720, HD, WIDE).dPitch).toBeCloseTo(27.68, 2);
+  expect(pixelToOffset(640, 720, HD, WIDE).dPitch).toBeCloseTo(20.78, 2);
 });
 
 test("the top of the frame tilts up, which is negative pitch", () => {
-  expect(pixelToOffset(640, 0, HD, WIDE).dPitch).toBeCloseTo(-27.68, 2);
+  expect(pixelToOffset(640, 0, HD, WIDE).dPitch).toBeCloseTo(-20.78, 2);
 });
 
 test("a mirrored capture inverts yaw and leaves pitch untouched", () => {
@@ -126,7 +135,7 @@ test("the gimbal limits are the hardware-verified bounds", () => {
 
 test("the target is the current pose plus the offset", () => {
   const aim = aimAtPixel(960, 360, HD, WIDE, { yaw: 10, pitch: 5 });
-  expect(aim.target.yaw).toBeCloseTo(10 - 25.0, 2);
+  expect(aim.target.yaw).toBeCloseTo(10 - 18.64, 2);
   expect(aim.target.pitch).toBeCloseTo(5, 9);
   expect(aim.clamped).toBe(false);
 });
@@ -146,14 +155,14 @@ test("the returned offset matches pixelToOffset for the same inputs", () => {
 });
 
 test("a yaw target beyond the limit is clamped and reported", () => {
-  // Left edge gives +43deg; from yaw 149 that would be 192deg.
+  // Left edge gives +34deg; from yaw 149 that would be 183deg.
   const aim = aimAtPixel(0, 360, HD, WIDE, { yaw: 149, pitch: 0 });
   expect(aim.target.yaw).toBe(150);
   expect(aim.clamped).toBe(true);
 });
 
 test("a pitch target beyond the limit is clamped and reported", () => {
-  // Bottom edge gives +27.68deg; from pitch 85 that would be 112.68deg.
+  // Bottom edge gives +20.78deg; from pitch 85 that would be 105.78deg.
   const aim = aimAtPixel(640, 720, HD, WIDE, { yaw: 0, pitch: 85 });
   expect(aim.target.pitch).toBe(90);
   expect(aim.clamped).toBe(true);
@@ -175,7 +184,7 @@ test("saturating one axis does not falsely clamp the other", () => {
 
 test("a target inside the limits is never reported as clamped", () => {
   const aim = aimAtPixel(1280, 720, HD, WIDE, { yaw: 0, pitch: 0 });
-  expect(aim.target.yaw).toBeCloseTo(-43, 9);
-  expect(aim.target.pitch).toBeCloseTo(27.68, 2);
+  expect(aim.target.yaw).toBeCloseTo(-34, 9);
+  expect(aim.target.pitch).toBeCloseTo(20.78, 2);
   expect(aim.clamped).toBe(false);
 });

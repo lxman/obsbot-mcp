@@ -1,6 +1,7 @@
 # Aim geometry module — design
 
-**Status:** approved 2026-07-24. Not yet implemented.
+**Status:** approved 2026-07-24. Implemented on `feat/aim-geometry`. FOV constants corrected against
+hardware 2026-07-25 — see §8.
 **Scope:** the pure geometry module only. No new tool, no transport changes, no demo.
 
 ## 1. Problem
@@ -20,7 +21,7 @@ substantial piece of this project that is fully testable without hardware attach
 ## 2. Why the naive version is not good enough
 
 The tempting conversion is linear: the target is 40% of the way to the frame edge, the field of view
-is 86°, so the offset is 0.4 × 43°. A rectilinear lens does not map that way. The correct relation
+is 68°, so the offset is 0.4 × 34°. A rectilinear lens does not map that way. The correct relation
 is
 
 ```
@@ -30,9 +31,17 @@ tan(θ) = u · tan(hfov / 2)
 where `u` is the normalized offset from center, `u ∈ [−1, 1]`.
 
 The linear form is exact at `u = 0` and exact again at `u = ±1`, and wrong everywhere between —
-always *under*-estimating. On the wide (86°) setting the error peaks at **≈3.5°** at `u ≈ 0.53`; on
-narrow (65°) it peaks at **≈1.4°**. At two meters, 3.5° is roughly 12 cm of miss — the difference
-between landing on target in one move and visibly hunting.
+always *under*-estimating. At the **measured** field of view (§8), the error peaks at **≈1.65°** at
+`u ≈ 0.55` on wide, **≈1.12°** on medium, and **≈0.64°** on narrow. At two meters that is 5.8 cm of
+miss on wide.
+
+Worth stating plainly, because it cuts against this section's own argument: the original spec quoted
+**3.5°** here, computed from an assumed 86° field of view that hardware measurement later disproved.
+At the true 68° the case for the tangent mapping is weaker than it first appeared — 5.8 cm rather
+than 12 cm. It is still the right choice: the error is systematic rather than random, it grows toward
+the frame edge where a miss is most visible, and correcting it costs one `atan`. But it no longer
+dwarfs other error sources the way the inflated figure suggested, and nobody should re-derive the
+3.5° number from this document.
 
 ## 3. Conventions
 
@@ -55,7 +64,8 @@ Note what is and is not settled by the hardware verification above. The gimbal's
 verified; the negation on the yaw term is not a restatement of them but a *composition* of the
 verified convention with the image coordinate convention. That composition inverts if the capture
 path mirrors the preview. Mirroring is therefore an explicit `mirrored` input (§6) rather than a
-baked-in assumption, which confines the residual risk to the single hardware check in §8.
+baked-in assumption. **That check has since been run: the capture path is not mirrored** (§8), so the
+composition above holds as derived and `mirrored: false` is the correct default.
 
 ## 4. The math
 
@@ -66,8 +76,9 @@ u = 2x / width  − 1
 v = 2y / height − 1
 ```
 
-Effective half-angles. Base horizontal FOV comes from the `fov` enum — wide 86°, medium 78°,
-narrow 65° (`tools.ts:753`). Zoom is a crop, so it divides the tangent:
+Effective half-angles. Base horizontal FOV comes from the `fov` enum — **measured** as wide 68°,
+medium 60°, narrow 50° (§8; these are *not* the 86/78/65 in `tools.ts:753`, which do not describe
+the capture stream). Zoom is a crop, so it divides the tangent:
 
 ```
 tan(H) = tan(hfov / 2) / zoom
@@ -175,14 +186,14 @@ alongside it is consistent with what is already there, not a new convention.
 
 All offline. No camera required.
 
-**Golden values** — hand-computed, wide (86°), 1280×720:
+**Golden values** — hand-computed, wide (68°, measured — §8), 1280×720:
 
 | input | expected |
 |---|---|
 | center `u = 0` | `dYaw = 0` |
-| right edge `u = 1` | `dYaw = −43°` (edge maps to exactly half the FOV) |
-| `u = 0.5` | `dYaw = −25.0°` (linear would say −21.5°) |
-| vertical half-angle | `V ≈ 27.7°`, so `vfov ≈ 55.4°` at 16:9 |
+| right edge `u = 1` | `dYaw = −34°` (edge maps to exactly half the FOV) |
+| `u = 0.5` | `dYaw = −18.64°` (linear would say −17°) |
+| vertical half-angle | `V ≈ 20.78°`, so `vfov ≈ 41.6°` at 16:9 |
 
 **Properties:**
 
@@ -194,44 +205,83 @@ All offline. No camera required.
 - `mirrored: true` negates `dYaw` and leaves `dPitch` untouched.
 - Saturation sets `clamped` and never returns an out-of-range pose.
 
-## 8. Open hardware questions
+## 8. Hardware questions — measured 2026-07-25
 
-None of these block this module — each is a caller-supplied parameter, which is the point of
-keeping the module pure. They block the *tool* that will consume it.
+Run against a physical Tiny 2 on Windows. Three of the four original questions are settled; the
+answers changed a module constant, so this section is now a record of measurements rather than a
+list of unknowns.
 
-- **Mirroring.** Does the capture path flip the preview horizontally? One snapshot with an object
-  clearly to one side settles it.
+### Settled
+
+**Mirroring — the capture path is NOT mirrored.** Panning to negative yaw swept the entire scene
+*left* across the frame, which is what an unmirrored path does. `mirrored: false` is the correct
+default and §3's sign composition holds as derived.
+
+**Field of view — the spec sheet's numbers do not describe the capture stream.** Measured with a
+letter sheet of known width at a tape-measured distance, centered on-axis:
+
+| setting | spec sheet | measured HFOV | measured `tan(H)` | measured / spec |
+|---|---|---|---|---|
+| wide | 86° | **67.9°** | 0.673 | 0.722 |
+| medium | 78° | **60.2°** | 0.582 | 0.719 |
+| narrow | 65° | **50.0°** | 0.466 | 0.731 |
+
+The ratio is constant at **0.724 ± 0.006**, so the spec numbers carry the correct *relative*
+structure with a uniformly wrong absolute scale — one scale error, not three bad values. The
+measured medium/wide tangent ratio of 0.865 matches the spec's 0.868 to 0.3%.
+
+Neither candidate explanation fits: a 16:9 diagonal reading predicts 0.872, 4:3 predicts 0.80. The
+likeliest cause is that the stream is a further crop of the sensor, which the Tiny 2's digital AI
+framing would account for. The cause does not matter for this module — what it needs is the
+horizontal extent of the frames the server actually receives.
+
+`HORIZONTAL_FOV_DEG` is now **68 / 60 / 50**, rounded to the ±3° measurement uncertainty.
+
+**The gimbal's degrees are honest 1:1.** This falls out of two independent methods agreeing on
+wide — a known-angle pan tracking features across the frame (distance-independent, 66.4°,
+reproducible over three features and two pan angles) and the paper measurement (gimbal-independent,
+67.9°). For the spec-sheet 86° to have been correct, the gimbal would have had to under-report by
+39% *and* the tape measure to be wrong by 13 inches, in mutually compensating directions.
+
+**Yaw range — no ±130° ceiling on Windows.** Commanded/read-back pairs: 120→120, 130→129,
+**145→145**, 150→149, −150→−147. Readback is live, not an echo: a poll mid-slew caught 68° in
+transit to 120°. `GIMBAL_YAW_LIMIT_DEG = 150` is correct for this path. The ±468000 arcsec figure in
+`transport/linux.ts` and `transport/macos.ts` describes the **V4L2/UVC control's advertised range on
+those platforms**, not a universal mechanical stop — Windows reaches ±150 via DirectShow. Minor
+asymmetry worth knowing: the negative end lands ~3° short (−150 → −147) while the positive end is
+within 1°.
+
+### Still open
+
+- **The ±130° UVC ceiling on Linux and macOS.** Untested — the measurements above are Windows-only.
+  Linux drives absolute moves through the UVC control whose advertised range is ±130°, so a yaw
+  target between 130° and 150° may still be truncated there while this module reports
+  `clamped: false`. The consuming tool should either clamp to ±130° on those platforms or surface
+  the discrepancy.
+- **`obsbot_zoom_uvc` ratio is not linear magnification.** Requesting `ratio: 2.0` produced a
+  measured **4.0×** linear magnification (the same sheet went 327 px → 1310 px at a fixed pose and
+  distance). `Optics.zoom` in this module is defined as a linear factor dividing the tangent, so the
+  consuming tool must convert rather than passing the UVC ratio through. Whether the relationship is
+  exactly quadratic over the whole 1.0–2.0 range is unmeasured — only the endpoint was checked.
+- **Vertical projection.** Whether `tan(V) = tan(H) · aspect` holds. Only the *horizontal* extent was
+  measured; the vertical is still derived from it by aspect ratio. Note this check is now more
+  valuable than it was, not less: it is no longer redundant with the axis question, since the axis
+  question was answered without ever confirming the vertical.
 - **Zoom readback.** The status block decodes `{ awake, hdr, faceAe, aiMode, trackSpeed }` — no
-  zoom. `CameraControl_Zoom` is index 3 in the same DirectShow enum that already supplies Pan=0,
-  Tilt=1, Exposure=4, Focus=6 (`commands.ts:346`), and `camCtrlGet` is already wired. Likely a
-  one-line addition, but unverified against the Tiny 2.
+  zoom. `CameraControl_Zoom` is index 3 in the same DirectShow enum that supplies Pan=0, Tilt=1,
+  Exposure=4, Focus=6 (`commands.ts:346`), and `camCtrlGet` is already wired. Untested.
 - **FOV readback.** No path exists today. The undecoded offsets in the raw 60-byte status block are
-  the obvious place to look. Deferred: the consuming tool takes `fov` as a parameter.
-- **Vertical projection.** Whether `tan(V) = tan(H) · aspect` holds at the wide end.
-- **Yaw limit vs. the UVC pan range.** `GIMBAL_YAW_LIMIT_DEG = 150` is documented as
-  hardware-verified, but `transport/linux.ts` and `transport/macos.ts` both record a
-  hardware-measured `CT_PANTILT_ABSOLUTE` range of ±468000 arcsec pan / ±324000 arcsec tilt at 3600
-  arcsec per degree — **±130° pan, ±90° tilt**. Tilt agrees with the 90° limit above; pan does not.
-  Linux drives absolute moves through that same UVC control, so a yaw target between 130° and 150°
-  passes `aimAtPixel` with `clamped: false` and is then silently truncated to 130° by the driver —
-  the camera lands 10° short while this module reports success, which is exactly the "aimed and
-  missed" failure clamping exists to prevent. On Windows/macOS the vendor V3 frame path may
-  genuinely reach 150°, but `obsbot_gimbal_position` reads back through the same ±130° UVC control,
-  so any pose past 130° reads back saturated and would feed a wrong `current` into the next aim.
-  Not resolved here — `GIMBAL_YAW_LIMIT_DEG` stays at 150 pending a decision on whether the
-  consuming tool should treat ±130° as the practical yaw bound or surface the discrepancy itself.
-- **FOV axis: horizontal or diagonal?** `HORIZONTAL_FOV_DEG` (86°/78°/65°) asserts the axis in its
-  name, but every in-tree source of those numbers (`codec/commands.ts`, `mcp/tools.ts`,
-  `README.md`, `tiny2_specification.md`) states them with no axis qualifier, and they trace to
-  OBSBOT's published spec sheet, where the Tiny series FOV is listed as **diagonal**. If 86° is
-  diagonal, the true horizontal FOV at 16:9 is 78.2° and vertical is 49.1°, against this module's
-  assumed 86°/55.4° — roughly **3.9° of half-angle error**, larger than the 3.5° linear-
-  approximation error the entire tangent mapping exists to eliminate. This would present as a
-  consistent overshoot that grows toward the frame edge. Critically, **the vertical-projection
-  check above would NOT catch this**: a diagonal source makes both axes wrong in a correlated way,
-  so `tan(V) = tan(H) · aspect` still appears to hold. This needs its own check: place an object at
-  the exact right edge of frame on the wide setting and aim at it — one snapshot. A constant sourced
-  from diagonal FOV overshoots past center by a repeatable margin.
+  the obvious place to look. The consuming tool takes `fov` as a parameter.
+
+### Method note
+
+The measurement went wrong twice before it went right, and both failures are worth recording because
+they will recur. A handheld sheet at an *estimated* "about 3 feet" gave 64°; the same sheet taped
+down and tape-measured gave 78.7° — because it was inset in a folder whose trim hid part of its
+width, and a too-narrow sheet inflates the computed FOV. Only when the full sheet was exposed,
+centered on-axis, and measured against a known distance did the paper method converge with the
+distance-independent pan method. **Any single measurement here is untrustworthy; the confidence comes
+entirely from two methods with disjoint assumptions agreeing.**
 
 ## 9. Out of scope
 

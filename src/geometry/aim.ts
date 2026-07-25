@@ -30,25 +30,46 @@ export interface Optics {
 }
 
 /**
- * Published horizontal field of view for each FOV setting, in degrees.
+ * Horizontal field of view of the CAPTURE STREAM for each FOV setting, in
+ * degrees. These are MEASURED against a physical Tiny 2 (2026-07-25), not taken
+ * from OBSBOT's spec sheet — the two disagree, and the measured values are the
+ * ones this module needs.
  *
- * The "horizontal" in the name is an ASSUMPTION, not a confirmed fact. Every
- * in-tree source of 86/78/65 (`codec/commands.ts`, `mcp/tools.ts`, `README.md`,
- * `tiny2_specification.md`) states the numbers with no axis qualifier, and they
- * trace back to OBSBOT's published spec sheet, where the Tiny series field of
- * view is listed as DIAGONAL. If that is what these numbers are, the true
- * horizontal/vertical FOV at 16:9 is 78.2°/49.1°, not 86°/55.4° — roughly 3.9°
- * of half-angle error, which is larger than the 3.5° linear-approximation error
- * the tangent mapping in this module exists to eliminate. Unresolved, this is
- * the single largest uncorrected error source in the module. See the spec's
- * §8 for the hardware check that would settle it (the existing vertical-
- * projection check does NOT catch this, since a diagonal source makes both
- * axes wrong in a correlated way that still satisfies tan(V) = tan(H) · aspect).
+ * The spec sheet's 86/78/65 (repeated in `codec/commands.ts`, `mcp/tools.ts`,
+ * `README.md`, `tiny2_specification.md`) do not describe the horizontal extent
+ * of the frames the server actually receives. Measured against a letter sheet of
+ * known width at a tape-measured distance:
+ *
+ *     setting   spec    measured    tan(H) measured / tan(H) spec
+ *     wide      86°     67.9°       0.722
+ *     medium    78°     60.2°       0.719
+ *     narrow    65°     50.0°       0.731
+ *
+ * The ratio is constant at 0.724 ± 0.006, so the spec numbers have the correct
+ * relative structure and a uniformly wrong absolute scale — one scale error, not
+ * three bad values. (Measured medium/wide tangent ratio 0.865 vs the spec's
+ * 0.868, agreeing to 0.3%.) Neither a 16:9 diagonal reading (which would give
+ * 0.872) nor 4:3 (0.80) accounts for 0.724; the likeliest cause is that the
+ * stream is a further crop of the sensor, which the Tiny 2's digital AI framing
+ * would explain. The cause does not change what the module needs.
+ *
+ * Two independent methods agree on wide, which is what makes this trustworthy:
+ *   - Panning a known gimbal angle and tracking features across the frame
+ *     (distance-independent): 66.4°, reproducible across three features and two
+ *     pan angles.
+ *   - A letter sheet of known width at a measured distance (gimbal-independent):
+ *     67.9°.
+ * They share no assumptions, so their agreement also confirms the gimbal's
+ * degrees are honest 1:1 — an 86° FOV would have required the gimbal to
+ * under-report by 39%.
+ *
+ * Uncertainty is roughly ±3°, dominated by the distance measurement. Values are
+ * rounded accordingly; do not add decimal places without re-measuring.
  */
 export const HORIZONTAL_FOV_DEG: Record<FovType, number> = {
-  wide: 86,
-  medium: 78,
-  narrow: 65,
+  wide: 68,
+  medium: 60,
+  narrow: 50,
 };
 
 const toRad = (deg: number): number => (deg * Math.PI) / 180;
