@@ -399,26 +399,49 @@ position.
 
 ---
 
-## 9. The patch as built (2026-07-25)
+## 9. The patch as built (2026-07-25, respun same day)
 
-Written against mainline `3dab139d4` (v7.2-rc4 era), compiled, booted, and
-tested on hardware. **Not yet sent.**
+Developed and hardware-tested on mainline `3dab139d4` (v7.2-rc4 era; the
+running kernel). The mailable patch is rebased onto **media.git `next`** @
+`a52e6f792` — the tree uvcvideo patches are actually applied to — applies
+cleanly there, and `uvc_ctrl.c` compile-checks against it. `base-commit:`
+trailer included. **Not yet sent.**
 
-Artifacts live outside the repo at `~/kernel-uvc-work/`:
+A first version of this section described the pre-respin patch. A self-review
+before sending found one real defect and several gaps; the respin fixed:
+
+1. **`V4L2_CTRL_FLAG_VOLATILE` without `V4L2_CTRL_FLAG_EXECUTE_ON_WRITE` was a
+   uAPI semantics violation.** `vidioc-queryctrl.rst` is explicit: "Setting a
+   new value for a volatile control will be ignored unless
+   V4L2_CTRL_FLAG_EXECUTE_ON_WRITE is also set." Pan/tilt writes are decidedly
+   not ignored, so the respin reports both flags when the control has
+   `SET_CUR`. (`EXECUTE_ON_WRITE`'s definition — every write propagated even if
+   unchanged — is already literally true of `uvc_ctrl_set()`, which never
+   short-circuits same-value writes. Precedent: manual gain under autogain.)
+2. Commit message misattributed the flag's consumer ("the V4L2 control
+   framework" — uvcvideo implements these controls itself; only applications
+   see the flag).
+3. Base moved from Linus' master to media/next, with `--base` trailer.
+4. `v4l2-compliance` run (see table), patched-vs-pristine A/B on this device.
+5. Paired-read skew disclosed in the tearline (below).
+6. Duplicated tail in `__uvc_ctrl_get()` folded into buffer-id selection.
+
+Artifacts at `~/kernel-uvc-work/`:
 `0001-media-uvcvideo-query-pan-tilt-position-from-the-devi.patch` (mailable,
-`git format-patch` with reviewer notes below the tearline), `commit-msg.txt`,
-`tearline-notes.txt`, and `kernel-src/` (shallow mainline clone with the commit
-applied).
+reviewer notes below the tearline), `commit-msg.txt`, `tearline-notes.txt`,
+`kernel-src/` (mainline clone, commit `64644fc6e`, the tested build), and
+`media-next/` (worktree on media/next, commit `5e13d80fc` — the mbox source).
 
 ### Shape
 
-49 insertions across two files; `checkpatch.pl --strict` clean.
+55 insertions, 4 deletions across two files; `checkpatch.pl --strict` clean.
 
 - `include/uapi/linux/uvcvideo.h` — new `UVC_CTRL_FLAG_VOLATILE (1 << 9)`
 - `uvc_ctrl.c` — new `UVC_CTRL_DATA_LIVE` slot (`UVC_CTRL_DATA_LAST` 6→7); the
   flag set on the `CT_PANTILT_ABSOLUTE_CONTROL` entry in `uvc_ctrls[]`; a new
-  `__uvc_ctrl_load_live()`; `__uvc_ctrl_get()` taking the live path when the
-  flag is set and `!ctrl->dirty`; `V4L2_CTRL_FLAG_VOLATILE` surfaced in
+  `__uvc_ctrl_load_live()`; `__uvc_ctrl_get()` selecting the live buffer when
+  the flag is set and `!ctrl->dirty`; `V4L2_CTRL_FLAG_VOLATILE` plus
+  `V4L2_CTRL_FLAG_EXECUTE_ON_WRITE` (when writable) surfaced in
   `__uvc_query_v4l2_ctrl()`
 
 The write path is untouched — see §5 for why that inversion matters.
@@ -435,15 +458,59 @@ Kernel `7.2.0-rc4+`, OBSBOT Tiny 2 (`3564:fef8`) on `/dev/video2`.
 
 | Test | Result |
 |---|---|
-| **Two-axis write** (the §4.1 regression) | **Pass** — `S_CTRL(pan=90°)` then `S_CTRL(tilt=20°)` 18 ms later, with pan still reading 0 at the time of the second write; both axes reached target (324000 / 72000). Pan not cancelled. |
-| **Live position during slew** | **Pass** — 0→5→17→24→36→47→55→66→78→90°, arrival at t+1690 ms, steady after |
-| **`V4L2_CTRL_FLAG_VOLATILE` surfaced** | **Pass** — `flags=volatile` on pan/tilt, absent on zoom |
-| **Concurrent streaming** | **Pass** — 100 frames at 30.5 fps while polling position at 5 Hz; no frame loss |
+| **Two-axis write** (the §4.1 regression) | **Pass** — `S_CTRL(pan=90°)` then `S_CTRL(tilt=20°)` as separate ioctls; run on both builds (18 ms gap pre-respin, 21 ms respun); both axes reached target (324000 / 72000). Pan not cancelled. In the 18 ms run, pan still read 0 at the second write — the hazard window was genuinely exercised, not missed by timing luck. |
+| **Live position during slew** | **Pass** — 0→5→17→24→36→47→55→66→78→90°, arrival ≈1.6–1.7 s, steady after; re-verified on the respun build |
+| **Flags surfaced** | **Pass** — `flags=volatile, execute-on-write` on pan/tilt, neither on zoom |
+| **Concurrent streaming** | **Pass** — 100 frames at 30.5 fps while polling position at 5 Hz; no frame loss; re-verified respun |
+| **`v4l2-compliance` A/B** | **Identical patched vs pristine** — 45/47 both, the two failures being the camera reporting a Power Line Frequency default outside its own min/max (device quirk, present in both runs, cascades into a second QUERYMENU failure). Integrated webcam 46/47, its own quirk. |
 | **No collateral damage** | **Pass** — integrated UVC 1.00 webcam (`1bcf:28cc`) enumerates, all controls read, streams clean |
 
-The two-axis result is the one that matters most: it is the specific failure
-that killed v1, and the 18 ms gap with pan still reading 0 means the hazard was
-genuinely exercised, not merely absent by luck of timing.
+### Found during the respin retest: the §4.1 hazard fires on stock kernels
+
+The first respun two-axis retest **failed** — pan cancelled back to 0, the
+exact v1 signature — and the cause turned out to be worth more than the scare.
+
+The `rmmod`/`insmod` that swapped the module in had re-probed the camera
+**while it was asleep** (it auto-stows after idle; the live path dutifully
+reported the stow pose, tilt = −302400 = −84°). Asleep, the camera does not
+answer `GET_INFO`, so `uvc_ctrl_get_flags()` cannot override the static table
+and pan/tilt *keeps* `UVC_CTRL_FLAG_AUTO_UPDATE`. With that flag set,
+`uvc_ctrl_commit_entity()` clears `ctrl->loaded` after every commit — so the
+second of two single-axis writes finds `loaded == 0`, and its read-modify-write
+pulls a **live** `GET_CUR` in which the first axis has not yet moved. The merge
+then commits the first axis back to its old position: move cancelled.
+
+Re-probed awake (`GET_INFO` answers `0x03`, `AUTO_UPDATE` cleared), the same
+test passes deterministically.
+
+Three implications, in order of importance:
+
+1. **This is a stock-kernel bug on this camera, not a property of the patch.**
+   `uvc_ctrl_set()` and the commit path are byte-identical to mainline in both
+   builds; the volatile read path is not involved. Any kernel, patched or not,
+   that probes this camera while it is asleep will cancel one axis of a
+   two-parallel-write `gimbalSet()`. It is the first observed case of the §4.1
+   hazard firing on an unmodified kernel — §4.1 called the RMW-from-live
+   failure a property of the *drafted* patch; in the asleep-probed flag state,
+   mainline does it by itself.
+2. **Project exposure exists but is narrow.** `linux.ts` `gimbalSet()` issues
+   pan and tilt as parallel single-axis writes, so it is exactly the failing
+   shape. The known trigger is a driver re-probe while the camera is asleep
+   (module reload; possibly warm reboots that keep USB power). Normal plug-in
+   wakes the camera, which is presumably why this has never been seen in the
+   field. No project change made — noted here for the day a user reports
+   one-axis moves after a driver reload.
+3. **It does not belong in this kernel submission.** It is orthogonal to the
+   volatile-read change (neither caused nor fixed by it), and bundling a
+   second bug story into the commit message would muddy a patch whose merit is
+   its narrowness. If it is worth fixing upstream, it is a separate patch —
+   plausibly "re-query control flags on resume/wake" or a retry — with its own
+   evidence.
+
+One more incidental confirmation: while asleep, V4L2 pan/tilt writes are
+accepted silently but move nothing, and the live read faithfully reports the
+stowed pose where the old driver would have echoed the stale commanded value —
+a small unplanned demonstration of the patch doing its job.
 
 ### Build notes, for whoever repeats this
 
@@ -459,9 +526,19 @@ than a couple of hours.
 work requires a reboot by construction. A 2.1 GB checkout and a completed build
 were lost that way; everything now lives under `~/kernel-uvc-work/`.
 
+Iterating without rebooting: `make M=drivers/media/usb/uvc modules` rebuilds
+just `uvcvideo.ko` in under a minute (the single-target `make path/to/x.ko`
+form fails at modpost — use `M=`), then `rmmod`/`insmod` hot-swaps it; sync the
+copy under `/lib/modules/$(uname -r)/` afterwards or a reboot silently reverts
+to the previous build. **Reload with the camera awake** — see the asleep-probe
+hazard above. One dead end so no one repeats it: `usbmon` cannot be added to
+this kernel after the fact. `localmodconfig` dropped `CONFIG_USB_MON`, and the
+hooks it needs (`usb_mon_register`) live inside the already-built usbcore, so
+enabling it means a full kernel rebuild and reboot, not a module build.
+
 ### Open questions carried into the submission
 
-Both are raised in the tearline notes rather than defended, on the §7 reasoning
+All are raised in the tearline notes rather than defended, on the §7 reasoning
 that this list responds better to flexibility than to a dug-in position:
 
 1. **uapi placement.** `UVC_CTRL_FLAG_VOLATILE` sits in the uapi header beside
@@ -474,8 +551,14 @@ that this list responds better to flexibility than to a dug-in position:
    arguably the more widespread case — but widening it costs a control transfer
    per read across a great many devices on the strength of one camera's
    evidence.
+3. **Paired-read skew.** Reading pan and tilt in one `G_EXT_CTRLS` call now
+   issues one `GET_CUR` per mapping — two transfers, values from instants ~1 ms
+   apart, where the old cache decoded both axes from a single sample (a
+   coherent pair, but a coherently *stale* one). Inherent to polling a moving
+   actuator; a shared-transfer scheme would need per-ioctl generation tracking
+   and was judged not worth it. Disclosed so the reviewer can weigh it.
 
-A third item, noted but not raised: `uvc_mapping_get_xctrl_compound()` still
+A fourth item, noted but not raised: `uvc_mapping_get_xctrl_compound()` still
 reads `UVC_CTRL_DATA_CURRENT`. No compound control is flagged volatile, so
 there is no bug, but it is the second wiring point if the concept generalises.
 
