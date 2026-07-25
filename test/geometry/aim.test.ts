@@ -58,7 +58,7 @@ test("the vertical correction is the measured value, not a no-op", () => {
   expect(VERTICAL_TANGENT_CORRECTION).toBeCloseTo(0.957, 3);
 });
 
-test("the measured vertical/horizontal tangent ratio is ~0.505 at 16:9", () => {
+test("the measured vertical/horizontal tangent ratio is ~0.538 at 16:9", () => {
   const { h, v } = halfAngles({ fov: "wide" }, HD);
   expect(Math.tan(rad(v)) / Math.tan(rad(h))).toBeCloseTo(0.538312, 3);
   // Square-pixel geometry demands 0.5625; the camera does not deliver it.

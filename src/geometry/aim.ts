@@ -54,8 +54,8 @@ const toDeg = (rad: number): number => (rad * 180) / Math.PI;
  * tighter than the tape-measured letter sheet behind the old +/-3 degrees.
  *
  * Six rotations (pitch +/-10, +/-20; yaw +/-10) over a static scene, 313-1243
- * inliers each, gave fx = 1449-1455 px on a 1920-wide frame across every subset
- * — a spread of 0.2% — which is HFOV 66.8-67.1. Rounded to 67. This also
+ * inliers each, gave fx = 1452-1455 px on a 1920-wide frame across every subset
+ * — a spread of 0.2% — which is HFOV 66.84-66.90. Rounded to 67. This also
  * independently reproduces an earlier pan-and-track measurement of 66.4.
  *
  * The per-mode magnifications come from fitting a similarity transform between
@@ -89,7 +89,7 @@ export const WIDE_HFOV_DEG = 67;
  * of it — `narrow` plus zoom ratio 1.5 measures 2.509, the same as `wide` plus
  * 1.5 (2.501), not 1.47 x 2.5. The discrete modes and the zoom control are two
  * ways of writing to one magnification scale, which is why setting zoom ratio
- * 1.0 never clears `custom`: it is the same optical state as `wide`.
+ * 1.0 does not reliably clear `custom`: it is the same optical state as `wide`.
  */
 export const FOV_MAGNIFICATION: Record<FovType, number> = {
   wide: 1,
@@ -116,8 +116,9 @@ export const HORIZONTAL_FOV_DEG: Record<FovType, number> = {
  * factor at 0.957-0.967. Rounded to 0.957.
  *
  * This REPLACES an earlier value of 0.898, which was 7% low. That figure came
- * from a measurement this project's own history recorded as inconclusive, and it
- * was wrong by far more than the effect it was trying to capture.
+ * from a measurement this project's own history recorded as inconclusive: the
+ * constant itself was off by about 6.2%, versus the ~4.3% effect it was trying
+ * to capture — roughly 1.4x the effect itself, not an order of magnitude off.
  *
  * The up/down asymmetry is ~1%, not the ~5% once believed: solving from the
  * up-tilt alone gives 0.957 and from the down-tilt alone 0.967. One constant
@@ -150,8 +151,9 @@ const halfAngleTangents = (optics: Optics, frame: Frame): { tanH: number; tanV: 
   const tanH = Math.tan(toRad(HORIZONTAL_FOV_DEG[optics.fov] / 2)) / zoom;
   // Vertical starts from the horizontal half-angle scaled by the frame aspect —
   // what square-pixel geometry predicts — then takes the measured correction,
-  // because hardware says the real vertical field is ~10% shorter than that.
-  // See VERTICAL_TANGENT_CORRECTION for the ten measurements behind it.
+  // because hardware says the real vertical field is ~4.3% shorter than that.
+  // See VERTICAL_TANGENT_CORRECTION for the intrinsics solve over six gimbal
+  // rotations behind it.
   return { tanH, tanV: tanH * (frame.height / frame.width) * VERTICAL_TANGENT_CORRECTION };
 };
 
@@ -173,9 +175,9 @@ export interface Offset {
  * A rectilinear lens maps angle through a tangent: tan(theta) = u * tan(hfov/2),
  * where u is the normalized offset from center. The linear approximation is
  * exact at the center and again at the edge, and wrong in between — always low,
- * peaking near 3.5 degrees at u ~= 0.53 on the wide setting. That error is the
- * difference between landing on target and visibly hunting, so the tangent form
- * is not optional.
+ * peaking near 1.58 degrees at u ~= 0.55 on the wide setting (WIDE_HFOV_DEG =
+ * 67). That error is the difference between landing on target and visibly
+ * hunting, so the tangent form is not optional.
  *
  * Signs: +yaw pans camera-LEFT and image x grows rightward, so the yaw term is
  * negated. +pitch tilts DOWN and image y grows downward, so the pitch term is
