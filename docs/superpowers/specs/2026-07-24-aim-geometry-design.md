@@ -219,13 +219,37 @@ default and §3's sign composition holds as derived.
 
 **Field of view — the vendor's numbers do not describe the capture stream.**
 
-The vendor figures are sourced from OBSBOT's own C++ SDK header,
-`libdev_v2.1.0_8/include/dev/dev.hpp:486-488` — `FovType86 = 0, /// field of view 86°, wide view`
-and siblings. Two things about that source matter: it states **no axis** (just "field of view 86°"),
-and the other official header (`SDKs/remo_uvc_ctrl.en.h:55`) defines the same enum with **no angles
-at all**. The repeats in `README.md:149`, `tiny2_specification.md:243` and
-`SDKs/CAPABILITIES-REPORT.md:184` are our own documents downstream of that one header — a single
-source cited several times, not independent confirmation.
+The vendor figures come from two places, and they say different amounts:
+
+- **In-tree:** OBSBOT's C++ SDK header, `libdev_v2.1.0_8/include/dev/dev.hpp:486-488` —
+  `FovType86 = 0, /// field of view 86°, wide view` and siblings. It states **no axis**. The other
+  official header (`SDKs/remo_uvc_ctrl.en.h:55`) defines the same enum with **no angles at all**.
+  The repeats in `README.md:149`, `tiny2_specification.md:243` and `SDKs/CAPABILITIES-REPORT.md:184`
+  are our own documents downstream of that header — a single source cited several times.
+- **Published (checked 2026-07-25):** OBSBOT's marketing materials and retail listings give the
+  Tiny 2 as **85.5° DFOV — explicitly diagonal**. The same sources give pan as **±150°**, which
+  independently corroborates `GIMBAL_YAW_LIMIT_DEG` above.
+
+So the SDK's unqualified "86°" is a rounded **diagonal** figure. That resolves the axis question,
+but it does **not** close the measurement gap:
+
+```
+85.5° DFOV at 16:9  →  tan(H) = tan(42.75°) × 16/√(16²+9²) = 0.806  →  HFOV 77.7°
+measured                                                    tan(H) = 0.673  →  HFOV 67.9°
+```
+
+Reading the figure as diagonal moves the ratio from 0.722 to **0.835** — it explains roughly half
+the discrepancy and leaves ~17% unaccounted.
+
+**The likeliest remaining cause is that the published figure describes the 4K path, and the ≤1080p
+stream is cropped.** The Tiny 2 is 4K@30 / 1080p@60, and `obsbot_capture_snapshot` caps `resolution`
+at 1920, so *every measurement here was taken on the ≤1080p path*. 1280 and 1920 were verified to
+share a field of view (the target subtended 187 px vs 270 px, matching downscale and ruling out a
+crop between those two), but 4K was never reachable through this tool.
+
+**Scope of these constants, stated plainly: they are correct for the frames `obsbot_capture_snapshot`
+produces, which is what this module exists to serve. They may be wrong at 4K.** A consumer that ever
+obtains frames from a 4K path must re-measure rather than assume.
 
 Measured with a letter sheet of known width at a tape-measured distance, centered on-axis:
 

@@ -42,15 +42,23 @@ export interface Optics {
  *     FovType78 = 1, /// field of view 78°, medium view
  *     FovType65 = 2, /// field of view 65°, narrow view
  *
- * Note it states no AXIS — just "field of view 86°". The other official header,
- * `SDKs/remo_uvc_ctrl.en.h:55`, defines the same enum with no angles at all. The
- * repeats in `README.md`, `tiny2_specification.md` and `SDKs/CAPABILITIES-
- * REPORT.md` are our own documents downstream of that one header, so this is a
- * single source cited several times, not independent confirmations.
+ * The header states no AXIS — just "field of view 86°" — but OBSBOT's published
+ * materials give the Tiny 2 as 85.5° **DFOV, diagonal** (checked 2026-07-25;
+ * the same sources give pan as ±150°, corroborating GIMBAL_YAW_LIMIT_DEG below).
+ * So the SDK's "86°" is a rounded diagonal figure.
  *
- * Whatever axis those figures describe, they do not describe the horizontal
- * extent of the frames the server actually receives. Measured against a letter
- * sheet of known width at a tape-measured distance:
+ * That resolves the axis but does not close the gap. 85.5° diagonal at 16:9
+ * works out to tan(H) = 0.806 (HFOV 77.7°) against a measured 0.673 (67.9°) —
+ * the diagonal reading explains about half the discrepancy and leaves ~17%.
+ * The likeliest remainder: the published figure describes the 4K path, and the
+ * <=1080p stream is cropped. `obsbot_capture_snapshot` caps resolution at 1920,
+ * so every measurement behind these constants was taken on the <=1080p path.
+ * 1280 and 1920 were verified to share a field of view; 4K was never reachable.
+ *
+ * SCOPE: these values are correct for the frames obsbot_capture_snapshot
+ * produces, which is what this module exists to serve. They may be wrong at 4K —
+ * re-measure rather than assume if a 4K path is ever added. Measured against a
+ * letter sheet of known width at a tape-measured distance:
  *
  *     setting   spec    measured    tan(H) measured / tan(H) spec
  *     wide      86°     67.9°       0.722
