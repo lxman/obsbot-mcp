@@ -388,7 +388,7 @@ test("status decodes zoom position from block[0x04]", () => {
 });
 
 test("the discrete FOV modes carry their own inherent zoom", () => {
-  // medium and narrow report non-zero zoom position. The measured
+  // medium and narrow report non-zero zoom position. The derived
   // HORIZONTAL_FOV_DEG constants already include this crop, which is why the
   // aim tool passes zoom:1 rather than deriving a factor from zoomPercent.
   expect(decodeStatus(statusWith(1, 5)).zoomPercent).toBe(5);

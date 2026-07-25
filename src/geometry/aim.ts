@@ -29,112 +29,119 @@ export interface Optics {
   mirrored?: boolean;
 }
 
+const toRad = (deg: number): number => (deg * Math.PI) / 180;
+const toDeg = (rad: number): number => (rad * 180) / Math.PI;
+
 /**
  * Horizontal field of view of the CAPTURE STREAM for each FOV setting, in
- * degrees. These are MEASURED against a physical Tiny 2 (2026-07-25), not taken
- * from OBSBOT's SDK — the two disagree, and the measured values are the ones
- * this module needs.
+ * degrees — DERIVED, not three separate measurements.
  *
- * The vendor's figures come from OBSBOT's own C++ SDK header,
- * `libdev_v2.1.0_8/include/dev/dev.hpp:486-488`:
+ * Earlier revisions carried wide/medium/narrow as three independently measured
+ * absolutes at +/-3 degrees each. That threw away the most precise thing known
+ * about them: the RATIOS between the modes are measured to ~0.05%, roughly 60x
+ * better than any of the absolutes, so three free values let the modes drift out
+ * of proportion with each other for no reason.
  *
- *     FovType86 = 0, /// field of view 86°, wide view
- *     FovType78 = 1, /// field of view 78°, medium view
- *     FovType65 = 2, /// field of view 65°, narrow view
+ * One anchor plus measured magnifications instead. The anchor's uncertainty
+ * still propagates, but it now moves all three together, which is the honest
+ * representation of what is known.
  *
- * The header states no AXIS — just "field of view 86°" — but OBSBOT's published
- * materials give the Tiny 2 as 85.5° **DFOV, diagonal** (checked 2026-07-25;
- * the same sources give pan as ±150°, corroborating GIMBAL_YAW_LIMIT_DEG below).
- * So the SDK's "86°" is a rounded diagonal figure.
+ * MEASURED 2026-07-25 by solving the camera intrinsics from pure gimbal
+ * rotations. A camera that only rotates induces an exact homography
+ * H = K R K^-1 between views, with no dependence on scene depth, so frames at
+ * known gimbal angles determine the focal lengths outright. No distance is
+ * measured anywhere — the gimbal angle is the ruler. That is what makes this
+ * tighter than the tape-measured letter sheet behind the old +/-3 degrees.
  *
- * The diagonal reading explains about half the gap (85.5° diagonal at 16:9 gives
- * tan(H) = 0.806 vs a measured 0.673). The rest is the 16:9 crop, verified by
- * driving the camera at its native modes through ffmpeg/dshow:
- *   - 4K is NOT wider than 1080p. Same scene, fixed pose, 3840x2160 vs
- *     1920x1080: a frame-spanning feature pair measured 343 vs 337 px at equal
- *     display width. Same FOV within ~2%.
- *   - The 4:3 modes ARE wider. At 4000x3000, tan(H) ~= 0.690 and tan(V) ~= 0.518
- *     give a diagonal of ~82°, matching the published 85.5° within the ~3%
- *     precision of the measurement.
- * So 85.5° DFOV describes the full-sensor 4:3 mode, and every 16:9 mode is
- * cropped from it. The 16:9 diagonal is ~75°, which is why "86°" never
- * reconciled with anything measured here.
+ * Six rotations (pitch +/-10, +/-20; yaw +/-10) over a static scene, 313-1243
+ * inliers each, gave fx = 1452-1455 px on a 1920-wide frame across every subset
+ * — a spread of 0.2% — which is HFOV 66.84-66.90. Rounded to 67. This also
+ * independently reproduces an earlier pan-and-track measurement of 66.4.
  *
- * SCOPE: correct for 16:9 capture at any resolution — every frame
- * obsbot_capture_snapshot produces. A 4:3 capture path would need re-measuring;
- * those are wider, and the aspect-derived tan(V) changes too. Measured against a
- * letter sheet of known width at a tape-measured distance:
+ * The per-mode magnifications come from fitting a similarity transform between
+ * frames at each setting on a fixed scene (275 and 683 inliers, 0.48 and 0.44 px
+ * residual). They are pure ratios, so they are unaffected by which capture
+ * format the measurement went through — which matters, because the 1080p pixel
+ * formats do NOT share a field of view (see the note on the capture path below).
  *
- *     setting   spec    measured    tan(H) measured / tan(H) spec
- *     wide      86°     67.9°       0.722
- *     medium    78°     60.2°       0.719
- *     narrow    65°     50.0°       0.731
+ * Verified head-to-head on hardware, same feature and same start pose with only
+ * the constant differing: a target at u = +0.91 left a yaw residual of -0.823
+ * degrees under the old 68 and -0.274 under 67.
  *
- * The ratio is constant at 0.724 ± 0.006, so the spec numbers have the correct
- * relative structure and a uniformly wrong absolute scale — one scale error, not
- * three bad values. (Measured medium/wide tangent ratio 0.865 vs the spec's
- * 0.868, agreeing to 0.3%.) Neither a 16:9 diagonal reading (which would give
- * 0.872) nor 4:3 (0.80) accounts for 0.724; the likeliest cause is that the
- * stream is a further crop of the sensor, which the Tiny 2's digital AI framing
- * would explain. The cause does not change what the module needs.
+ * CAPTURE FORMAT WARNING: MJPEG 1920x1080 is a 1.201x crop of YUYV 1920x1080 on
+ * this camera — same resolution, different window onto the sensor. These
+ * constants describe the WIDE field, which is what `obsbot_capture_snapshot`
+ * delivers. `obsbot_capture_preview` pins MJPEG and therefore shows ~20% less.
+ * Any future measurement through ffmpeg must state its pixel format; a
+ * resolution alone does not identify the field.
  *
- * Two independent methods agree on wide, which is what makes this trustworthy:
- *   - Panning a known gimbal angle and tracking features across the frame
- *     (distance-independent): 66.4°, reproducible across three features and two
- *     pan angles.
- *   - A letter sheet of known width at a measured distance (gimbal-independent):
- *     67.9°.
- * They share no assumptions, so their agreement also confirms the gimbal's
- * degrees are honest 1:1 — an 86° FOV would have required the gimbal to
- * under-report by 39%.
- *
- * Uncertainty is roughly ±3°, dominated by the distance measurement. Values are
- * rounded accordingly; do not add decimal places without re-measuring.
+ * SCOPE: 16:9 capture at any resolution. A 4:3 path would need re-measuring.
  */
+export const WIDE_HFOV_DEG = 67;
+
+/**
+ * Linear magnification of each FOV setting relative to the wide field.
+ *
+ * MEASURED 2026-07-25. These are the precise part of the pair: the ratios are
+ * good to ~0.05% where the anchor above is good to perhaps 0.5%.
+ *
+ * The continuous zoom writes to this same scale rather than multiplying on top
+ * of it — `narrow` plus zoom ratio 1.5 measures 2.509, the same as `wide` plus
+ * 1.5 (2.501), not 1.47 x 2.5. The discrete modes and the zoom control are two
+ * ways of writing to one magnification scale, which is why setting zoom ratio
+ * 1.0 does not reliably clear `custom`: it is the same optical state as `wide`.
+ */
+export const FOV_MAGNIFICATION: Record<FovType, number> = {
+  wide: 1,
+  medium: 1.15060,
+  narrow: 1.47073,
+};
+
 export const HORIZONTAL_FOV_DEG: Record<FovType, number> = {
-  wide: 68,
-  medium: 60,
-  narrow: 50,
+  wide: 2 * toDeg(Math.atan(Math.tan(toRad(WIDE_HFOV_DEG / 2)) / FOV_MAGNIFICATION.wide)),
+  medium: 2 * toDeg(Math.atan(Math.tan(toRad(WIDE_HFOV_DEG / 2)) / FOV_MAGNIFICATION.medium)),
+  narrow: 2 * toDeg(Math.atan(Math.tan(toRad(WIDE_HFOV_DEG / 2)) / FOV_MAGNIFICATION.narrow)),
 };
 
 /**
  * Empirical correction applied on top of the aspect-derived vertical half-angle.
- * MEASURED (2026-07-25), not geometric.
+ * MEASURED, not geometric.
  *
- * Square-pixel geometry says tan(V) = tan(H) · (height/width) — for 16:9 that is
- * 0.5625. Hardware says the vertical field is about 10% shorter than that:
- * measured tan(V)/tan(H) ≈ 0.505, hence this factor of 0.505/0.5625 ≈ 0.898.
+ * Square-pixel geometry says tan(V) = tan(H) * (height/width) — 0.5625 at 16:9.
+ * Hardware says the vertical field is shorter than that; this factor carries the
+ * difference.
  *
- * Ten measurements, two methods that cannot contaminate each other:
- *   - Eight known-pitch tilts tracking six different point features (box corner,
- *     box circle, bottle cap, bowl, doorknob, board corner, wall art), in BOTH
- *     directions and at two angles: tan(V) = 0.340..0.364, mean 0.344. There is a
- *     ~5% directional asymmetry (down 0.344, up 0.362) that no single constant
- *     can capture — it mirrors the yaw asymmetry where +150 lands at 149 but
- *     −150 lands at −147.
- *   - One yaw-only solve at pitch 39: yawing at a non-zero pitch sweeps a cone,
- *     so features acquire a vertical drift that pins pitch and tan(V) jointly.
- *     This used ONLY the yaw motor, whose 1:1 scale was already established, so
- *     the pitch motor merely had to hold a pose rather than be trusted. Result:
- *     tan(V) = 0.327 at 8.2 px RMS, with the geometric 0.379 fitting distinctly
- *     worse at 13.8 px.
+ * MEASURED 2026-07-25 from the same intrinsics solve as WIDE_HFOV_DEG above.
+ * fy came out 1502-1520 px across every subset of six rotations, implying this
+ * factor at 0.957-0.967. Rounded to 0.957.
  *
- * That last measurement is why this constant exists rather than a note in the
- * docs. It solved for the true pitch as a by-product: 39.55° against a reported
- * 39°, robust to within 1.4% across every tan(V) from 0.31 to 0.40. **The pitch
- * motor is honest**, so the shortfall is genuinely optical and cannot be blamed
- * on the gimbal. Without that, "tan(V) is short" and "pitch under-reports by
- * 11%" were indistinguishable, and picking either would have been a guess.
+ * This REPLACES an earlier value of 0.898, which was 7% low. That figure came
+ * from a measurement this project's own history recorded as inconclusive: the
+ * constant itself was off by about 6.2%, versus the ~4.3% effect it was trying
+ * to capture — roughly 1.4x the effect itself, not an order of magnitude off.
  *
- * SCOPE: measured on the 16:9 capture path, the only one this server uses. The
- * aspect term is retained so the geometry stays visible and scales sensibly, but
- * this correction has been verified at 16:9 ONLY — a 4:3 capture path needs its
- * own measurement rather than this factor.
+ * The up/down asymmetry is ~1%, not the ~5% once believed: solving from the
+ * up-tilt alone gives 0.957 and from the down-tilt alone 0.967. One constant
+ * captures that comfortably. Do NOT reintroduce a two-branch vertical constant
+ * on the strength of the old figure. Both candidate explanations for a genuine
+ * asymmetry were tested and eliminated — the principal point is centred (cx, cy
+ * within a few px of frame centre in every solve) and radial distortion is
+ * negligible (k1 ~= -0.02).
+ *
+ * Verified head-to-head on hardware, same feature and same start pose with only
+ * this constant differing: a target at v = -0.83 left a pitch residual of -0.597
+ * degrees under 0.898 and +0.072 under 0.957, an 8x improvement that lands
+ * inside the noise.
+ *
+ * Known limit: the intrinsics fit carries 2.4-2.8 px rms, not sub-pixel, so
+ * something is unmodelled — most likely the entrance pupil sitting off the
+ * gimbal's rotation axes, which translates the lens as it turns and is
+ * depth-dependent. Sampling was symmetric so it should not bias fx or fy, but do
+ * not claim more precision than that.
+ *
+ * SCOPE: measured on the 16:9 capture path. A 4:3 path needs its own measurement.
  */
-export const VERTICAL_TANGENT_CORRECTION = 0.898;
-
-const toRad = (deg: number): number => (deg * Math.PI) / 180;
-const toDeg = (rad: number): number => (rad * 180) / Math.PI;
+export const VERTICAL_TANGENT_CORRECTION = 0.957;
 
 // The tangents are the useful form for every downstream calculation, so they are
 // computed once here and the degree-valued halfAngles() is a thin wrapper. Going
@@ -144,8 +151,9 @@ const halfAngleTangents = (optics: Optics, frame: Frame): { tanH: number; tanV: 
   const tanH = Math.tan(toRad(HORIZONTAL_FOV_DEG[optics.fov] / 2)) / zoom;
   // Vertical starts from the horizontal half-angle scaled by the frame aspect —
   // what square-pixel geometry predicts — then takes the measured correction,
-  // because hardware says the real vertical field is ~10% shorter than that.
-  // See VERTICAL_TANGENT_CORRECTION for the ten measurements behind it.
+  // because hardware says the real vertical field is ~4.3% shorter than that.
+  // See VERTICAL_TANGENT_CORRECTION for the intrinsics solve over six gimbal
+  // rotations behind it.
   return { tanH, tanV: tanH * (frame.height / frame.width) * VERTICAL_TANGENT_CORRECTION };
 };
 
@@ -167,9 +175,9 @@ export interface Offset {
  * A rectilinear lens maps angle through a tangent: tan(theta) = u * tan(hfov/2),
  * where u is the normalized offset from center. The linear approximation is
  * exact at the center and again at the edge, and wrong in between — always low,
- * peaking near 3.5 degrees at u ~= 0.53 on the wide setting. That error is the
- * difference between landing on target and visibly hunting, so the tangent form
- * is not optional.
+ * peaking near 1.58 degrees at u ~= 0.55 on the wide setting (WIDE_HFOV_DEG =
+ * 67). That error is the difference between landing on target and visibly
+ * hunting, so the tangent form is not optional.
  *
  * Signs: +yaw pans camera-LEFT and image x grows rightward, so the yaw term is
  * negated. +pitch tilts DOWN and image y grows downward, so the pitch term is
