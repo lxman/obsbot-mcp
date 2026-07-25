@@ -6,11 +6,17 @@ but are untracked. This document covers the *Linux platform gap*: why the positi
 Linux, what was measured against real hardware, and the conclusion reached about
 submitting a patch to the `uvcvideo` kernel driver.
 
-**Bottom line: a patch is justified, but not the one that was drafted. The draft
-was scrapped — it broke pan/tilt writes and its central justification was
-wrong. A corrected patch requires real design work and has not been written.**
+**Bottom line: a patch is justified. The first draft was scrapped — it broke
+pan/tilt writes and its central justification was wrong. A corrected patch has
+since been written, compiled, and verified against hardware; see §9.**
 
-Nothing was ever sent to the `linux-media` mailing list.
+Nothing has yet been sent to the `linux-media` mailing list.
+
+> **Update 2026-07-25.** Sections 1–4 and 7 stand as written. Section 5's
+> "what must be built first" is done (§9). Section 8 contained an error and has
+> been corrected. Section 3 has been extended with a finding that materially
+> strengthens the case: the staleness is not merely a consequence of this
+> device's non-compliance — it bounds *every* UVC PTZ camera.
 
 ---
 
@@ -115,6 +121,32 @@ Two separate blockers:
    Confirmed independently via `VIDIOC_QUERY_EXT_CTRL` reporting `flags=0x0`
    (no `V4L2_CTRL_FLAG_VOLATILE`).
 
+   **The one-sample ceiling (added 2026-07-25).** The above understates the
+   problem, and the understatement matters. Trace `ctrl->loaded` on a
+   *fully compliant* PTZ camera — one that does set D3 and does send Control
+   Change interrupts:
+
+   1. `S_CTRL(PAN=90)` → `uvc_ctrl_commit_entity()` clears `loaded`
+   2. first `G_CTRL` → live `GET_CUR`, sets `loaded = 1`
+   3. every subsequent `G_CTRL` → cache hit, same value returned until the
+      move ends and an interrupt finally arrives
+
+   So a compliant device yields **exactly one live sample per write**, and
+   nothing thereafter. If userspace reads promptly after commanding the move —
+   the natural thing to do — that one sample is taken before the actuator has
+   appreciably moved, and is therefore the least useful sample available.
+   Polling is useless on any UVC PTZ camera, compliant or not.
+
+   The Tiny 2 does not even get that one sample: `uvc_ctrl_get_flags()` clears
+   `AUTO_UPDATE` and re-derives it from `GET_INFO`, which on this device is a
+   constant `0x03` with D3 (bit 3) clear (§2.2). Step 1 above never fires, so
+   the value is stale from the very first read.
+
+   This reframes the argument. The bug is not "OBSBOT is non-compliant, work
+   around it" — it is that `uvcvideo`'s caching assumption is wrong for the
+   control class, with this device's firmware bug merely making an already
+   broken case worse.
+
 2. **Linux won't let userspace bypass it while streaming.** usbfs requires the
    caller to have *claimed* the interface to issue interface-directed control
    requests. Claiming requires detaching `uvcvideo` from the VideoControl
@@ -215,12 +247,26 @@ wrong for the *control class*, not for one vendor. Polling `GET_CUR` is the
 natural fit for mechanical position — which is exactly what macOS does, and why
 it works.
 
-Two spec details support this:
+Three spec details support this:
 
 - Table 4-22 makes **`GET_CUR` mandatory and `SET_CUR` optional** for this
   control. The spec treats it as fundamentally something you *read*.
 - `V4L2_CTRL_FLAG_VOLATILE` already exists in V4L2 for precisely this concept.
   `uvcvideo` simply never applies it here.
+- **§4.2.2.1.15 concedes the granularity outright** (found 2026-07-25, quoted
+  verbatim from the PDF):
+
+  > If both Relative and Absolute Controls are supported, a SET_CUR to the
+  > Relative Control with a value other than 0x00 shall result in a Control
+  > Change interrupt for the Absolute Control **at the end of the movement**
+
+  The spec defines notification *at the end* of a move and specifies nothing
+  for its duration. This is the single most valuable citation available: it
+  turns "the interrupt mechanism is unfit for a continuously-varying quantity"
+  from an assertion that has to be argued into a reading of the document. It is
+  also, pointedly, the argument the scrapped draft was reaching for when it
+  fabricated a quote from §4.2.2.1.14 — the real support was two subsections
+  away the whole time.
 
 ### Evidence available to support a submission
 
@@ -232,6 +278,8 @@ Two spec details support this:
 
 ### What must be built first
 
+*All three items below are done. See §9 for the resulting patch.*
+
 1. **Fix the RMW path.** `uvc_ctrl_set()` must keep using the last commanded
    setpoint while `__uvc_ctrl_get()` reads live. That requires a shadow buffer
    separate from `UVC_CTRL_DATA_CURRENT`. Modest, but real kernel design.
@@ -240,6 +288,13 @@ Two spec details support this:
 3. **State the tradeoff honestly in the commit message:** on devices that merely
    echo the setpoint, this costs a USB round trip per read and gains nothing.
    Burying that is how a patch dies on the second pass.
+
+Item 1 was ultimately solved by *inverting* the prescription rather than
+following it. Adding a setpoint shadow means modifying the write path, which is
+exactly where the v1 regression lived. Adding a separate **read** buffer instead
+leaves `uvc_ctrl_set()` byte-for-byte unchanged, which makes the §4.1 regression
+impossible by construction rather than merely avoided — a materially better
+thing to be able to tell a reviewer.
 
 ### Odds
 
@@ -264,13 +319,20 @@ was the right call and remains so; it is not a placeholder awaiting a kernel fix
 `obsbot_gimbal_position` on Linux reports last-commanded position, not live —
 correctly documented as such.
 
-### Outstanding correction
+### Outstanding correction — resolved in v0.4.1
 
-`README.md` currently states that a kernel patch **"has been submitted
-upstream."** That is false and was released. It should be corrected on its own
-merits, with a CHANGELOG entry owning the error. Do **not** submit a patch in
-order to make the README retroactively true — fixing the docs and pursuing the
-patch are independent decisions.
+`README.md` previously stated that a kernel patch **"has been submitted
+upstream."** That was false and had been released. It was corrected on its own
+merits in v0.4.1, which now says a patch "is being worked on," with a CHANGELOG
+entry owning the error. The same release removed a second fabrication: the claim
+that `UVC_QUIRK_OBSBOT_MIN_SETTINGS` was merged precedent — that macro has never
+existed (§7).
+
+The principle stated at the time still holds and is worth restating now that a
+patch does exist: fixing the docs and pursuing the patch were independent
+decisions, and the README should not run ahead of reality again. It should not
+say "submitted" until something has actually been sent, nor "merged" unless it
+merges.
 
 ---
 
@@ -308,9 +370,114 @@ leaving D3/D4 clear on a gimbal that both takes seconds to complete a move and
 repositions itself autonomously during AI tracking. Per §2.4.4 both bits are
 mandatory, along with Control Change interrupts.
 
-If OBSBOT fixed this, **live position would work on Linux with an unmodified
-kernel** — `uvc_ctrl_status_event()` already handles the invalidation — and
-`obsbot_gimbal_move_speed` could be re-enabled on Linux for free.
+### Correction (2026-07-25) — this section previously overstated the fix
+
+It originally read:
+
+> If OBSBOT fixed this, **live position would work on Linux with an unmodified
+> kernel** — `uvc_ctrl_status_event()` already handles the invalidation — and
+> `obsbot_gimbal_move_speed` could be re-enabled on Linux for free.
+
+**That is wrong.** Setting D3 would restore only the *first* invalidation path
+in §3 — `uvc_ctrl_commit_entity()` clearing `loaded` after a `SET_CUR`. As the
+one-sample-ceiling analysis in §3 shows, that yields exactly one live reading
+per write and a frozen cache thereafter. It would not give live position, and it
+would not be enough to re-enable `obsbot_gimbal_move_speed`, which needs
+position sampled *throughout* a burst in order to bound it.
+
+Getting live position from firmware alone would require the camera to emit
+Control Change interrupts continuously for the duration of every move — which
+§5 argues no reasonable firmware does, and which the spec does not ask for
+(§4.2.2.1.15 defines the interrupt at the *end* of the movement).
+
+The firmware bug is real and worth reporting on its own merits: D3/D4 are
+mandatory per §2.4.4, the constant `0x03` is plainly a stub, and a compliant
+`GET_INFO` would at least restore the one-sample-per-write behaviour that other
+PTZ cameras get. But it is **not** an alternative to the kernel patch. The two
+are independent, and the kernel patch is the one that actually delivers live
+position.
+
+---
+
+## 9. The patch as built (2026-07-25)
+
+Written against mainline `3dab139d4` (v7.2-rc4 era), compiled, booted, and
+tested on hardware. **Not yet sent.**
+
+Artifacts live outside the repo at `~/kernel-uvc-work/`:
+`0001-media-uvcvideo-query-pan-tilt-position-from-the-devi.patch` (mailable,
+`git format-patch` with reviewer notes below the tearline), `commit-msg.txt`,
+`tearline-notes.txt`, and `kernel-src/` (shallow mainline clone with the commit
+applied).
+
+### Shape
+
+49 insertions across two files; `checkpatch.pl --strict` clean.
+
+- `include/uapi/linux/uvcvideo.h` — new `UVC_CTRL_FLAG_VOLATILE (1 << 9)`
+- `uvc_ctrl.c` — new `UVC_CTRL_DATA_LIVE` slot (`UVC_CTRL_DATA_LAST` 6→7); the
+  flag set on the `CT_PANTILT_ABSOLUTE_CONTROL` entry in `uvc_ctrls[]`; a new
+  `__uvc_ctrl_load_live()`; `__uvc_ctrl_get()` taking the live path when the
+  flag is set and `!ctrl->dirty`; `V4L2_CTRL_FLAG_VOLATILE` surfaced in
+  `__uvc_query_v4l2_ctrl()`
+
+The write path is untouched — see §5 for why that inversion matters.
+
+Two invariants were re-verified on the current tree: `UVC_CTRL_DATA_LAST` is
+referenced in exactly one place (the `kzalloc` in `uvc_ctrl_add_info()`), so
+bumping it is safe; and `uvc_ctrl_get_flags()` clears only
+`GET_CUR|SET_CUR|AUTO_UPDATE|ASYNCHRONOUS`, so a statically-set volatile bit
+survives device probing.
+
+### Hardware results
+
+Kernel `7.2.0-rc4+`, OBSBOT Tiny 2 (`3564:fef8`) on `/dev/video2`.
+
+| Test | Result |
+|---|---|
+| **Two-axis write** (the §4.1 regression) | **Pass** — `S_CTRL(pan=90°)` then `S_CTRL(tilt=20°)` 18 ms later, with pan still reading 0 at the time of the second write; both axes reached target (324000 / 72000). Pan not cancelled. |
+| **Live position during slew** | **Pass** — 0→5→17→24→36→47→55→66→78→90°, arrival at t+1690 ms, steady after |
+| **`V4L2_CTRL_FLAG_VOLATILE` surfaced** | **Pass** — `flags=volatile` on pan/tilt, absent on zoom |
+| **Concurrent streaming** | **Pass** — 100 frames at 30.5 fps while polling position at 5 Hz; no frame loss |
+| **No collateral damage** | **Pass** — integrated UVC 1.00 webcam (`1bcf:28cc`) enumerates, all controls read, streams clean |
+
+The two-axis result is the one that matters most: it is the specific failure
+that killed v1, and the 18 ms gap with pan still reading 0 means the hazard was
+genuinely exercised, not merely absent by luck of timing.
+
+### Build notes, for whoever repeats this
+
+Secure Boot must be off (self-built kernels are unsigned; this also lifts the
+lockdown that blocks `usbmon` via debugfs). Seed `.config` from
+`/boot/config-$(uname -r)`, blank `CONFIG_SYSTEM_TRUSTED_KEYS` and
+`CONFIG_SYSTEM_REVOCATION_KEYS` (they point at Canonical certs that do not exist
+outside their build), disable `DEBUG_INFO_BTF` and set `DEBUG_INFO_NONE`, then
+`make localmodconfig` — 267 modules instead of ~7000, ~15 min on 12 cores rather
+than a couple of hours.
+
+**Do not stage the build tree under `/tmp`.** It is cleared on reboot, and this
+work requires a reboot by construction. A 2.1 GB checkout and a completed build
+were lost that way; everything now lives under `~/kernel-uvc-work/`.
+
+### Open questions carried into the submission
+
+Both are raised in the tearline notes rather than defended, on the §7 reasoning
+that this list responds better to flexibility than to a dug-in position:
+
+1. **uapi placement.** `UVC_CTRL_FLAG_VOLATILE` sits in the uapi header beside
+   the other eight flags, though `struct uvc_xu_control_mapping` has no `flags`
+   member and userspace cannot set it. Keeping the namespace in one file avoids
+   a silent collision if bit 9 is ever added on the uapi side, but a maintainer
+   may prefer it in the driver-private header.
+2. **Scope.** Only pan/tilt is flagged. Zoom, focus, roll and iris absolute have
+   the same character, and focus-absolute under continuous autofocus is
+   arguably the more widespread case — but widening it costs a control transfer
+   per read across a great many devices on the strength of one camera's
+   evidence.
+
+A third item, noted but not raised: `uvc_mapping_get_xctrl_compound()` still
+reads `UVC_CTRL_DATA_CURRENT`. No compound control is flagged volatile, so
+there is no bug, but it is the second wiring point if the concept generalises.
 
 ---
 
@@ -370,7 +537,8 @@ attempt can rely on that.
 
 ## Appendix B — reproduction tooling
 
-Scratchpad artifacts from this session (ephemeral; rebuild as needed):
+Scratchpad artifacts from the original session (**lost** — they lived under
+`/tmp` and were cleared by a reboot; rebuild as needed):
 
 - `libusb_pantilt.c` — polls `GET_CUR` on `0x0D`, timestamped. Detaches the
   kernel driver; **incompatible with streaming**.
@@ -378,6 +546,15 @@ Scratchpad artifacts from this session (ephemeral; rebuild as needed):
   reattaches cleanly.
 - `kernel-src/` — sparse mainline checkout (`include/uapi/linux`,
   `drivers/media/usb/uvc`, `scripts`) for `checkpatch.pl` / `get_maintainer.pl`.
+
+Surviving artifacts from the patch session live under `~/kernel-uvc-work/`
+(§9) and are not ephemeral.
+
+Note that with the patched kernel installed, the libusb tooling is no longer
+needed to observe live position — plain `v4l2-ctl --get-ctrl=pan_absolute`
+does it, concurrently with streaming, without detaching anything. That also
+sidesteps the `uvcvideo` reprobe fragility recorded in
+`fact_libusb_uvcvideo_reprobe_fragility`.
 
 The UVC 1.5 specification PDF set (`USB_Video_Class_1_5.zip`, obtained from
 USB-IF) is **not** committed — it is third-party copyrighted material. Download
