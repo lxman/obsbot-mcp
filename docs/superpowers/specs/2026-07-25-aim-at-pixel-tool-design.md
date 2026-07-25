@@ -58,11 +58,20 @@ as the image, so passing them back is a copy.
 
 ## 4. Preconditions — all refusals, none silent
 
-One `recvStatus()` call supplies every check.
+**Sleep is handled by the existing gate, not by refusing.** `obsbot_gimbal_move` already goes through
+`gate(camera)` → `ensureReady`, which wakes a sleeping camera, waits for it to settle, and self-heals
+a dropped connection. This tool uses the same gate, so the §2 stale-block hazard is removed *by
+construction*: **status is read after the gate returns**, when the camera is known awake. An earlier
+draft refused on `awake: false`, which would have been both unfriendly and redundant.
+
+Note that waking moves the gimbal — it un-stows and levels. That is fine here because the pose is
+read after the gate, never before.
+
+One `recvStatus()` call then supplies the remaining checks.
 
 | condition | action |
 |---|---|
-| `awake` is false | refuse — a sleeping camera serves stale blocks (§2) |
+| gate fails (`unreachable` / `wake-timeout`) | return the gate's own error unchanged |
 | `aiMode` ≠ `no-tracking` | refuse, naming the mode, and point at `obsbot_ai_track` |
 | `fovMode` is 0/1/2 | proceed, using that mode's measured constant |
 | `fovMode` is 3 | refuse — custom zoom active, magnification uncalibrated |
@@ -131,8 +140,10 @@ independent of this tool.
 
 Against fakes, in the existing `test/mcp/tools.test.ts` style:
 
-- Each refusal path returns `ok: false` with a message naming the cause: asleep, tracking active
-  (with the mode), custom zoom.
+- Each refusal path returns `ok: false` with a message naming the cause: tracking active (with the
+  mode), custom zoom, unrecognised FOV mode.
+- A sleeping camera is **woken**, not refused: a fake whose first status read reports asleep and
+  whose later reads report awake must still produce a successful aim.
 - Each discrete FOV mode selects the matching constant — a fake reporting narrow must produce an
   offset consistent with 50°, not 68°. This is the test that would have caught the original
   parameter-guessing design.
