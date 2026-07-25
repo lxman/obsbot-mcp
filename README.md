@@ -421,3 +421,44 @@ only run it under supervision:**
 npm run build
 node scripts/e2e.mjs
 ```
+
+### Testing changes through the live MCP tools
+
+Two traps make it easy to test the wrong thing and believe the result. Both cost real time on
+2026-07-25.
+
+**Rebuilding and reloading is not enough — kill stale server processes first.** The MCP server runs
+from `dist/`, so a source change is invisible until `npm run build`. But reloading the server in your
+MCP client does *not* guarantee your new code executes: this project coordinates concurrent clients
+by electing a single owner process (see `IPC-DESIGN.md`), and a reload spawns a *new* client that
+**forwards its tool calls to whatever owner is already running**. An orphaned server from a previous
+session stays the owner, so the new process advertises its own up-to-date tool list while every call
+is executed by old code.
+
+That failure is deceptive rather than loud: a newly added tool *appears* in the tool list and can be
+called, but behaves like the old build. Two reloads in a row will not fix it. Check for orphans
+before concluding anything:
+
+```powershell
+# Windows
+Get-CimInstance Win32_Process -Filter "Name='node.exe'" |
+  Where-Object { $_.CommandLine -like "*Obsbot*" } |
+  Select-Object ProcessId, CreationDate
+```
+
+```bash
+# Linux / macOS
+pgrep -af "obsbot.*dist/index.js"
+```
+
+Kill everything older than your build, then reload. The cheapest positive confirmation is to call a
+tool whose *output* changed — `obsbot_status` gaining a field, say — rather than one whose
+description changed, since descriptions come from the new process either way.
+
+**A preview holds the camera stream, so snapshots fail while one is open.** `obsbot_capture_preview`
+and `obsbot_capture_snapshot` both need the device stream, and on Windows the second one gets
+`Camera is in use by another application`. This matters for the aim loop above, which is
+snapshot → aim → snapshot: stop the preview around each snapshot, or work without one. Gimbal control
+is unaffected — it uses control transfers, not the stream — so `obsbot_aim_at_pixel` itself works fine
+with a preview running. The error text suggests `source: "virtual"` or `"ndi"` as a workaround; do not
+take it when aiming, since those frames are framed by OBSBOT Center rather than this camera's optics.

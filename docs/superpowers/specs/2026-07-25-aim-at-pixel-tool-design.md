@@ -167,6 +167,43 @@ Against fakes, in the existing `test/mcp/tools.test.ts` style:
 Hardware verification is a separate step and is **not** a substitute for the above: point the camera
 at a target, aim at its pixel, and confirm it lands centered.
 
+### Hardware verification — PASSED 2026-07-25
+
+Run against a physical Tiny 2 through the live MCP tools.
+
+**Aim.** Target was a brass doorknob at pixel (26, 404) in a 1920×1080 frame — `u = −0.97`, effectively
+the frame edge, which is the worst case for every error source in the chain. The tool commanded
+yaw +33.27° / pitch −4.90°, matching an independent hand computation exactly. After the move the
+doorknob sat at (930, 528) against a frame centre of (960, 540):
+
+**residual 1.21° yaw, 0.43° pitch** — inside the gimbal's own ±1° readback quantisation, of which
+0.27° is accounted for by the gimbal reporting 33 for a commanded 33.27.
+
+That single result validates the whole chain at once: the measured 68° horizontal FOV (the vendor's
+86° would have overshot by roughly 8°), the tangent mapping (a linear one would have missed by ~1.6°
+at this offset), the §3 sign conventions (a sign error would have swung the camera the wrong way
+entirely), the 0.898 vertical correction, and reading `fovMode` from the device rather than being
+told it.
+
+**Refusals**, each confirmed to return `ok:false` and leave the pose unchanged — measured, by reading
+the pose either side of a refusal, not assumed:
+
+| case | result |
+|---|---|
+| AI tracking active | refused, naming mode `normal` and `obsbot_ai_track` |
+| custom zoom active | refused, naming `zoom 60%` and the remedy |
+| non-16:9 frame (1080×1920) | refused, diagnosed as transposed |
+| pixel outside frame (+5000 and −40) | refused |
+
+**Live decode.** `fovMode` tracked wide → custom → wide across real control changes, and
+`zoomPercent` read **60** for a UVC ratio of 1.6 — exactly `(1.6 − 1) × 100`, a fourth data point
+confirming the encoding derived in §2 from three.
+
+**The custom-zoom remedy was itself verified.** Final review flagged that the refusal message
+originally advised `obsbot_zoom_uvc {ratio:1}` with no evidence it clears `FovTypeNull`. The message
+now advises `obsbot_image_fov`, and that was confirmed on hardware to clear both the mode and the
+zoom position.
+
 ## 9. Known limitations
 
 - **Zoom and aiming do not compose** (§4). Lifting this needs the UVC ratio → magnification mapping
