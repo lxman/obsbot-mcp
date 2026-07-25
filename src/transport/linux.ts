@@ -98,8 +98,13 @@ export class LinuxTransport implements ObsbotTransport {
     // V4L2 pan_absolute/tilt_absolute return arc-seconds, but the rest of
     // the codebase expects degrees (Windows DirectShow convention). This is
     // the last-commanded value, not a live reading — see the class comment.
+    // Degrees as a float. Rounding to whole degrees here threw away precision
+    // the device already gave us — aimAtPixel adds its offset to this value,
+    // so every discarded fraction became aim error. The RANGE above still
+    // rounds: min/max are advertised bounds, not a live pose, and no
+    // arithmetic accumulates on them.
     if (property === 0 || property === 1) {
-      result.value = Math.round(result.value / ARCSEC_PER_DEG);
+      result.value = result.value / ARCSEC_PER_DEG;
     }
     return result;
   }

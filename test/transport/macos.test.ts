@@ -77,6 +77,15 @@ test("camCtrlGet converts tilt arc-seconds to degrees, preserving sign", async (
   expect(await t.camCtrlGet(1)).toEqual({ value: -9, flags: 2 });
 });
 
+test("pan/tilt keep their sub-degree precision", async () => {
+  // The device reports arcseconds. 3600 arcsec = 1 deg, so 21510 arcsec is
+  // 5.975 deg. Rounding that to 6 discards real precision the hardware gave
+  // us, and aimAtPixel adds its offset to whatever this returns.
+  const helper = makeFakeHelper(21510);
+  const t = new MacosTransport(helper);
+  expect(await t.camCtrlGet(0)).toEqual({ value: 5.975, flags: 2 });
+});
+
 test("camCtrlGet passes non-gimbal properties through unscaled", async () => {
   const helper = makeFakeHelper(1234);
   const t = new MacosTransport(helper);

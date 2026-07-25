@@ -96,8 +96,13 @@ export class MacosTransport implements ObsbotTransport {
    */
   async camCtrlGet(property: number): Promise<{ value: number; flags: number }> {
     const result = await this.helper.camCtrlGet(property);
+    // Degrees as a float. Rounding to whole degrees here threw away precision
+    // the device already gave us — aimAtPixel adds its offset to this value,
+    // so every discarded fraction became aim error. camCtrlRange above still
+    // rounds: min/max are advertised bounds, not a live pose, and no
+    // arithmetic accumulates on them.
     if (isGimbalAxis(property)) {
-      result.value = Math.round(result.value / ARCSEC_PER_DEG);
+      result.value = result.value / ARCSEC_PER_DEG;
     }
     return result;
   }
