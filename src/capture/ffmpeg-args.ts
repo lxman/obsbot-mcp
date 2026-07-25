@@ -122,6 +122,21 @@ export function buildRecordArgs(o: {
   ];
 }
 
+// The preview is for a human to watch the gimbal move, so smooth motion is the
+// point of it. Left to negotiate, dshow settles on 1080p30 — but the Tiny 2
+// advertises mjpeg 1920x1080 all the way to 60fps (`ffmpeg -list_options`,
+// confirmed 2026-07-25, and the 60fps stream verified to actually sustain 60
+// rather than merely claim it). Pinning the codec is what makes 60 reachable:
+// yuyv422 tops out at 30 for 1080p, so without -vcodec the negotiation can land
+// on a format that cannot deliver it.
+//
+// Deliberately NOT here: -fflags nobuffer / -flags low_delay / -framedrop. Those
+// were tried against an apparent half-second lag on 2026-07-25 and appeared to
+// fix it, but re-running the untouched arguments showed them equally fast — the
+// lag was CPU contention from a concurrent test suite, not these flags. Adding
+// them would have been treating a symptom that no longer reproduced. -framedrop
+// in particular is a real trade (drop frames under load instead of running
+// permanently late) and should be a deliberate choice, not a leftover.
 export function buildPreviewArgs(o: { videoName: string }): string[] {
   const isV4l2 = o.videoName.startsWith("/dev/");
   if (isV4l2) {
@@ -130,6 +145,7 @@ export function buildPreviewArgs(o: { videoName: string }): string[] {
       "-f", "v4l2",
       "-input_format", "mjpeg",
       "-video_size", "1920x1080",
+      "-framerate", "60",
       "-i", o.videoName,
       "-window_title", "OBSBOT preview",
     ];
@@ -137,6 +153,7 @@ export function buildPreviewArgs(o: { videoName: string }): string[] {
   // dshow path
   return [
     "-hide_banner", "-loglevel", "warning", "-f", "dshow",
+    "-framerate", "60", "-video_size", "1920x1080", "-vcodec", "mjpeg",
     "-i", `video=${o.videoName}`,
     "-window_title", "OBSBOT preview",
   ];
