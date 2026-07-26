@@ -34,6 +34,7 @@
 #include <ksproxy.h>
 #include <ksmedia.h>
 #include <vidcap.h>
+#include <dvdmedia.h>   // VIDEOINFOHEADER2 (virtual cameras negotiate it)
 #include <control.h>       // IMediaControl
 #include <wincodec.h>      // WIC (JPEG encode / scale / flip)
 #include <wincrypt.h>      // CryptBinaryToStringA (base64)
@@ -907,6 +908,12 @@ static void doSnapshot(const std::string& pathArg, long maxDim, long quality, lo
     UINT width = 0, height = 0, stride = 0;
     bool bottomUp = true;
     bool haveFrame = false;
+    // Kept only to make the failure explain itself. "could not obtain a frame"
+    // covers two very different states -- no samples ever arrived, versus samples
+    // arrived but their header was one we could not read -- and telling them apart
+    // from outside the helper is impossible.
+    long biggestSample = 0;
+    std::string unreadHeader;
 
     for (;;) {
       Sleep(settle);
@@ -925,18 +932,37 @@ static void doSnapshot(const std::string& pathArg, long maxDim, long quality, lo
         continue;
       }
 
+      if (size > biggestSample) biggestSample = size;
+
+      // The frame's dimensions live in a BITMAPINFOHEADER, but which struct wraps
+      // it depends on who we connected to. A UVC capture pin gives VIDEOINFOHEADER;
+      // virtual cameras (OBSBOT Center's, and software sources generally) commonly
+      // negotiate VIDEOINFOHEADER2 instead, which carries the same bitmap header at
+      // a different offset. Reading only the first left width/height at 0 for those
+      // sources, so every frame was rejected and the snapshot failed as "could not
+      // obtain a frame" -- while samples were arriving the whole time.
       AM_MEDIA_TYPE cmt{};
-      if (SUCCEEDED(grabber->GetConnectedMediaType(&cmt)) &&
-          cmt.formattype == FORMAT_VideoInfo && cmt.pbFormat) {
-        VIDEOINFOHEADER* vih = (VIDEOINFOHEADER*)cmt.pbFormat;
-        width = (UINT)vih->bmiHeader.biWidth;
-        LONG bh = vih->bmiHeader.biHeight;
-        bottomUp = bh > 0;
-        height = (UINT)(bh > 0 ? bh : -bh);
-        stride = ((width * 3 + 3) & ~3u);
+      if (SUCCEEDED(grabber->GetConnectedMediaType(&cmt))) {
+        const BITMAPINFOHEADER* bih = nullptr;
+        if (cmt.formattype == FORMAT_VideoInfo && cmt.pbFormat &&
+            cmt.cbFormat >= sizeof(VIDEOINFOHEADER)) {
+          bih = &((VIDEOINFOHEADER*)cmt.pbFormat)->bmiHeader;
+        } else if (cmt.formattype == FORMAT_VideoInfo2 && cmt.pbFormat &&
+                   cmt.cbFormat >= sizeof(VIDEOINFOHEADER2)) {
+          bih = &((VIDEOINFOHEADER2*)cmt.pbFormat)->bmiHeader;
+        }
+        if (bih) {
+          width = (UINT)bih->biWidth;
+          LONG bh = bih->biHeight;
+          bottomUp = bh > 0;
+          height = (UINT)(bh > 0 ? bh : -bh);
+          stride = ((width * 3 + 3) & ~3u);
+        } else {
+          unreadHeader = guidToString(cmt.formattype);
+        }
+        if (cmt.pbFormat) CoTaskMemFree(cmt.pbFormat);
+        if (cmt.pUnk) cmt.pUnk->Release();
       }
-      if (cmt.pbFormat) CoTaskMemFree(cmt.pbFormat);
-      if (cmt.pUnk) cmt.pUnk->Release();
 
       haveFrame = width > 0 && height > 0 && buf.size() >= (size_t)stride * height;
       if (haveFrame && (meanLuma(buf.data(), buf.size()) >= 6.0 || slept >= 2500)) break;
@@ -946,7 +972,22 @@ static void doSnapshot(const std::string& pathArg, long maxDim, long quality, lo
 
     if (control) control->Stop();
 
-    if (!haveFrame) { err("snapshot: could not obtain a frame"); goto cleanup; }
+    if (!haveFrame) {
+      std::ostringstream o;
+      o << "snapshot: could not obtain a frame";
+      if (!unreadHeader.empty()) {
+        o << " (samples arrived -- largest " << biggestSample << " bytes -- but the connected"
+             " format header " << unreadHeader << " is not one this helper can read)";
+      } else if (biggestSample == 0) {
+        o << " (the graph ran but no samples ever arrived within "
+          << slept << "ms; the source may be enabled without anything feeding it)";
+      } else {
+        o << " (largest sample " << biggestSample << " bytes was smaller than the "
+          << width << "x" << height << " frame it declared)";
+      }
+      err(o.str());
+      goto cleanup;
+    }
 
     std::string b64;
     UINT outW = 0, outH = 0;
