@@ -1,5 +1,38 @@
 # Changelog
 
+## [0.6.1] — 2026-07-26
+
+### Added: published to the MCP Registry
+
+`server.json` declares the server to the [MCP Registry](https://registry.modelcontextprotocol.io)
+as `io.github.lxman/obsbot-mcp`, and the release workflow publishes it there after npm. The
+registry hosts metadata only — it points at the npm package, and proves we own that package by
+reading the new `mcpName` field back off the published tarball and comparing it to `server.json`'s
+`name`. That is why this release exists: 0.6.0 shipped without `mcpName`, so it could not be
+registered at all.
+
+Publishing upstream is worth more than the entry itself. Downstream directories ingest from the
+registry rather than taking submissions — PulseMCP pulls daily, and the VS Code/Copilot gallery
+reads registries too.
+
+Authentication is GitHub OIDC, the same trust mechanism the npm publish already uses, so there is
+no new token to rotate. It also pins the name: OIDC only authorises the `io.github.lxman/`
+namespace, and any other prefix would mean switching to DNS authentication on a domain we own.
+
+`glama.json` claims the [Glama listing](https://glama.ai/mcp/servers/xo6s3opadl), which has existed
+since Glama auto-indexed the public repo and has been showing an empty tool list.
+
+Registry metadata is immutable once published — a version can never be edited, only superseded — so
+`test/version-sync.test.ts` grew three tests. Two pin `server.json`'s *two* version fields to
+`package.json`, and one pins `server.json`'s `name` to `mcpName`, because a mismatch there surfaces
+only at publish time, on a tag, as a permissions error that does not name its own cause. The release
+workflow's tag guard now checks `server.json` directly rather than trusting that the tagged commit
+was the one CI went green on, and it waits for npm to actually serve the new version before invoking
+`mcp-publisher` — `npm publish` returns before the registry API is guaranteed to serve it, and that
+API is what the validator reads.
+
+No behaviour changes. The camera-facing surface is identical to 0.6.0.
+
 ## [0.6.0] — 2026-07-26
 
 ### Added: frame a region, not just a pixel

@@ -107,9 +107,20 @@ jobs:
         run: |
           TAG="${GITHUB_REF_NAME#v}"
           PKG="$(node -p "require('./package.json').version")"
-          echo "tag=$TAG package.json=$PKG"
+          # server.json is published to the MCP Registry from this same commit and
+          # carries the version twice. test/version-sync.test.ts already pins both
+          # to package.json, but the release flow deliberately does not re-run the
+          # suite, so the tag guard checks them directly rather than trusting that
+          # the tagged commit was the one CI went green on.
+          SRV="$(node -p "require('./server.json').version")"
+          SRVPKG="$(node -p "require('./server.json').packages[0].version")"
+          echo "tag=$TAG package.json=$PKG server.json=$SRV/$SRVPKG"
           if [ "$TAG" != "$PKG" ]; then
             echo "::error::tag $TAG does not match package.json version $PKG"
+            exit 1
+          fi
+          if [ "$TAG" != "$SRV" ] || [ "$TAG" != "$SRVPKG" ]; then
+            echo "::error::tag $TAG does not match server.json ($SRV / packages[0] $SRVPKG)"
             exit 1
           fi
       - run: npm ci
@@ -179,6 +190,50 @@ jobs:
           else
             npm publish
           fi
+      # The MCP Registry stores metadata only — it points at the npm package we
+      # just published and verifies we own it by fetching that package and
+      # comparing its `mcpName` to server.json's `name`. So this must run after
+      # npm publish, and never on a dry run (there would be nothing to point at).
+      - name: Wait for npm to serve the new version
+        if: inputs.dry_run != true
+        run: |
+          # npm publish returns before the registry API is guaranteed to serve the
+          # new version, and the MCP Registry validator reads that API. Poll for
+          # the exact version rather than sleeping a guessed interval.
+          VERSION="$(node -p "require('./package.json').version")"
+          for i in $(seq 1 30); do
+            MCP_NAME="$(npm view "obsbot-mcp@$VERSION" mcpName 2>/dev/null || true)"
+            if [ -n "$MCP_NAME" ]; then
+              echo "npm is serving obsbot-mcp@$VERSION with mcpName=$MCP_NAME"
+              # A wrong mcpName fails the publish below with a permissions error
+              # that does not name the cause, so say it plainly here instead.
+              EXPECTED="$(node -p "require('./server.json').name")"
+              if [ "$MCP_NAME" != "$EXPECTED" ]; then
+                echo "::error::published mcpName '$MCP_NAME' != server.json name '$EXPECTED'"
+                exit 1
+              fi
+              exit 0
+            fi
+            echo "attempt $i: obsbot-mcp@$VERSION not visible yet (or missing mcpName), retrying in 10s"
+            sleep 10
+          done
+          echo "::error::npm did not serve obsbot-mcp@$VERSION with an mcpName within 5 minutes"
+          exit 1
+      - name: Install mcp-publisher
+        if: inputs.dry_run != true
+        run: |
+          curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" \
+            | tar xz mcp-publisher
+          ./mcp-publisher --help > /dev/null
+      # GitHub OIDC — the same trust mechanism as the npm publish above, so there
+      # is no token to rotate. It authorises the `io.github.lxman/*` namespace
+      # because the workflow runs in a repo owned by that account.
+      - name: Authenticate to MCP Registry (OIDC)
+        if: inputs.dry_run != true
+        run: ./mcp-publisher login github-oidc
+      - name: Publish server to MCP Registry
+        if: inputs.dry_run != true
+        run: ./mcp-publisher publish
       - name: Create GitHub Release (real tags only)
         if: github.event_name == 'push'
         env:

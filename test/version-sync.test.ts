@@ -44,3 +44,33 @@ test.each(SITES)("%s declares the same version as package.json", (_label, path, 
   expect(match, `no version declaration matched in ${path}`).not.toBeNull();
   expect(match![1]).toBe(pkgVersion);
 });
+
+// ---------------------------------------------------------------------------
+//  server.json is the MCP Registry's copy of the same facts, and it drifts in
+//  two ways the sites above cannot: it carries the version twice (the server's
+//  own, and the npm package's), and its `name` has to equal package.json's
+//  `mcpName` or the registry rejects the publish with "you do not have
+//  permission to publish this server". Both are parsed rather than regexed —
+//  it is our JSON, so there is no reason to read it as bytes.
+// ---------------------------------------------------------------------------
+
+const pkg = JSON.parse(read("package.json"));
+const serverJson = JSON.parse(read("server.json"));
+const npmPackage = serverJson.packages?.find((p: { registryType: string }) => p.registryType === "npm");
+
+test("server.json declares the same version as package.json", () => {
+  expect(serverJson.version).toBe(pkgVersion);
+});
+
+test("server.json's npm package entry pins the published version", () => {
+  expect(npmPackage, "no npm package entry in server.json").toBeDefined();
+  expect(npmPackage.identifier).toBe(pkg.name);
+  expect(npmPackage.version).toBe(pkgVersion);
+});
+
+test("server.json name matches package.json mcpName", () => {
+  // The registry verifies npm ownership by reading mcpName out of the published
+  // tarball's package.json and comparing it to this name. A mismatch is only
+  // discovered at publish time, on a tag, after npm has already gone out.
+  expect(pkg.mcpName).toBe(serverJson.name);
+});

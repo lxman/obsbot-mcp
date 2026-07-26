@@ -1,0 +1,31 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.lxman/obsbot-mcp",
+  "title": "OBSBOT Tiny 2 Camera Control",
+  "description": "Control an OBSBOT Tiny 2 camera: pan/tilt/zoom, AI tracking, focus, exposure, snapshots, recording",
+  "version": "0.6.1",
+  "websiteUrl": "https://github.com/lxman/obsbot-mcp#readme",
+  "repository": {
+    "url": "https://github.com/lxman/obsbot-mcp",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "obsbot-mcp",
+      "version": "0.6.1",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "OBSBOT_LOG_FILE",
+          "description": "Path to append a debug log to. Unset means no log file.",
+          "format": "filepath",
+          "isRequired": false,
+          "isSecret": false
+        }
+      ]
+    }
+  ]
+}
