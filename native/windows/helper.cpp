@@ -34,6 +34,7 @@
 #include <ksproxy.h>
 #include <ksmedia.h>
 #include <vidcap.h>
+#include <dvdmedia.h>   // VIDEOINFOHEADER2 (virtual cameras negotiate it)
 #include <control.h>       // IMediaControl
 #include <wincodec.h>      // WIC (JPEG encode / scale / flip)
 #include <wincrypt.h>      // CryptBinaryToStringA (base64)
@@ -825,9 +826,122 @@ static double meanLuma(const BYTE* buf, size_t n) {
   return count ? sum / count : 0.0;
 }
 
-static void doSnapshot(const std::string& pathArg, long maxDim, long quality, long settleMs) {
-  std::string path = pathArg.empty() ? g_openPath : pathArg;
-  if (path.empty()) { err("snapshot: no device open and no path given"); return; }
+// Convert one of the packed/planar YUV layouts a source may hand us into the
+// BGR24 that encodeJpegBase64 expects. BT.601, studio range (Y 16-235), which is
+// what UVC and the virtual-camera sources here emit.
+//
+// This exists because the sample grabber cannot always be given RGB24: see
+// grabFrame's RGB24 note. Rather than hope DirectShow inserts a converter, we do
+// the conversion ourselves, which is deterministic and testable.
+static inline BYTE clamp8(int v) { return (BYTE)(v < 0 ? 0 : (v > 255 ? 255 : v)); }
+
+static void yuvPixelToBgr(int y, int u, int v, BYTE* out) {
+  const int c = y - 16, d = u - 128, e = v - 128;
+  out[0] = clamp8((298 * c + 516 * d + 128) >> 8);            // B
+  out[1] = clamp8((298 * c - 100 * d - 208 * e + 128) >> 8);  // G
+  out[2] = clamp8((298 * c + 409 * e + 128) >> 8);            // R
+}
+
+// Returns false if `fourcc` is not a layout we handle. `out` is top-down BGR24.
+static bool yuvToBgr24(const std::string& fourcc, const BYTE* s, size_t len,
+                       UINT w, UINT h, std::vector<BYTE>& out, UINT& outStride) {
+  if (w == 0 || h == 0) return false;
+  outStride = (w * 3 + 3) & ~3u;
+  const size_t need = (size_t)outStride * h;
+
+  const bool nv12 = (fourcc == "NV12");
+  const bool nv21 = (fourcc == "NV21");
+  const bool i420 = (fourcc == "I420" || fourcc == "IYUV");
+  const bool yv12 = (fourcc == "YV12");
+  const bool yuy2 = (fourcc == "YUY2" || fourcc == "YUYV");
+  const bool uyvy = (fourcc == "UYVY");
+  if (!(nv12 || nv21 || i420 || yv12 || yuy2 || uyvy)) return false;
+
+  const size_t ySize = (size_t)w * h;
+  if (yuy2 || uyvy) {
+    if (len < ySize * 2) return false;
+  } else if (len < ySize + ySize / 2) {
+    return false;
+  }
+  out.assign(need, 0);
+
+  if (yuy2 || uyvy) {
+    // Packed 4:2:2 — one chroma pair per two horizontal pixels.
+    for (UINT row = 0; row < h; ++row) {
+      const BYTE* sp = s + (size_t)row * w * 2;
+      BYTE* dp = out.data() + (size_t)row * outStride;
+      for (UINT col = 0; col < w; col += 2) {
+        int y0, y1, u, v;
+        if (yuy2) { y0 = sp[0]; u = sp[1]; y1 = sp[2]; v = sp[3]; }
+        else      { u = sp[0]; y0 = sp[1]; v = sp[2]; y1 = sp[3]; }
+        yuvPixelToBgr(y0, u, v, dp);
+        if (col + 1 < w) yuvPixelToBgr(y1, u, v, dp + 3);
+        sp += 4; dp += 6;
+      }
+    }
+    return true;
+  }
+
+  // Planar 4:2:0 — one chroma pair per 2x2 block.
+  const BYTE* yPlane = s;
+  const BYTE* p1 = s + ySize;                    // NV12/NV21: interleaved; I420: U; YV12: V
+  const BYTE* p2 = p1 + ySize / 4;               // planar second chroma plane
+  const UINT cw = (w + 1) / 2;
+  for (UINT row = 0; row < h; ++row) {
+    const BYTE* yp = yPlane + (size_t)row * w;
+    BYTE* dp = out.data() + (size_t)row * outStride;
+    const UINT crow = row / 2;
+    for (UINT col = 0; col < w; ++col) {
+      const UINT ccol = col / 2;
+      int u, v;
+      if (nv12 || nv21) {
+        const BYTE* uv = p1 + (size_t)crow * cw * 2 + (size_t)ccol * 2;
+        u = nv12 ? uv[0] : uv[1];
+        v = nv12 ? uv[1] : uv[0];
+      } else {
+        const BYTE* a = p1 + (size_t)crow * cw + ccol;
+        const BYTE* b = p2 + (size_t)crow * cw + ccol;
+        u = i420 ? *a : *b;   // YV12 stores V first
+        v = i420 ? *b : *a;
+      }
+      yuvPixelToBgr(yp[col], u, v, dp);
+      dp += 3;
+    }
+  }
+  return true;
+}
+
+// One attempt at building a capture graph and pulling a frame from it.
+//
+// `pinRgb24` is the whole reason this is a separate function. A UVC camera
+// reaches RGB24 on its own (its MJPEG decoder emits it), so the default asks for
+// RGB24 and gets a frame ready to encode. A software source need not: OBSBOT
+// Center's virtual camera offers only nv12/yuv420p/yuyv422, and with RGB24
+// pinned DirectShow reports a successful connection, runs the graph, and then
+// delivers NOTHING -- no error, no samples, ever. Measured 2026-07-25.
+//
+// So the caller retries with pinRgb24=false, which accepts the source's own
+// layout and leaves the conversion to yuvToBgr24. The retry is deliberately NOT
+// the default: relaxing the subtype changes what the negotiation picks, and on
+// the real camera a different pick can mean a different FRAME RATE, which on
+// this hardware means a different field of view (1080p60 is a 1.214x crop of
+// 1080p30). The aiming geometry is calibrated on the 30fps field, so the device
+// path's negotiation must stay exactly as it was.
+struct GrabResult {
+  bool ok = false;
+  bool busy = false;
+  std::string error;
+  std::vector<BYTE> buf;
+  UINT width = 0, height = 0, stride = 0;
+  bool bottomUp = true;
+  std::string fourcc;        // grabber's connected subtype, e.g. "NV12"; empty => RGB24
+  std::string srcFormat;     // source pin's negotiated format, for reporting
+  const char* pinUsed = "preview";
+  long biggestSample = 0;
+};
+
+static GrabResult grabFrame(const std::string& path, long settleMs, bool pinRgb24) {
+  GrabResult r;
 
   IGraphBuilder* graph = nullptr;
   ICaptureGraphBuilder2* builder = nullptr;
@@ -836,8 +950,6 @@ static void doSnapshot(const std::string& pathArg, long maxDim, long quality, lo
   IBaseFilter* nullF = nullptr;
   ISampleGrabber* grabber = nullptr;
   IMediaControl* control = nullptr;
-  std::string srcFormat;
-  const char* pinUsed = "preview";
 
   HRESULT hr = CoCreateInstance(CLSID_FilterGraph, nullptr, CLSCTX_INPROC_SERVER,
                                 IID_IGraphBuilder, (void**)&graph);
@@ -845,21 +957,21 @@ static void doSnapshot(const std::string& pathArg, long maxDim, long quality, lo
     hr = CoCreateInstance(CLSID_CaptureGraphBuilder2, nullptr, CLSCTX_INPROC_SERVER,
                           IID_ICaptureGraphBuilder2, (void**)&builder);
   if (SUCCEEDED(hr)) hr = builder->SetFiltergraph(graph);
-  if (FAILED(hr)) { errHr("snapshot: graph create failed", hr); goto cleanup; }
+  if (FAILED(hr)) { r.error = "snapshot: graph create failed"; goto cleanup; }
 
   src = bindFilterByPath(path);
-  if (!src) { err("snapshot: device path not found: " + path); goto cleanup; }
+  if (!src) { r.error = "snapshot: device path not found: " + path; goto cleanup; }
   hr = graph->AddFilter(src, L"src");
-  if (FAILED(hr)) { errHr("snapshot: AddFilter(src) failed", hr); goto cleanup; }
+  if (FAILED(hr)) { r.error = "snapshot: AddFilter(src) failed"; goto cleanup; }
 
   hr = CoCreateInstance(CLSID_SampleGrabber, nullptr, CLSCTX_INPROC_SERVER,
                         IID_IBaseFilter, (void**)&grabberF);
   if (SUCCEEDED(hr)) hr = grabberF->QueryInterface(IID_ISampleGrabber, (void**)&grabber);
-  if (FAILED(hr)) { errHr("snapshot: SampleGrabber unavailable", hr); goto cleanup; }
+  if (FAILED(hr)) { r.error = "snapshot: SampleGrabber unavailable"; goto cleanup; }
   {
     AM_MEDIA_TYPE mt{};
     mt.majortype = MEDIATYPE_Video;
-    mt.subtype = MEDIASUBTYPE_RGB24;
+    if (pinRgb24) mt.subtype = MEDIASUBTYPE_RGB24;
     mt.formattype = GUID_NULL;
     grabber->SetMediaType(&mt);
     grabber->SetBufferSamples(TRUE);
@@ -869,44 +981,54 @@ static void doSnapshot(const std::string& pathArg, long maxDim, long quality, lo
   if (SUCCEEDED(hr)) hr = CoCreateInstance(CLSID_NullRenderer, nullptr, CLSCTX_INPROC_SERVER,
                                            IID_IBaseFilter, (void**)&nullF);
   if (SUCCEEDED(hr)) hr = graph->AddFilter(nullF, L"null");
-  if (FAILED(hr)) { errHr("snapshot: add filters failed", hr); goto cleanup; }
+  if (FAILED(hr)) { r.error = "snapshot: add filters failed"; goto cleanup; }
 
   // Connect: source -> grabber -> null. Try PREVIEW pin first, then CAPTURE.
   hr = builder->RenderStream(&PIN_CATEGORY_PREVIEW, &MEDIATYPE_Video, src, grabberF, nullF);
   if (FAILED(hr)) {
-    pinUsed = "capture";
+    r.pinUsed = "capture";
     hr = builder->RenderStream(&PIN_CATEGORY_CAPTURE, &MEDIATYPE_Video, src, grabberF, nullF);
   }
   if (FAILED(hr)) {
     // Failure to connect the capture pin is the contention signal.
-    {
-      std::ostringstream o;
-      o << "camera in use by another application (hr=0x" << std::hex << (unsigned long)hr << ")";
-      busy(o.str());
-    }
+    std::ostringstream o;
+    o << "camera in use by another application (hr=0x" << std::hex << (unsigned long)hr << ")";
+    r.busy = true;
+    r.error = o.str();
     goto cleanup;
   }
 
-  srcFormat = describeSourceFormat(src);
+  r.srcFormat = describeSourceFormat(src);
 
   hr = graph->QueryInterface(IID_IMediaControl, (void**)&control);
   if (SUCCEEDED(hr)) hr = control->Run();
   if (FAILED(hr)) {
-    {
-      std::ostringstream o;
-      o << "camera in use by another application (hr=0x" << std::hex << (unsigned long)hr << ")";
-      busy(o.str());
-    }
+    std::ostringstream o;
+    o << "camera in use by another application (hr=0x" << std::hex << (unsigned long)hr << ")";
+    r.busy = true;
+    r.error = o.str();
     goto cleanup;
   }
 
   {
     long settle = settleMs > 0 ? settleMs : 600;
+    // How long to keep retrying past the caller's settle before giving up on a
+    // frame that is absent or black.
+    //
+    // This used to be a flat 2500ms, which silently made every lazily-connecting
+    // source look broken. NDI Webcam Input does not open its network connection
+    // until something opens the DirectShow filter, and MEASURED 2026-07-25 it
+    // needs 4-5s from that open to its first real frame (2000/2600/3200/4000ms
+    // all returned black; 5000/6000/8000 returned the picture). Under the flat
+    // cap the only way to see an NDI frame was to pass a settleMs larger than the
+    // whole connect time, which no caller could be expected to guess.
+    //
+    // Budgeting from the caller's settle instead means a slow source gets the
+    // grace it needs without the caller having to pre-pay for it in settleMs.
+    const long GRACE_MS = 5000;
+    const long deadline = settle + GRACE_MS;
     long slept = 0;
-    std::vector<BYTE> buf;
-    UINT width = 0, height = 0, stride = 0;
-    bool bottomUp = true;
-    bool haveFrame = false;
+    std::string unreadHeader;
 
     for (;;) {
       Sleep(settle);
@@ -914,52 +1036,78 @@ static void doSnapshot(const std::string& pathArg, long maxDim, long quality, lo
 
       long size = 0;
       if (FAILED(grabber->GetCurrentBuffer(&size, nullptr)) || size <= 0) {
-        if (slept >= 2500) break;
+        if (slept >= deadline) break;
         settle = 400;
         continue;
       }
-      buf.resize(size);
-      if (FAILED(grabber->GetCurrentBuffer(&size, (long*)buf.data()))) {
-        if (slept >= 2500) break;
+      r.buf.resize(size);
+      if (FAILED(grabber->GetCurrentBuffer(&size, (long*)r.buf.data()))) {
+        if (slept >= deadline) break;
         settle = 400;
         continue;
       }
+      if (size > r.biggestSample) r.biggestSample = size;
 
+      // The frame's dimensions live in a BITMAPINFOHEADER, but which struct wraps
+      // it depends on who we connected to. A UVC capture pin gives
+      // VIDEOINFOHEADER; software sources commonly negotiate VIDEOINFOHEADER2,
+      // which carries the same bitmap header at a different offset.
       AM_MEDIA_TYPE cmt{};
-      if (SUCCEEDED(grabber->GetConnectedMediaType(&cmt)) &&
-          cmt.formattype == FORMAT_VideoInfo && cmt.pbFormat) {
-        VIDEOINFOHEADER* vih = (VIDEOINFOHEADER*)cmt.pbFormat;
-        width = (UINT)vih->bmiHeader.biWidth;
-        LONG bh = vih->bmiHeader.biHeight;
-        bottomUp = bh > 0;
-        height = (UINT)(bh > 0 ? bh : -bh);
-        stride = ((width * 3 + 3) & ~3u);
+      if (SUCCEEDED(grabber->GetConnectedMediaType(&cmt))) {
+        const BITMAPINFOHEADER* bih = nullptr;
+        if (cmt.formattype == FORMAT_VideoInfo && cmt.pbFormat &&
+            cmt.cbFormat >= sizeof(VIDEOINFOHEADER)) {
+          bih = &((VIDEOINFOHEADER*)cmt.pbFormat)->bmiHeader;
+        } else if (cmt.formattype == FORMAT_VideoInfo2 && cmt.pbFormat &&
+                   cmt.cbFormat >= sizeof(VIDEOINFOHEADER2)) {
+          bih = &((VIDEOINFOHEADER2*)cmt.pbFormat)->bmiHeader;
+        }
+        if (bih) {
+          r.width = (UINT)bih->biWidth;
+          LONG bh = bih->biHeight;
+          r.bottomUp = bh > 0;
+          r.height = (UINT)(bh > 0 ? bh : -bh);
+          r.stride = ((r.width * 3 + 3) & ~3u);
+          r.fourcc = (cmt.subtype == MEDIASUBTYPE_RGB24) ? "" : subtypeName(cmt.subtype);
+        } else {
+          unreadHeader = guidToString(cmt.formattype);
+        }
+        if (cmt.pbFormat) CoTaskMemFree(cmt.pbFormat);
+        if (cmt.pUnk) cmt.pUnk->Release();
       }
-      if (cmt.pbFormat) CoTaskMemFree(cmt.pbFormat);
-      if (cmt.pUnk) cmt.pUnk->Release();
 
-      haveFrame = width > 0 && height > 0 && buf.size() >= (size_t)stride * height;
-      if (haveFrame && (meanLuma(buf.data(), buf.size()) >= 6.0 || slept >= 2500)) break;
-      if (slept >= 2500) break;
+      // Only an RGB24 frame can be size-checked against the RGB stride here; a
+      // YUV layout is smaller by design and is validated by yuvToBgr24.
+      const bool sized = r.fourcc.empty()
+                             ? r.buf.size() >= (size_t)r.stride * r.height
+                             : r.buf.size() > 0;
+      r.ok = r.width > 0 && r.height > 0 && sized;
+      // meanLuma reads BGR triplets, so it is only meaningful for RGB24. For a
+      // YUV frame take what arrived; a black-frame retry would misread it.
+      if (r.ok && (!r.fourcc.empty() || meanLuma(r.buf.data(), r.buf.size()) >= 6.0 ||
+                   slept >= deadline)) break;
+      if (slept >= deadline) break;
       settle = 500;  // still black: give exposure more time
     }
 
     if (control) control->Stop();
 
-    if (!haveFrame) { err("snapshot: could not obtain a frame"); goto cleanup; }
-
-    std::string b64;
-    UINT outW = 0, outH = 0;
-    hr = encodeJpegBase64(buf.data(), width, height, bottomUp, stride, maxDim, quality,
-                          b64, outW, outH);
-    if (FAILED(hr)) { errHr("snapshot: JPEG encode failed", hr); goto cleanup; }
-
-    std::ostringstream o;
-    o << ",\"mime\":\"image/jpeg\",\"width\":" << outW << ",\"height\":" << outH
-      << ",\"sourceFormat\":\"" << jsonEscape(srcFormat) << "\""
-      << ",\"sourcePin\":\"" << pinUsed << "\""
-      << ",\"base64\":\"" << b64 << "\"";
-    ok(o.str());
+    if (!r.ok) {
+      std::ostringstream o;
+      o << "snapshot: could not obtain a frame [source pin negotiated "
+        << (r.srcFormat.empty() ? "nothing" : r.srcFormat) << ", pin " << r.pinUsed << "]";
+      if (!unreadHeader.empty()) {
+        o << " (samples arrived -- largest " << r.biggestSample << " bytes -- but the connected"
+             " format header " << unreadHeader << " is not one this helper can read)";
+      } else if (r.biggestSample == 0) {
+        o << " (the graph ran but no samples ever arrived within " << slept
+          << "ms; the source may be enabled without anything feeding it)";
+      } else {
+        o << " (largest sample " << r.biggestSample << " bytes was smaller than the "
+          << r.width << "x" << r.height << " frame it declared)";
+      }
+      r.error = o.str();
+    }
   }
 
 cleanup:
@@ -970,6 +1118,54 @@ cleanup:
   if (src) src->Release();
   if (builder) builder->Release();
   if (graph) graph->Release();
+  return r;
+}
+
+static void doSnapshot(const std::string& pathArg, long maxDim, long quality, long settleMs) {
+  std::string path = pathArg.empty() ? g_openPath : pathArg;
+  if (path.empty()) { err("snapshot: no device open and no path given"); return; }
+
+  GrabResult g = grabFrame(path, settleMs, /*pinRgb24=*/true);
+
+  // Retry ONLY on the signature of a source that cannot supply RGB24: the graph
+  // connected and ran, yet not one sample arrived. Anything else -- contention,
+  // a bad path, samples that arrived but did not fit -- is a real failure and is
+  // reported as-is rather than retried into a second, more confusing error.
+  if (!g.ok && !g.busy && g.biggestSample == 0) {
+    GrabResult native = grabFrame(path, settleMs, /*pinRgb24=*/false);
+    if (native.ok || native.biggestSample > 0) g = native;
+  }
+
+  if (g.busy) { busy(g.error); return; }
+  if (!g.ok) { err(g.error); return; }
+
+  const BYTE* pixels = g.buf.data();
+  std::vector<BYTE> converted;
+  bool bottomUp = g.bottomUp;
+  UINT stride = g.stride;
+  if (!g.fourcc.empty()) {
+    if (!yuvToBgr24(g.fourcc, g.buf.data(), g.buf.size(), g.width, g.height,
+                    converted, stride)) {
+      err("snapshot: source delivered " + g.fourcc + " (" + g.srcFormat +
+          "), which this helper cannot convert to RGB");
+      return;
+    }
+    pixels = converted.data();
+    bottomUp = false;  // every YUV layout handled here is written top-down
+  }
+
+  std::string b64;
+  UINT outW = 0, outH = 0;
+  HRESULT hr = encodeJpegBase64(pixels, g.width, g.height, bottomUp, stride, maxDim,
+                                quality, b64, outW, outH);
+  if (FAILED(hr)) { errHr("snapshot: JPEG encode failed", hr); return; }
+
+  std::ostringstream o;
+  o << ",\"mime\":\"image/jpeg\",\"width\":" << outW << ",\"height\":" << outH
+    << ",\"sourceFormat\":\"" << jsonEscape(g.srcFormat) << "\""
+    << ",\"sourcePin\":\"" << g.pinUsed << "\""
+    << ",\"base64\":\"" << b64 << "\"";
+  ok(o.str());
 }
 
 // Generic IAMCameraControl property set/range. `property` is a CameraControl

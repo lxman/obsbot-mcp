@@ -728,6 +728,21 @@ test("obsbot_capture_snapshot returns an image content block on success", async 
   expect(JSON.parse(text.text)).toEqual({ width: 1280, height: 720, source: "device" });
 });
 
+// The ceiling was 5000, which happened to be almost exactly what NDI Webcam Input
+// needs to hand over its first frame (measured 4-5s). That made the single value
+// that worked also the largest one permitted — a caller who hit a black frame had
+// nowhere left to go. The headroom above the slowest known source is the point,
+// so pin it rather than let it drift back down.
+test("snapshot settleMs allows well past the slowest known source, and still has a bound", async () => {
+  const transport = makeFakeTransport();
+  const tool = findTool(createTools(makeFakeMgr(transport)), "obsbot_capture_snapshot");
+  await tool.handler({ settleMs: 15000 });
+  expect(transport.snapshot).toHaveBeenCalledWith(
+    expect.objectContaining({ settleMs: 15000 }),
+  );
+  await expect(tool.handler({ settleMs: 15001 })).rejects.toThrow();
+});
+
 test("obsbot_capture_snapshot returns actionable text (no image) when the camera is busy", async () => {
   const transport = makeFakeTransport();
   transport.snapshot = vi.fn(async () => {
