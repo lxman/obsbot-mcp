@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.6.0] — 2026-07-26
 
 ### Added: frame a region, not just a pixel
 
