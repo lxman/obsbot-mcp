@@ -2578,3 +2578,60 @@ test("zoom_uvc reports settled:false rather than lying when the zoom never arriv
   expect(r.ok).toBe(true);
   expect(r.settled).toBe(false);
 });
+
+// --- declaring which feed a frame came from ---
+//
+// These tools turn a pixel into an angle using the CAMERA's optics, but they only
+// ever receive pixels. Nothing in x/y/frameWidth/frameHeight says which feed the
+// frame came from, so a frame that OBSBOT Center or OBS has reframed produces a
+// confidently wrong aim with ok:true. Until now the constraint lived only in prose
+// — the README and CHANGELOG both claimed these "refuse" virtual/ndi frames, which
+// they could not, having no way to tell.
+//
+// A blanket refusal would be wrong too: a feed configured as a true pass-through
+// aims correctly, verified on hardware against an NDI chain. So the caller
+// DECLARES the feed, `device` by default, and a non-device declaration comes back
+// in the result with the assumption it rests on stated explicitly.
+
+test("aim_at_pixel defaults to the device feed and says so", async () => {
+  const transport = makeFakeTransport();
+  const tool = findTool(
+    createTools(makeFakeMgr(transport), undefined, false, {}, FAST_MOTION),
+    "obsbot_aim_at_pixel",
+  );
+  const r = (await tool.handler({ x: 1200, y: 400, frameWidth: 1920, frameHeight: 1080 })) as
+    { ok: boolean; source: string; note?: string };
+  expect(r.ok).toBe(true);
+  expect(r.source).toBe("device");
+  expect(r.note).toBeUndefined();
+});
+
+test("aim_at_pixel accepts a declared alternative feed, and states what it is assuming", async () => {
+  const transport = makeFakeTransport();
+  const tool = findTool(
+    createTools(makeFakeMgr(transport), undefined, false, {}, FAST_MOTION),
+    "obsbot_aim_at_pixel",
+  );
+  const r = (await tool.handler({
+    x: 1200, y: 400, frameWidth: 1920, frameHeight: 1080, source: "ndi",
+  })) as { ok: boolean; source: string; note: string };
+  expect(r.ok).toBe(true);
+  expect(r.source).toBe("ndi");
+  expect(r.note).toMatch(/pass-through/i);
+  // It still aims — the declaration is not a refusal.
+  expect(transport.gimbalSet).toHaveBeenCalled();
+});
+
+test("zoom_to_fit carries the same declaration", async () => {
+  const transport = makeFakeTransport();
+  const tool = findTool(
+    createTools(makeFakeMgr(transport), undefined, false, {}, FAST_MOTION),
+    "obsbot_zoom_to_fit",
+  );
+  const r = (await tool.handler({
+    x: 720, y: 405, width: 480, height: 270, ...FULL_FRAME, source: "virtual",
+  })) as { ok: boolean; source: string; note: string };
+  expect(r.ok).toBe(true);
+  expect(r.source).toBe("virtual");
+  expect(r.note).toMatch(/pass-through/i);
+});

@@ -29,6 +29,34 @@ format the capture graph negotiated upstream, not the JPEG it hands back. Window
 absent means unknown, not wrong. See the correction below for why a frame without a stated
 format cannot safely be turned into an angle.
 
+### Changed
+
+- **`obsbot_aim_at_pixel` and `obsbot_zoom_to_fit` now take a `source` declaration**
+  (`device` by default — what every caller got implicitly before). These tools turn a pixel into
+  an angle using the *camera's* optics, but they only ever receive pixels: nothing in
+  `x`/`y`/`frameWidth`/`frameHeight` reveals which feed a frame came from. A `virtual` or `ndi`
+  frame is accepted rather than refused, because a feed configured as a true pass-through aims
+  correctly — measured against an OBS→NDI chain, a dedicated output at 1080p30 matched the
+  camera's own frame to fill 1.0000 and scale 1.03 ± 0.03. But the *same* chain through OBS's
+  canvas measured 0.900 scale with a 96px offset, wrong by 11% plus a fixed bias, and the reply
+  looked identical. So a non-device declaration comes back with that assumption stated.
+
+  **This corrects the 0.5.0 notes**, which listed "the frame came from a `virtual` or `ndi`
+  source" as a refusal condition. It never was one — the tools had no `source` parameter and no
+  way to detect it. The constraint was real; the enforcement was not.
+
+- **`obsbot_capture_preview` works on the alternative feeds.** It pinned `-vcodec mjpeg` at
+  1080p60 unconditionally, which is a fact about the Tiny 2's own capture pin and nothing else:
+  OBSBOT Center's virtual camera offers nv12/yuv420p/yuyv422 and the NDI Webcam devices offer
+  UYVY only, so the pin did not merely fail to buy 60fps — ffmpeg could not open the device at
+  all ("Could not set video options") and the preview never started. `device` still pins mjpeg/60;
+  the others negotiate.
+
+- **`obsbot_status` reports `focusMode`** (`auto`|`manual`|`unknown`). `focusPosition` appears
+  **only in manual mode**: under autofocus this camera echoes the last written value rather than
+  exposing the motor — it stayed pinned across a 40° pan, a 3.34x→1x zoom and 9s of settling —
+  so publishing it would read as a live focus distance while being stale.
+
 ### Fixed
 
 - **A zoom still ramping no longer silently corrupts an aim.** `obsbot_aim_at_pixel` and
