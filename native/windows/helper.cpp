@@ -1012,6 +1012,21 @@ static GrabResult grabFrame(const std::string& path, long settleMs, bool pinRgb2
 
   {
     long settle = settleMs > 0 ? settleMs : 600;
+    // How long to keep retrying past the caller's settle before giving up on a
+    // frame that is absent or black.
+    //
+    // This used to be a flat 2500ms, which silently made every lazily-connecting
+    // source look broken. NDI Webcam Input does not open its network connection
+    // until something opens the DirectShow filter, and MEASURED 2026-07-25 it
+    // needs 4-5s from that open to its first real frame (2000/2600/3200/4000ms
+    // all returned black; 5000/6000/8000 returned the picture). Under the flat
+    // cap the only way to see an NDI frame was to pass a settleMs larger than the
+    // whole connect time, which no caller could be expected to guess.
+    //
+    // Budgeting from the caller's settle instead means a slow source gets the
+    // grace it needs without the caller having to pre-pay for it in settleMs.
+    const long GRACE_MS = 5000;
+    const long deadline = settle + GRACE_MS;
     long slept = 0;
     std::string unreadHeader;
 
@@ -1021,13 +1036,13 @@ static GrabResult grabFrame(const std::string& path, long settleMs, bool pinRgb2
 
       long size = 0;
       if (FAILED(grabber->GetCurrentBuffer(&size, nullptr)) || size <= 0) {
-        if (slept >= 2500) break;
+        if (slept >= deadline) break;
         settle = 400;
         continue;
       }
       r.buf.resize(size);
       if (FAILED(grabber->GetCurrentBuffer(&size, (long*)r.buf.data()))) {
-        if (slept >= 2500) break;
+        if (slept >= deadline) break;
         settle = 400;
         continue;
       }
@@ -1070,8 +1085,8 @@ static GrabResult grabFrame(const std::string& path, long settleMs, bool pinRgb2
       // meanLuma reads BGR triplets, so it is only meaningful for RGB24. For a
       // YUV frame take what arrived; a black-frame retry would misread it.
       if (r.ok && (!r.fourcc.empty() || meanLuma(r.buf.data(), r.buf.size()) >= 6.0 ||
-                   slept >= 2500)) break;
-      if (slept >= 2500) break;
+                   slept >= deadline)) break;
+      if (slept >= deadline) break;
       settle = 500;  // still black: give exposure more time
     }
 

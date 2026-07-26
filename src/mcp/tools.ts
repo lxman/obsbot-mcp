@@ -322,7 +322,13 @@ const PRESET_NAME_MAX = 40;
 const snapshotSchema = withCamera({
   resolution: num().pipe(z.number().min(256).max(1920)).default(640),
   quality: num().pipe(z.number().min(1).max(100)).default(80),
-  settleMs: num().pipe(z.number().min(0).max(5000)).default(600),
+  // Ceiling raised from 5000 on 2026-07-25. A source that connects lazily needs
+  // longer than a UVC camera does to hand over its first frame — NDI Webcam Input
+  // measured 4-5s — and 5000 sat right on that threshold, so the one value that
+  // worked was also the largest the schema allowed. The helper now budgets its
+  // own grace period on top of this, so callers rarely need to raise it at all;
+  // the headroom is for the genuinely slow case rather than the normal one.
+  settleMs: num().pipe(z.number().min(0).max(15000)).default(600),
   source: z.enum(["device", "virtual", "ndi"]).default("device"),
 });
 

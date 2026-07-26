@@ -32,7 +32,7 @@ const SUPPORTED: Record<string, string> = {
 // The default budget is generous because these are USB control transfers, not
 // network calls — it exists to break a wedge, not to police latency. `snapshot`
 // gets its own budget: it captures a real frame after an explicit settle delay
-// (settleMs is caller-supplied, capped at 5000 by the tool schema), so its
+// (settleMs is caller-supplied, capped at 15000 by the tool schema), so its
 // timeout is computed per-call from that delay rather than fixed.
 const DEFAULT_RPC_TIMEOUT_MS = 10_000;
 const SNAPSHOT_RPC_TIMEOUT_MS = 30_000;
