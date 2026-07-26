@@ -80,3 +80,30 @@ test("the v4l2 preview asks for 60fps too", () => {
   expect(args).toContain("mjpeg");
   expect(args).toContain("1920x1080");
 });
+
+// The mjpeg/60 pin above is a fact about the Tiny 2's own capture pin, NOT about
+// video sources in general. Neither alternative feed offers mjpeg at all — OBSBOT
+// Center's virtual camera advertises nv12/yuv420p/yuyv422, and the NDI Webcam
+// devices advertise UYVY only — so pinning it there does not merely fail to buy
+// 60fps, it fails to open the device: ffmpeg reports "Could not set video
+// options" and the preview never starts. Verified against both on 2026-07-25.
+// Let those negotiate instead; smooth motion is worth pinning for only when the
+// pin is achievable.
+test("preview does not pin the Tiny 2's codec onto sources that cannot offer it", () => {
+  for (const source of ["virtual", "ndi"] as const) {
+    const args = buildPreviewArgs({ videoName: "OBSBOT Virtual Camera", source });
+    expect(args).not.toContain("mjpeg");
+    expect(args).not.toContain("-vcodec");
+    // The device must still be opened, and the window still labelled.
+    expect(args).toContain("video=OBSBOT Virtual Camera");
+    expect(args).toContain("-window_title");
+  }
+});
+
+test("preview still pins mjpeg/60 for the device source, including by default", () => {
+  const explicit = buildPreviewArgs({ videoName: "OBSBOT Tiny 2 StreamCamera", source: "device" });
+  const defaulted = buildPreviewArgs({ videoName: "OBSBOT Tiny 2 StreamCamera" });
+  expect(explicit).toEqual(defaulted);
+  expect(defaulted).toContain("mjpeg");
+  expect(defaulted[defaulted.indexOf("-framerate") + 1]).toBe("60");
+});

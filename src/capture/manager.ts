@@ -276,7 +276,7 @@ export class CaptureManager {
     // Windows (dshow) or Linux (v4l2) path
     const videoName = resolveVideoName(devices, o.source);
     if (!videoName) throw new CaptureError(`no '${o.source}' video source found (is OBSBOT Center / NDI running?)`);
-    const args = buildPreviewArgs({ videoName });
+    const args = buildPreviewArgs({ videoName, source: o.source });
     const child = this.spawn("ffplay", args, { stdio: "ignore" });
     const session: CaptureSession = {
       id: `cap${++this.seq}`, kind: "preview", pid: child.pid ?? -1,

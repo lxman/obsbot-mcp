@@ -63,6 +63,7 @@ import { DeviceManager } from "../device/manager.js";
 import { ensureReady, msg } from "./ready.js";
 import type { ReadyResult, ReconnectCtl } from "./ready.js";
 import type { CaptureManager } from "../capture/manager.js";
+import type { CaptureSource } from "../capture/ffmpeg-args.js";
 import { CaptureError } from "../capture/manager.js";
 
 export interface ToolDef {
@@ -267,11 +268,18 @@ const imageExposureManualSchema = withCamera({
   level: num().pipe(z.number().min(0).max(100)).default(50),
 });
 const gimbalPositionSchema = withCamera({});
+const captureSourceEnum = z.enum(["device", "virtual", "ndi"]);
+
+// `source` is a DECLARATION, not a selector: these tools never fetch a frame, they
+// are handed one. It exists because the frame's origin is otherwise unknowable —
+// see frameSourceNote — and it defaults to `device`, which is what every caller
+// got implicitly before.
 const aimAtPixelSchema = withCamera({
   x: num().pipe(z.number().finite()),
   y: num().pipe(z.number().finite()),
   frameWidth: num().pipe(z.number().finite().min(1)),
   frameHeight: num().pipe(z.number().finite().min(1)),
+  source: captureSourceEnum.default("device"),
 });
 // width/height/x/y are deliberately unconstrained beyond "finite": a negative
 // width or an off-frame region is a valid INPUT (the schema's job), just not a
@@ -286,6 +294,7 @@ const zoomToFitSchema = withCamera({
   frameWidth: num().pipe(z.number().finite().min(1)),
   frameHeight: num().pipe(z.number().finite().min(1)),
   margin: num().pipe(z.number().finite().min(0)).default(0.1),
+  source: captureSourceEnum.default("device"),
 });
 const presetListSchema = withCamera({});
 const presetSaveSchema = withCamera({
@@ -333,7 +342,6 @@ const snapshotSchema = withCamera({
   source: z.enum(["device", "virtual", "ndi"]).default("device"),
 });
 
-const captureSourceEnum = z.enum(["device", "virtual", "ndi"]);
 const recordStartSchema = z.object({
   durationSec: num().pipe(z.number().positive()).optional(),
   audio: bool().default(true),
@@ -624,6 +632,32 @@ async function readFocus(
     return { focusMode: "unknown" };
   }
 }
+
+/**
+ * What a non-device frame declaration commits the caller to.
+ *
+ * obsbot_aim_at_pixel and obsbot_zoom_to_fit compute an angle from the CAMERA's
+ * own field of view and magnification, but they only ever receive pixels — there
+ * is nothing in x/y/frameWidth/frameHeight from which the frame's origin could be
+ * inferred. A frame that OBSBOT Center or OBS has rescaled, cropped or letterboxed
+ * therefore yields a confidently wrong aim, reported as a clean success.
+ *
+ * A blanket refusal would be wrong: a feed configured as a true pass-through aims
+ * correctly. MEASURED 2026-07-25 against an OBS -> NDI chain, a dedicated
+ * (uncomposited) output at 1080p30 matched the camera's own frame to fill 1.0000
+ * and scale 1.03 +/- 0.03, and obsbot_zoom_to_fit framed a target through it
+ * correctly. The SAME chain via OBS's canvas measured 0.900 scale with a 96px
+ * offset -- wrong by 11% plus a fixed bias -- and looked identical in the reply.
+ *
+ * So the caller declares the feed and this states the assumption back, where it
+ * lands in the transcript rather than in a README nobody re-reads mid-task.
+ */
+const frameSourceNote = (source: CaptureSource): string =>
+  `this aim was computed from a '${source}' frame, and is only correct if that feed is an ` +
+  `unmodified pass-through of the camera (no rescale, crop, letterbox or reframing) at the same ` +
+  `field of view — 1080p60 is a 1.214x crop of 1080p30 on this camera, and a compositor's canvas ` +
+  `scaling is invisible in the picture. Verify once by commanding a known gimbal rotation and ` +
+  `checking features move by the predicted number of pixels; a 'device' frame needs no such check.`;
 
 const allEmpty = (slots: PresetSlot[]): boolean => slots.every((s) => !s.occupied);
 
@@ -1131,8 +1165,11 @@ export function createTools(
         "Point the camera at a specific pixel in a frame you just captured. Give the pixel's x/y " +
         "and the frameWidth/frameHeight from THE SAME obsbot_capture_snapshot result — mixing a " +
         "pixel from one frame with dimensions from another aims at the wrong place and cannot be " +
-        "detected. The frame must come from a source:\"device\" snapshot — virtual and ndi frames " +
-        "are framed by OBSBOT Center, not this camera's own optics, and will aim wrongly. Takes no " +
+        "detected. `source` DECLARES which feed the frame came from (default device); it cannot be " +
+        "inferred from the pixels. A virtual or ndi frame is accepted, but only aims correctly if " +
+        "that feed is an unmodified pass-through of the camera — a compositor's rescale or " +
+        "letterbox is invisible in the picture and silently wrong here — so a non-device " +
+        "declaration comes back with that assumption stated. Takes no " +
         "field-of-view or zoom argument: it reads the camera's magnification from its reported " +
         "state, a discrete FOV mode or a continuous zoom alike, so it works at any zoom. Refuses " +
         "when AI tracking is active (tracking moves the gimbal itself and would fight the aim), " +
@@ -1147,7 +1184,7 @@ export function createTools(
         "target; tilt toward the pixel first, then re-aim.",
       schema: aimAtPixelSchema,
       handler: async (args: unknown) => {
-        const { x, y, frameWidth, frameHeight, camera } = aimAtPixelSchema.parse(args);
+        const { x, y, frameWidth, frameHeight, camera, source } = aimAtPixelSchema.parse(args);
 
         const aspectRefusal = refuseIfNot169(frameWidth, frameHeight);
         if (aspectRefusal) return aspectRefusal;
@@ -1263,6 +1300,8 @@ export function createTools(
           clamped: aim.clamped,
           fovMode: status.fovMode,
           current: { yaw, pitch },
+          source,
+          ...(source === "device" ? {} : { note: frameSourceNote(source) }),
           ...(ready.reconnected ? { reconnected: true } : {}),
         };
       },
@@ -1274,7 +1313,7 @@ export function createTools(
         "region fills the frame. Give x/y/width/height of the region plus the frameWidth/frameHeight " +
         "from THE SAME obsbot_capture_snapshot result — mixing a region from one frame with " +
         "dimensions from another frames the wrong place and cannot be detected. Must come from a " +
-        "source:\"device\" snapshot, same constraint as obsbot_aim_at_pixel. `margin` (default 0.1) " +
+        "snapshot, and takes the same `source` declaration as obsbot_aim_at_pixel. `margin` (default 0.1) " +
         "backs the zoom off by that fraction so the region isn't framed edge-to-edge; the tighter of " +
         "the region's two axes decides the zoom, so the WHOLE region stays visible rather than being " +
         "cropped on one side. Moves the gimbal BEFORE zooming, since zooming first can push the " +
@@ -1292,7 +1331,7 @@ export function createTools(
         "a follow-up snapshot.",
       schema: zoomToFitSchema,
       handler: async (args: unknown) => {
-        const { x, y, width, height, frameWidth, frameHeight, margin, camera } =
+        const { x, y, width, height, frameWidth, frameHeight, margin, camera, source } =
           zoomToFitSchema.parse(args);
 
         // Pure input validation first, no I/O — same placement as obsbot_aim_at_pixel's
@@ -1436,6 +1475,8 @@ export function createTools(
           magnification: requiredMagnification,
           clamped: fitClamped || aim.clamped,
           settled,
+          source,
+          ...(source === "device" ? {} : { note: frameSourceNote(source) }),
           ...(ready.reconnected ? { reconnected: true } : {}),
         };
       },

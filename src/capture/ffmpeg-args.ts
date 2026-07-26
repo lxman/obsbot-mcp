@@ -137,15 +137,23 @@ export function buildRecordArgs(o: {
 // them would have been treating a symptom that no longer reproduced. -framedrop
 // in particular is a real trade (drop frames under load instead of running
 // permanently late) and should be a deliberate choice, not a leftover.
-export function buildPreviewArgs(o: { videoName: string }): string[] {
+// SCOPE: that pin describes the Tiny 2's own capture pin, not video sources in
+// general. Neither alternative feed offers mjpeg — OBSBOT Center's virtual camera
+// advertises nv12/yuv420p/yuyv422, the NDI Webcam devices UYVY only — so pinning
+// it there does not merely fail to buy 60fps, it fails to OPEN the device
+// ("Could not set video options"; verified against both, 2026-07-25). Those get
+// negotiated arguments instead: smooth motion is worth pinning for only where the
+// pin is achievable.
+export function buildPreviewArgs(o: { videoName: string; source?: CaptureSource }): string[] {
   const isV4l2 = o.videoName.startsWith("/dev/");
+  const pinTiny2Format = (o.source ?? "device") === "device";
   if (isV4l2) {
     return [
       "-hide_banner", "-loglevel", "warning",
       "-f", "v4l2",
-      "-input_format", "mjpeg",
-      "-video_size", "1920x1080",
-      "-framerate", "60",
+      ...(pinTiny2Format
+        ? ["-input_format", "mjpeg", "-video_size", "1920x1080", "-framerate", "60"]
+        : []),
       "-i", o.videoName,
       "-window_title", "OBSBOT preview",
     ];
@@ -153,7 +161,9 @@ export function buildPreviewArgs(o: { videoName: string }): string[] {
   // dshow path
   return [
     "-hide_banner", "-loglevel", "warning", "-f", "dshow",
-    "-framerate", "60", "-video_size", "1920x1080", "-vcodec", "mjpeg",
+    ...(pinTiny2Format
+      ? ["-framerate", "60", "-video_size", "1920x1080", "-vcodec", "mjpeg"]
+      : []),
     "-i", `video=${o.videoName}`,
     "-window_title", "OBSBOT preview",
   ];
