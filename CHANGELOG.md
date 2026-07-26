@@ -31,6 +31,28 @@ format cannot safely be turned into an angle.
 
 ### Fixed
 
+- **A zoom still ramping no longer silently corrupts an aim.** `obsbot_aim_at_pixel` and
+  `obsbot_zoom_to_fit` both derive magnification from a live status read. If the zoom was still
+  travelling when they read it, that magnification is one the caller's frame was never captured
+  at, and the resulting angle is wrong in proportion — up to 4x, which is degrees to tens of
+  degrees of mis-aim, returned as a clean `ok:true`. The window is wide, not a narrow race: a
+  full ratio 1.0→2.0 sweep measures ~2.4s at roughly 42 percentage points per second.
+
+  Both tools now read the status block twice, a beat apart, and **refuse** if `zoomPercent`
+  moved. Waiting would not be a fix — the frame was captured at whatever magnification the ramp
+  had reached at that instant, and settling afterwards cannot change what those pixels already
+  mean. This is the same reasoning that already makes them refuse a camera they had to wake.
+
+  Known gap, stated rather than papered over: a zoom that has been *commanded* but has not
+  started travelling yet reads steady (~140ms on hardware). That is covered for zooms this
+  server issues, but not for one started from the remote, OBSBOT Center, or AI framing.
+
+- **`obsbot_zoom_uvc` now waits for the zoom to arrive** and returns `settled`, like
+  `obsbot_zoom_to_fit` already did. Returning early is what let a caller chain zoom → aim
+  straight into the refusal above. `obsbot_zoom_vendor` is deliberately unchanged: its ratio
+  scale is a different one that "may not land exactly where asked", so a settle check against
+  the requested target would report failure on a perfectly good zoom.
+
 - **The 1080p field-of-view difference is set by frame rate, not by codec.** 0.5.0 recorded that
   "MJPEG 1920×1080 is a 1.201× crop of YUYV 1920×1080". That comparison was MJPEG@60 against
   YUYV@30, and it charged the codec for what the frame rate did. Measured at one pose and one
