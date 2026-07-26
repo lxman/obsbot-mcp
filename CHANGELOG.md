@@ -1,5 +1,40 @@
 # Changelog
 
+## [0.6.2] — 2026-07-26
+
+### Fixed: `npx obsbot-mcp` did nothing at all on Linux and macOS
+
+Installing from npm and running `obsbot-mcp` — exactly what the README tells you to
+configure — started a process that printed nothing and exited 0. No error, no diagnostic,
+no server. Every global install and every `npx` invocation on Linux and macOS, since the
+first commit.
+
+npm installs a `bin` entry as a **symlink** on POSIX:
+
+```
+/usr/local/bin/obsbot-mcp -> ../lib/node_modules/obsbot-mcp/dist/index.js
+```
+
+and node reports `argv[1]` as the path it was *invoked by*, not the file that path
+resolves to. `src/index.ts` gated `startServer()` on `argv[1]` matching
+`import.meta.url` as raw strings, so the guard was false for every installed copy and the
+server simply never started. Both sides are now resolved through `realpathSync` first.
+
+Windows was immune, which is why this survived: npm writes a `.cmd` shim that runs node
+against the real path, so the raw comparison held there and only there. The Linux and
+macOS ports were verified by running the built entry point directly, where `argv[1]` is
+also the real path — the bug lives specifically in the gap between the source tree and
+the *installed* tree, which nothing exercised.
+
+`test/bin-entry.test.ts` now closes that gap: it reproduces the install layout with a
+symlink to the built entry point, spawns it, and requires a real `initialize` response.
+It reports as skipped on Windows (symlinks need elevation) rather than passing without
+asserting — a green tick for a test that never ran is how this shipped in the first place.
+
+Verified in a container with no camera attached: the server comes up, reports
+`ipc role=owner`, answers `initialize`, and lists its tools. Before the fix the same
+container exited 0 in silence.
+
 ## [0.6.1] — 2026-07-26
 
 ### Added: published to the MCP Registry
