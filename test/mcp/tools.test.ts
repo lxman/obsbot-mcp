@@ -199,7 +199,9 @@ test("obsbot_zoom_uvc clamps ratio above max and calls zoomSet with max-mapped u
   expect(transport.zoomRange).toHaveBeenCalledTimes(1);
   expect(transport.zoomSet).toHaveBeenCalledTimes(1);
   expect(transport.zoomSet).toHaveBeenCalledWith(100); // ratio clamped to 2.0 -> max units
-  expect(result).toEqual({ ok: true, ratio: 2.0 });
+  // settled comes from the fake echoing zoomSet into zoomPercent, so the zoom is
+  // already at target on the first settle poll.
+  expect(result).toEqual({ ok: true, ratio: 2.0, settled: true });
 });
 
 test("obsbot_wake sends run status without a state arg", async () => {
@@ -2378,15 +2380,16 @@ test("an unrecognised FOV mode is refused rather than guessed, and never zooms",
 // caller needs to know what the camera just did.
 test("a status read that throws during the settle poll resolves to settled:false, not a thrown error", async () => {
   const transport = makeFakeTransport();
-  // The first two recvStatus calls (the readiness gate's awake probe, then the
-  // handler's own aiMode/fovMode read) must still succeed — only the reads
-  // INSIDE the settle loop, which runs after the gimbal move and zoom write,
-  // should throw. That is the state this finding is about: by the time this
-  // throws, the tool has already committed the moves it needs to report.
+  // The first three recvStatus calls (the readiness gate's awake probe, then the
+  // PAIR readSteadyStatus takes to decide the zoom is not mid-ramp) must still
+  // succeed — only the reads INSIDE the settle loop, which runs after the gimbal
+  // move and zoom write, should throw. That is the state this finding is about:
+  // by the time this throws, the tool has already committed the moves it needs to
+  // report.
   let calls = 0;
   transport.recvStatus = vi.fn(async () => {
     calls += 1;
-    if (calls <= 2) return HEALTHY_STATUS_AWAKE;
+    if (calls <= 3) return HEALTHY_STATUS_AWAKE;
     throw new Error("transient USB read failure");
   });
   const tools = createTools(makeFakeMgr(transport), undefined, false, {}, FAST_ZOOM_SETTLE);
@@ -2400,4 +2403,113 @@ test("a status read that throws during the settle poll resolves to settled:false
   expect(r.ratio).toBeCloseTo(1.8788, 4);
   expect(transport.gimbalSet).toHaveBeenCalled();
   expect(transport.zoomSet).toHaveBeenCalled();
+});
+
+// --- a zoom in motion invalidates the frame ---
+//
+// obsbot_aim_at_pixel and obsbot_zoom_to_fit both derive magnification from a LIVE
+// status read, so a zoom still ramping when they read it hands them a magnification
+// the frame was never captured at. The ramp is not brief — measured 2026-07-25 on
+// hardware, a full ratio 1->2 sweep takes ~2.4s at roughly 42 percentage points per
+// second — so this is a wide window, not a race you have to be unlucky to hit.
+//
+// Waiting is not the fix. The frame was captured at whatever magnification the ramp
+// had reached at that instant, and no amount of settling afterwards makes those
+// pixels mean something else. So these refuse, exactly as they already refuse a
+// camera that had to be woken "because waking moves the gimbal and invalidates the
+// frame you measured". A moving zoom invalidates it the same way.
+//
+// motionPollMs:0 keeps the beat between the two reads out of the test clock; the
+// fake changes its reading on the second read regardless of the wait.
+const FAST_MOTION = { motionPollMs: 0 };
+
+// A transport whose zoomPercent advances on EVERY status read — what a ramp in
+// flight looks like from here. It has to keep moving rather than change once,
+// because the readiness gate takes its own status read before the handler does:
+// a one-shot change would have already happened by the time the pair that
+// matters is read, and the guard would see two identical values.
+// stepPct 0 is a settled zoom.
+function makeRampingTransport(startPct: number, stepPct: number) {
+  const t = makeFakeTransport();
+  let n = 0;
+  t.recvStatus = vi.fn(async () => {
+    const b = Buffer.from(HEALTHY_STATUS_AWAKE);
+    b[0x04] = startPct + stepPct * n++;
+    return b;
+  });
+  return t;
+}
+
+test("aim_at_pixel refuses while the zoom is still ramping", async () => {
+  const transport = makeRampingTransport(20, 11);
+  const tool = findTool(
+    createTools(makeFakeMgr(transport), undefined, false, {}, FAST_MOTION),
+    "obsbot_aim_at_pixel",
+  );
+  const r = (await tool.handler({ x: 960, y: 540, frameWidth: 1920, frameHeight: 1080 })) as {
+    ok: boolean; error: string;
+  };
+  expect(r.ok).toBe(false);
+  expect(r.error).toMatch(/zoom/i);
+  // The refusal must be actionable: it has to say the frame is stale, not just
+  // that something moved, or the caller retries with the same stale pixels.
+  expect(r.error).toMatch(/fresh snapshot/i);
+  // And it must refuse BEFORE moving anything.
+  expect(transport.gimbalSet).not.toHaveBeenCalled();
+});
+
+test("zoom_to_fit refuses while the zoom is still ramping", async () => {
+  const transport = makeRampingTransport(20, 11);
+  const tool = findTool(
+    createTools(makeFakeMgr(transport), undefined, false, {}, FAST_MOTION),
+    "obsbot_zoom_to_fit",
+  );
+  const r = (await tool.handler({
+    x: 720, y: 405, width: 480, height: 270, frameWidth: 1920, frameHeight: 1080,
+  })) as { ok: boolean; error: string };
+  expect(r.ok).toBe(false);
+  expect(r.error).toMatch(/zoom/i);
+  expect(transport.gimbalSet).not.toHaveBeenCalled();
+  expect(transport.zoomSet).not.toHaveBeenCalled();
+});
+
+test("a steady zoom still aims — the guard costs nothing when nothing is moving", async () => {
+  const transport = makeRampingTransport(35, 0);
+  const tool = findTool(
+    createTools(makeFakeMgr(transport), undefined, false, {}, FAST_MOTION),
+    "obsbot_aim_at_pixel",
+  );
+  const r = (await tool.handler({ x: 1200, y: 400, frameWidth: 1920, frameHeight: 1080 })) as {
+    ok: boolean;
+  };
+  expect(r.ok).toBe(true);
+  expect(transport.gimbalSet).toHaveBeenCalled();
+});
+
+// --- the writers report whether the ramp finished ---
+//
+// obsbot_zoom_to_fit already returns `settled`. The plain zoom tools returning
+// immediately is what lets a caller chain zoom -> aim and get the refusal above,
+// so they report the same thing on the same terms.
+
+test("zoom_uvc reports settled once the zoom arrives", async () => {
+  const transport = makeFakeTransport();
+  const tool = findTool(createTools(makeFakeMgr(transport)), "obsbot_zoom_uvc");
+  const r = (await tool.handler({ ratio: 1.5 })) as { ok: boolean; ratio: number; settled: boolean };
+  expect(r.ok).toBe(true);
+  expect(r.ratio).toBeCloseTo(1.5, 4);
+  expect(r.settled).toBe(true);
+});
+
+test("zoom_uvc reports settled:false rather than lying when the zoom never arrives", async () => {
+  const transport = makeFakeTransport();
+  // A device that acknowledges the write but never moves: zoomPercent stays 0.
+  transport.zoomSet = vi.fn(async (_units: number) => {});
+  const tool = findTool(
+    createTools(makeFakeMgr(transport), undefined, false, {}, { pollMs: 1, timeoutMs: 5 }),
+    "obsbot_zoom_uvc",
+  );
+  const r = (await tool.handler({ ratio: 2.0 })) as { ok: boolean; settled: boolean };
+  expect(r.ok).toBe(true);
+  expect(r.settled).toBe(false);
 });

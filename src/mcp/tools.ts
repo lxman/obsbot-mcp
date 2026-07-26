@@ -459,8 +459,19 @@ const round2 = (deg: number): number => Math.round(deg * 100) / 100;
 export interface ZoomSettleOpts {
   pollMs?: number;
   timeoutMs?: number;
+  /** Beat between the two status reads that decide whether the zoom is moving. */
+  motionPollMs?: number;
 }
-const ZOOM_SETTLE_DEFAULTS: Required<ZoomSettleOpts> = { pollMs: 100, timeoutMs: 3000 };
+// motionPollMs is the sensitivity knob for readSteadyStatus: zoomPercent is an
+// integer, so a beat of B ms detects any ramp travelling faster than 1000/B
+// percentage points per second. 80ms => 12.5 pt/s, against a measured UVC ramp of
+// ~42 pt/s (2026-07-25: a full ratio 1->2 sweep took 2397ms) — comfortable margin,
+// while costing every aim only one extra status read and 80ms.
+const ZOOM_SETTLE_DEFAULTS: Required<ZoomSettleOpts> = {
+  pollMs: 100,
+  timeoutMs: 3000,
+  motionPollMs: 80,
+};
 // zoomPercent tracks the zoom's actual travel, not the commanded value, which is
 // what makes it a usable arrival signal — a status read taken right after
 // commanding the write can catch it mid-ramp (observed: commanding ratio 1.5
@@ -504,6 +515,64 @@ async function waitForZoomSettle(
     await napMs(pollMs);
   }
 }
+
+/**
+ * Read the status block, and refuse to hand it back if the zoom moved while we
+ * were looking at it.
+ *
+ * `obsbot_aim_at_pixel` and `obsbot_zoom_to_fit` turn a pixel into an angle using
+ * a magnification read live from this block. If the zoom is mid-ramp, that read
+ * describes a magnification the caller's frame was never captured at, and the
+ * angle comes out wrong in proportion — up to 4x, which is degrees to tens of
+ * degrees of mis-aim, reported as a clean success.
+ *
+ * The window is wide, not a narrow race: measured 2026-07-25, a full ratio 1->2
+ * sweep takes ~2.4s at roughly 42 percentage points per second.
+ *
+ * WAITING WOULD NOT FIX IT. The frame was captured at whatever magnification the
+ * ramp had reached at that instant; settling afterwards cannot change what those
+ * pixels already mean. So the callers refuse and ask for a fresh frame — the same
+ * reasoning that already makes them refuse a camera they had to wake, because
+ * waking moves the gimbal and invalidates the frame you measured.
+ *
+ * Detection is two reads a beat apart, because zoomPercent reports travel rather
+ * than the commanded value. Any change at all counts: the reading is an integer
+ * and a settled zoom reads identically every time, so there is no jitter band to
+ * allow for.
+ *
+ * KNOWN GAP, deliberately not papered over: a zoom that has been COMMANDED but has
+ * not started travelling yet reads steady, and this returns ok. On hardware that
+ * dead zone is ~140ms. It is covered for zooms this server issued — those tools
+ * wait for the ramp before returning — but not for one started from the remote,
+ * OBSBOT Center, or AI framing. This narrows the window; it does not prove the
+ * zoom is still.
+ */
+type SteadyStatus =
+  | { ok: true; block: Buffer; status: ReturnType<typeof decodeStatus> }
+  | { ok: false; fromPct: number; toPct: number };
+
+async function readSteadyStatus(
+  t: ObsbotTransport,
+  opts: ZoomSettleOpts = {},
+): Promise<SteadyStatus> {
+  const { motionPollMs } = { ...ZOOM_SETTLE_DEFAULTS, ...opts };
+  const firstPct = decodeStatus(await t.recvStatus()).zoomPercent;
+  await napMs(motionPollMs);
+  // The SECOND read is the one handed back: it is the fresher of the two, and by
+  // the time it is returned it has been confirmed equal to the first anyway.
+  const block = await t.recvStatus();
+  const status = decodeStatus(block);
+  if (status.zoomPercent !== firstPct) {
+    return { ok: false, fromPct: firstPct, toPct: status.zoomPercent };
+  }
+  return { ok: true, block, status };
+}
+
+/** The refusal both aiming tools give when {@link readSteadyStatus} sees travel. */
+const zoomMovingError = (r: { fromPct: number; toPct: number }, verb: string): string =>
+  `the zoom is still moving (zoomPercent read ${r.fromPct} then ${r.toPct}), so the frame you ` +
+  `measured was captured at a magnification the camera has already left — ${verb} from it would ` +
+  `be wrong in proportion. Wait for the zoom to finish, take a fresh snapshot, and try again.`;
 
 const allEmpty = (slots: PresetSlot[]): boolean => slots.every((s) => !s.occupied);
 
@@ -713,7 +782,11 @@ export function createTools(
       description:
         "Standard UVC zoom: set an absolute zoom ratio, clamped to [1.0, 2.0]. Snaps to the " +
         "requested target exactly (unlike obsbot_zoom_vendor, whose ratio scale differs and " +
-        "may not land exactly where asked).",
+        "may not land exactly where asked). Waits for the zoom to actually arrive and returns " +
+        "{ settled }: the ramp is not instant (a full 1.0->2.0 sweep takes about 2.4s), and " +
+        "obsbot_aim_at_pixel and obsbot_zoom_to_fit both refuse while it is in flight, so this " +
+        "returning early would just move the failure downstream. settled:false means the zoom " +
+        "had not arrived within the timeout — the command was still sent.",
       schema: zoomAbsoluteSchema,
       handler: async (args: unknown) => {
         const parsed = zoomAbsoluteSchema.parse(args);
@@ -721,7 +794,14 @@ export function createTools(
         const t = await getTransport(parsed.camera);
         const { min, max } = await t.zoomRange();
         await t.zoomSet(zoomRatioToUnits(ratio, min, max));
-        return { ok: true, ratio };
+        // Deliberately NOT done for obsbot_zoom_vendor. waitForZoomSettle needs the
+        // target on the zoomPercent scale, and that tool's ratio scale is a different
+        // one that "may not land exactly where asked" — so it would report
+        // settled:false on a perfectly good zoom. The alternative signal, "zoomPercent
+        // stopped changing", reads as stopped during the ~140ms before the ramp starts
+        // moving, which would be a worse lie than saying nothing.
+        const settled = await waitForZoomSettle(t, ratio, zoomSettle);
+        return { ok: true, ratio, settled };
       },
     },
     {
@@ -1029,8 +1109,9 @@ export function createTools(
           };
         }
 
-        const block = await t.recvStatus();
-        const status = decodeStatus(block);
+        const steady = await readSteadyStatus(t, zoomSettle);
+        if (!steady.ok) return { ok: false, error: zoomMovingError(steady, "aiming") };
+        const { block, status } = steady;
         if (status.aiMode === "unknown") {
           return {
             ok: false,
@@ -1190,8 +1271,9 @@ export function createTools(
           };
         }
 
-        const block = await t.recvStatus();
-        const status = decodeStatus(block);
+        const steady = await readSteadyStatus(t, zoomSettle);
+        if (!steady.ok) return { ok: false, error: zoomMovingError(steady, "framing") };
+        const { block, status } = steady;
         if (status.aiMode === "unknown") {
           return {
             ok: false,
