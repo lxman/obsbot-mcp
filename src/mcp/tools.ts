@@ -32,7 +32,16 @@ import {
   UVC_FLAG_MANUAL,
 } from "../codec/commands.js";
 import type { AiTrackSpeed, AiFramingMode, AiSceneMode, AiModeStatus, FovType, ImageControl } from "../codec/commands.js";
-import { aimAtPixel, GIMBAL_YAW_LIMIT_DEG, GIMBAL_PITCH_LIMIT_DEG } from "../geometry/aim.js";
+import {
+  aimAtPixel,
+  GIMBAL_YAW_LIMIT_DEG,
+  GIMBAL_PITCH_LIMIT_DEG,
+  FOV_MAGNIFICATION,
+  magnificationFromZoomRatio,
+  zoomRatioFromMagnification,
+  MIN_MAGNIFICATION,
+  MAX_MAGNIFICATION,
+} from "../geometry/aim.js";
 import { verifyFraming } from "./framing.js";
 import { parseFrame } from "../codec/frame.js";
 import { OP_BY_NAME } from "../codec/opcodes.js";
@@ -64,6 +73,81 @@ export interface ToolDef {
 
 const clamp = (value: number, min: number, max: number): number =>
   Math.min(max, Math.max(min, value));
+
+/**
+ * Why {@link resolveMagnification} could not resolve a usable magnification.
+ * Carried explicitly rather than left for the caller to re-derive from
+ * `status.fovMode`, because that re-derivation is exactly the trap this type
+ * exists to close: it was correct for the two reasons that existed when it was
+ * written (an "if unknown, else assume corrupt zoom" fallthrough), but is not
+ * exhaustive — a third reason added later would silently be mislabelled as
+ * "implausible-zoom" by every caller doing that inference independently. One
+ * function decides the reason so there is exactly one place that has to be
+ * right.
+ */
+export type MagnificationResult =
+  | { ok: true; magnification: number }
+  | { ok: false; reason: "unknown-fov" }
+  | { ok: false; reason: "implausible-zoom"; zoomPercent: number };
+
+/**
+ * The camera's total magnification relative to wide, from its reported state.
+ *
+ * A discrete FOV mode and a continuous zoom are two ways of writing to one
+ * scale, so this returns one number either way. Fails (`ok: false`) for
+ * anything that cannot be trusted:
+ *  - `reason: "unknown-fov"` — the status byte didn't decode, a state to
+ *    refuse on rather than guess at.
+ *  - `reason: "implausible-zoom"` — a `"custom"` mode whose derived
+ *    magnification falls outside the camera's known range
+ *    [MIN_MAGNIFICATION, MAX_MAGNIFICATION] — a corrupt or implausible
+ *    `zoomPercent` reading (e.g. a garbled status byte reporting
+ *    zoomPercent > 100). Callers should refuse rather than pass this through:
+ *    the geometry module's own guard (halfAngleTangents in src/geometry/aim.ts)
+ *    would otherwise be the only thing standing between a bad reading and a
+ *    silently wrong — or NaN/Infinity — aim.
+ */
+export function resolveMagnification(
+  status: { fovMode: FovType | "custom" | "unknown"; zoomPercent: number },
+): MagnificationResult {
+  if (status.fovMode === "unknown") return { ok: false, reason: "unknown-fov" };
+  if (status.fovMode === "custom") {
+    const m = magnificationFromZoomRatio(1 + status.zoomPercent / 100);
+    if (!Number.isFinite(m) || m < MIN_MAGNIFICATION || m > MAX_MAGNIFICATION) {
+      return { ok: false, reason: "implausible-zoom", zoomPercent: status.zoomPercent };
+    }
+    return { ok: true, magnification: m };
+  }
+  return { ok: true, magnification: FOV_MAGNIFICATION[status.fovMode] };
+}
+
+/**
+ * Refuse a frameWidth/frameHeight pair that isn't 16:9. Shared by
+ * `obsbot_aim_at_pixel` and `obsbot_zoom_to_fit` — both take frame dimensions
+ * from the same `obsbot_capture_snapshot` result, and both are equally exposed
+ * to a caller that swaps width and height.
+ *
+ * 16:9 is preserved by the capture path at every resolution (verified at
+ * 256x144, 1280x720, 1920x1080), so a non-16:9 pair did not come from that path
+ * as-is — it was transposed (width/height swapped) or came from somewhere else
+ * entirely, since passing the values through unchanged always yields 16:9. For
+ * `obsbot_zoom_to_fit` a transposed pair is worse than a bad aim: it also flips
+ * which axis `Math.min(frameWidth/width, frameHeight/height)` selects, so the
+ * camera would frame the wrong region at the wrong zoom while still reporting
+ * `ok: true`.
+ */
+function refuseIfNot169(frameWidth: number, frameHeight: number): { ok: false; error: string } | null {
+  if (Math.abs(frameWidth / frameHeight - 16 / 9) > 0.02) {
+    return {
+      ok: false,
+      error:
+        `frame ${frameWidth}x${frameHeight} is not 16:9, but obsbot_capture_snapshot always ` +
+        `returns 16:9 frames. This looks like frameWidth/frameHeight were transposed, or came ` +
+        `from something other than that tool's result.`,
+    };
+  }
+  return null;
+}
 
 // Some MCP clients serialize numbers and booleans as strings when the advertised
 // inputSchema lacks type info. We now advertise a proper JSON Schema (see
@@ -187,6 +271,20 @@ const aimAtPixelSchema = withCamera({
   y: num().pipe(z.number().finite()),
   frameWidth: num().pipe(z.number().finite().min(1)),
   frameHeight: num().pipe(z.number().finite().min(1)),
+});
+// width/height/x/y are deliberately unconstrained beyond "finite": a negative
+// width or an off-frame region is a valid INPUT (the schema's job), just not a
+// valid REGION (the handler's job, so it can return a structured ok:false with
+// the reason instead of a schema parse throw — matching how aimAtPixelSchema's
+// own x/y-in-frame check works one level up, in the handler, not the schema).
+const zoomToFitSchema = withCamera({
+  x: num().pipe(z.number().finite()),
+  y: num().pipe(z.number().finite()),
+  width: num().pipe(z.number().finite()),
+  height: num().pipe(z.number().finite()),
+  frameWidth: num().pipe(z.number().finite().min(1)),
+  frameHeight: num().pipe(z.number().finite().min(1)),
+  margin: num().pipe(z.number().finite().min(0)).default(0.1),
 });
 const presetListSchema = withCamera({});
 const presetSaveSchema = withCamera({
@@ -358,6 +456,124 @@ const napMs = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 // doesn't have.
 const round2 = (deg: number): number => Math.round(deg * 100) / 100;
 
+export interface ZoomSettleOpts {
+  pollMs?: number;
+  timeoutMs?: number;
+  /** Beat between the two status reads that decide whether the zoom is moving. */
+  motionPollMs?: number;
+}
+// motionPollMs is the sensitivity knob for readSteadyStatus: zoomPercent is an
+// integer, so a beat of B ms detects any ramp travelling faster than 1000/B
+// percentage points per second. 80ms => 12.5 pt/s, against a measured UVC ramp of
+// ~42 pt/s (2026-07-25: a full ratio 1->2 sweep took 2397ms) — comfortable margin,
+// while costing every aim only one extra status read and 80ms.
+const ZOOM_SETTLE_DEFAULTS: Required<ZoomSettleOpts> = {
+  pollMs: 100,
+  timeoutMs: 3000,
+  motionPollMs: 80,
+};
+// zoomPercent tracks the zoom's actual travel, not the commanded value, which is
+// what makes it a usable arrival signal — a status read taken right after
+// commanding the write can catch it mid-ramp (observed: commanding ratio 1.5
+// read back zoomPercent 33 in transit before settling at 50). zoomPercent is on
+// the SAME 0-100 scale resolveMagnification reads it on (ratio = 1 + pct/100),
+// so the target is expressed on that scale too, not the raw device units
+// zoomSet takes (those come from zoomRange(), which can differ per device).
+const ZOOM_SETTLE_TOLERANCE_PCT = 1;
+
+/**
+ * Poll the status block until `zoomPercent` shows the zoom has actually arrived
+ * at `targetRatio`, or give up after the bound. Returns false rather than
+ * throwing on timeout: a camera moving slower than expected (or a hardware zoom
+ * that overshoots/undershoots slightly) is information the caller needs, not a
+ * failure — the caller decides what to do with `settled:false`, this function
+ * just refuses to lie about it.
+ *
+ * A transient read failure inside the loop is swallowed the same way: by the
+ * time this runs, the gimbal move and the zoom write have already happened, so
+ * throwing here would lose the `target`/`ratio` the caller needs to know what
+ * the camera just did. A read that throws is treated as "not settled yet" —
+ * the loop keeps polling until the deadline and resolves `false` rather than
+ * rejecting, so the tool still returns its normal result.
+ */
+async function waitForZoomSettle(
+  t: ObsbotTransport,
+  targetRatio: number,
+  opts: ZoomSettleOpts = {},
+): Promise<boolean> {
+  const { pollMs, timeoutMs } = { ...ZOOM_SETTLE_DEFAULTS, ...opts };
+  const targetPct = (targetRatio - 1) * 100;
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      const status = decodeStatus(await t.recvStatus());
+      if (Math.abs(status.zoomPercent - targetPct) <= ZOOM_SETTLE_TOLERANCE_PCT) return true;
+    } catch {
+      // Transient read failure — treat as not-yet-settled rather than propagating.
+    }
+    if (Date.now() >= deadline) return false;
+    await napMs(pollMs);
+  }
+}
+
+/**
+ * Read the status block, and refuse to hand it back if the zoom moved while we
+ * were looking at it.
+ *
+ * `obsbot_aim_at_pixel` and `obsbot_zoom_to_fit` turn a pixel into an angle using
+ * a magnification read live from this block. If the zoom is mid-ramp, that read
+ * describes a magnification the caller's frame was never captured at, and the
+ * angle comes out wrong in proportion — up to 4x, which is degrees to tens of
+ * degrees of mis-aim, reported as a clean success.
+ *
+ * The window is wide, not a narrow race: measured 2026-07-25, a full ratio 1->2
+ * sweep takes ~2.4s at roughly 42 percentage points per second.
+ *
+ * WAITING WOULD NOT FIX IT. The frame was captured at whatever magnification the
+ * ramp had reached at that instant; settling afterwards cannot change what those
+ * pixels already mean. So the callers refuse and ask for a fresh frame — the same
+ * reasoning that already makes them refuse a camera they had to wake, because
+ * waking moves the gimbal and invalidates the frame you measured.
+ *
+ * Detection is two reads a beat apart, because zoomPercent reports travel rather
+ * than the commanded value. Any change at all counts: the reading is an integer
+ * and a settled zoom reads identically every time, so there is no jitter band to
+ * allow for.
+ *
+ * KNOWN GAP, deliberately not papered over: a zoom that has been COMMANDED but has
+ * not started travelling yet reads steady, and this returns ok. On hardware that
+ * dead zone is ~140ms. It is covered for zooms this server issued — those tools
+ * wait for the ramp before returning — but not for one started from the remote,
+ * OBSBOT Center, or AI framing. This narrows the window; it does not prove the
+ * zoom is still.
+ */
+type SteadyStatus =
+  | { ok: true; block: Buffer; status: ReturnType<typeof decodeStatus> }
+  | { ok: false; fromPct: number; toPct: number };
+
+async function readSteadyStatus(
+  t: ObsbotTransport,
+  opts: ZoomSettleOpts = {},
+): Promise<SteadyStatus> {
+  const { motionPollMs } = { ...ZOOM_SETTLE_DEFAULTS, ...opts };
+  const firstPct = decodeStatus(await t.recvStatus()).zoomPercent;
+  await napMs(motionPollMs);
+  // The SECOND read is the one handed back: it is the fresher of the two, and by
+  // the time it is returned it has been confirmed equal to the first anyway.
+  const block = await t.recvStatus();
+  const status = decodeStatus(block);
+  if (status.zoomPercent !== firstPct) {
+    return { ok: false, fromPct: firstPct, toPct: status.zoomPercent };
+  }
+  return { ok: true, block, status };
+}
+
+/** The refusal both aiming tools give when {@link readSteadyStatus} sees travel. */
+const zoomMovingError = (r: { fromPct: number; toPct: number }, verb: string): string =>
+  `the zoom is still moving (zoomPercent read ${r.fromPct} then ${r.toPct}), so the frame you ` +
+  `measured was captured at a magnification the camera has already left — ${verb} from it would ` +
+  `be wrong in proportion. Wait for the zoom to finish, take a fresh snapshot, and try again.`;
+
 const allEmpty = (slots: PresetSlot[]): boolean => slots.every((s) => !s.occupied);
 
 /**
@@ -411,6 +627,7 @@ export function createTools(
   capture?: CaptureManager,
   debug = false,
   presetRead: PresetReadOpts = {},
+  zoomSettle: ZoomSettleOpts = {},
 ): ToolDef[] {
   // Per-camera resolution derived from the manager. Every camera-addressing tool
   // takes an optional `camera` selector (the serial); it threads through here so
@@ -565,7 +782,11 @@ export function createTools(
       description:
         "Standard UVC zoom: set an absolute zoom ratio, clamped to [1.0, 2.0]. Snaps to the " +
         "requested target exactly (unlike obsbot_zoom_vendor, whose ratio scale differs and " +
-        "may not land exactly where asked).",
+        "may not land exactly where asked). Waits for the zoom to actually arrive and returns " +
+        "{ settled }: the ramp is not instant (a full 1.0->2.0 sweep takes about 2.4s), and " +
+        "obsbot_aim_at_pixel and obsbot_zoom_to_fit both refuse while it is in flight, so this " +
+        "returning early would just move the failure downstream. settled:false means the zoom " +
+        "had not arrived within the timeout — the command was still sent.",
       schema: zoomAbsoluteSchema,
       handler: async (args: unknown) => {
         const parsed = zoomAbsoluteSchema.parse(args);
@@ -573,7 +794,14 @@ export function createTools(
         const t = await getTransport(parsed.camera);
         const { min, max } = await t.zoomRange();
         await t.zoomSet(zoomRatioToUnits(ratio, min, max));
-        return { ok: true, ratio };
+        // Deliberately NOT done for obsbot_zoom_vendor. waitForZoomSettle needs the
+        // target on the zoomPercent scale, and that tool's ratio scale is a different
+        // one that "may not land exactly where asked" — so it would report
+        // settled:false on a perfectly good zoom. The alternative signal, "zoomPercent
+        // stopped changing", reads as stopped during the ~140ms before the ramp starts
+        // moving, which would be a worse lie than saying nothing.
+        const settled = await waitForZoomSettle(t, ratio, zoomSettle);
+        return { ok: true, ratio, settled };
       },
     },
     {
@@ -843,10 +1071,12 @@ export function createTools(
         "pixel from one frame with dimensions from another aims at the wrong place and cannot be " +
         "detected. The frame must come from a source:\"device\" snapshot — virtual and ndi frames " +
         "are framed by OBSBOT Center, not this camera's own optics, and will aim wrongly. Takes no " +
-        "field-of-view argument: it reads the camera's actual FOV mode. Refuses when AI tracking is " +
-        "active (tracking moves the gimbal itself and would fight the aim) and when a custom zoom " +
-        "is set (the zoom magnification is measured but not applied yet), so it never aims on an assumption it " +
-        "cannot check. If the camera was asleep, waking it moves the gimbal and invalidates the " +
+        "field-of-view or zoom argument: it reads the camera's magnification from its reported " +
+        "state, a discrete FOV mode or a continuous zoom alike, so it works at any zoom. Refuses " +
+        "when AI tracking is active (tracking moves the gimbal itself and would fight the aim), " +
+        "when the FOV mode can't be decoded, or when a corrupt zoom reading would resolve to an " +
+        "implausible magnification, so it never aims on an assumption it cannot check. If the " +
+        "camera was asleep, waking it moves the gimbal and invalidates the " +
         "frame you measured, so the call refuses instead of aiming on stale geometry — take a fresh " +
         "snapshot and retry. Returns clamped:true if the target was outside the gimbal's range; the " +
         "camera still moves, to the nearest reachable pose. Refuses (ok:false) instead of moving when " +
@@ -857,20 +1087,8 @@ export function createTools(
       handler: async (args: unknown) => {
         const { x, y, frameWidth, frameHeight, camera } = aimAtPixelSchema.parse(args);
 
-        // 16:9 is preserved by the capture path at every resolution (verified at
-        // 256x144, 1280x720, 1920x1080), so a non-16:9 pair did not come from that
-        // path as-is — it was transposed (width/height swapped) or came from
-        // somewhere else entirely, since passing the values through unchanged
-        // always yields 16:9.
-        if (Math.abs(frameWidth / frameHeight - 16 / 9) > 0.02) {
-          return {
-            ok: false,
-            error:
-              `frame ${frameWidth}x${frameHeight} is not 16:9, but obsbot_capture_snapshot always ` +
-              `returns 16:9 frames. This looks like frameWidth/frameHeight were transposed, or came ` +
-              `from something other than that tool's result.`,
-          };
-        }
+        const aspectRefusal = refuseIfNot169(frameWidth, frameHeight);
+        if (aspectRefusal) return aspectRefusal;
         if (x < 0 || x > frameWidth || y < 0 || y > frameHeight) {
           return { ok: false, error: `pixel (${x},${y}) is outside the ${frameWidth}x${frameHeight} frame` };
         }
@@ -891,8 +1109,9 @@ export function createTools(
           };
         }
 
-        const block = await t.recvStatus();
-        const status = decodeStatus(block);
+        const steady = await readSteadyStatus(t, zoomSettle);
+        if (!steady.ok) return { ok: false, error: zoomMovingError(steady, "aiming") };
+        const { block, status } = steady;
         if (status.aiMode === "unknown") {
           return {
             ok: false,
@@ -909,41 +1128,51 @@ export function createTools(
               `fight the aim. Disable it with obsbot_ai_track {enabled:false} first.`,
           };
         }
-        if (status.fovMode === "custom") {
+        // One function decides whether the camera's reported state resolves to a
+        // usable magnification — discrete mode or continuous zoom alike — so there
+        // is exactly one place that decides to refuse rather than guess, AND
+        // exactly one place that decides WHY (see MagnificationResult).
+        const resolved = resolveMagnification(status);
+        if (!resolved.ok) {
+          if (resolved.reason === "unknown-fov") {
+            // block[0x11] is STATUS_OFF_FOV_MODE (src/codec/commands.ts) — same offset
+            // decodeStatus reads to produce fovMode, surfaced raw since "unknown" means
+            // it didn't match any known value.
+            return {
+              ok: false,
+              error:
+                `could not read the camera's FOV mode (raw byte 0x${block[0x11].toString(16).padStart(2, "0")}); ` +
+                `refusing to guess it. Set a known mode with obsbot_image_fov (e.g. {fov:"wide"}) and retry.`,
+            };
+          }
+          // reason "implausible-zoom": fovMode is "custom" but the zoom it derives
+          // from is implausible — e.g. zoomPercent far outside 0-100 — so the
+          // resulting magnification falls outside the camera's known range. That is
+          // a corrupt reading, not a real optical state; refuse rather than aim
+          // from a bad number.
           return {
             ok: false,
             error:
-              `a custom zoom is active (zoom ${status.zoomPercent}%). The zoom-to-magnification ` +
-              `mapping IS measured — magnification is 3*ratio-2, so this zoom is about ` +
-              `${(1 + 0.03 * status.zoomPercent).toFixed(2)}x — but it is not applied here yet, and ` +
-              `aiming without it would be wrong by that factor. Set obsbot_image_fov {fov:"wide"} ` +
-              `(or any discrete mode) to clear it. obsbot_zoom_uvc {ratio:1} will NOT clear it: ` +
-              `ratio 1.0 is the same optical state as wide, so the camera stays in custom mode.`,
+              `the camera's zoom reading (zoomPercent ${resolved.zoomPercent}) resolves to a ` +
+              `magnification outside the camera's known range [${MIN_MAGNIFICATION}, ` +
+              `${MAX_MAGNIFICATION}]; refusing rather than aim from what looks like a corrupt ` +
+              `status read. Retry, or set a known mode with obsbot_image_fov.`,
           };
         }
-        if (status.fovMode === "unknown") {
-          // block[0x11] is STATUS_OFF_FOV_MODE (src/codec/commands.ts) — same offset
-          // decodeStatus reads to produce fovMode, surfaced raw since "unknown" means
-          // it didn't match any known value.
-          return {
-            ok: false,
-            error:
-              `could not read the camera's FOV mode (raw byte 0x${block[0x11].toString(16).padStart(2, "0")}); ` +
-              `refusing to guess it. Set a known mode with obsbot_image_fov (e.g. {fov:"wide"}) and retry.`,
-          };
-        }
+        const magnification = resolved.magnification;
 
         // Same read path as obsbot_gimbal_position: UVC pan is degrees with our
         // yaw sign; UVC tilt is degrees but positive = up, so negate it.
         const yaw = (await t.camCtrlGet(CAMERA_CONTROL_PAN)).value;
         const pitch = -(await t.camCtrlGet(CAMERA_CONTROL_TILT)).value;
 
-        // zoom:1 — the measured FOV constants already include each discrete
-        // mode's inherent crop, so applying zoomPercent again would double-count.
+        // resolveMagnification already folded fovMode and zoomPercent into one
+        // number — a discrete mode's inherent crop and a continuous zoom are two
+        // ways of writing to the SAME scale, so there is nothing left to combine.
         const aim = aimAtPixel(
           x, y,
           { width: frameWidth, height: frameHeight },
-          { fov: status.fovMode, zoom: 1 },
+          { magnification },
           { yaw, pitch },
         );
 
@@ -972,6 +1201,179 @@ export function createTools(
           clamped: aim.clamped,
           fovMode: status.fovMode,
           current: { yaw, pitch },
+          ...(ready.reconnected ? { reconnected: true } : {}),
+        };
+      },
+    },
+    {
+      name: "obsbot_zoom_to_fit",
+      description:
+        "Frame a region of a frame you just captured: centre the gimbal on it and zoom so the " +
+        "region fills the frame. Give x/y/width/height of the region plus the frameWidth/frameHeight " +
+        "from THE SAME obsbot_capture_snapshot result — mixing a region from one frame with " +
+        "dimensions from another frames the wrong place and cannot be detected. Must come from a " +
+        "source:\"device\" snapshot, same constraint as obsbot_aim_at_pixel. `margin` (default 0.1) " +
+        "backs the zoom off by that fraction so the region isn't framed edge-to-edge; the tighter of " +
+        "the region's two axes decides the zoom, so the WHOLE region stays visible rather than being " +
+        "cropped on one side. Moves the gimbal BEFORE zooming, since zooming first can push the " +
+        "region's centre out of frame. Refuses on the same conditions as obsbot_aim_at_pixel: AI " +
+        "tracking active, the camera was asleep (waking it moves the gimbal and invalidates the " +
+        "frame), the FOV mode can't be decoded, a corrupt zoom reading, or the region's centre lying " +
+        "past vertical from the current pose, or a frame that isn't 16:9 (obsbot_capture_snapshot " +
+        "always returns 16:9; a non-16:9 pair looks transposed). Also refuses a region that isn't " +
+        "within the frame (edges included), or has non-positive width/height. The requested zoom is " +
+        "clamped to the camera's [1x, 4x] magnification range and reported via `clamped`; a partial " +
+        "fit still moves and zooms to the limit. Zoom ramps rather than jumping, so the tool polls " +
+        "the status block for up to 3s waiting for it to arrive and returns `settled:false` (not an " +
+        "error) if it didn't — " +
+        "a frame captured mid-ramp is at an unknown magnification, so check `settled` before trusting " +
+        "a follow-up snapshot.",
+      schema: zoomToFitSchema,
+      handler: async (args: unknown) => {
+        const { x, y, width, height, frameWidth, frameHeight, margin, camera } =
+          zoomToFitSchema.parse(args);
+
+        // Pure input validation first, no I/O — same placement as obsbot_aim_at_pixel's
+        // own frame/pixel checks, and the same order: the aspect check runs before
+        // the region-bounds check, matching obsbot_aim_at_pixel.
+        const aspectRefusal = refuseIfNot169(frameWidth, frameHeight);
+        if (aspectRefusal) return aspectRefusal;
+        // The region must lie within the frame, edges included: a region touching
+        // the frame's own edges is valid (a region that already IS the full frame
+        // must pass — the full-frame fit test depends on it), only crossing them
+        // is refused.
+        if (
+          width <= 0 || height <= 0 ||
+          x < 0 || y < 0 ||
+          x + width > frameWidth || y + height > frameHeight
+        ) {
+          return {
+            ok: false,
+            error:
+              `region (${x},${y}) ${width}x${height} is not inside the ${frameWidth}x${frameHeight} ` +
+              `frame, or has non-positive width/height.`,
+          };
+        }
+
+        // The gate wakes a sleeping camera and waits for it to settle. If it had to
+        // wake the camera, the gimbal just moved out from under the frame the caller
+        // measured — refuse below rather than frame a region that no longer means
+        // what it did (same reasoning as obsbot_aim_at_pixel).
+        const ready = await gate(camera);
+        if (!ready.ok) return ready;
+        const t = ready.transport;
+        if (ready.woke) {
+          return {
+            ok: false,
+            error:
+              "the camera was asleep and waking it moved the gimbal, so the frame you measured no " +
+              "longer matches where the camera is pointing. Take a fresh snapshot and try again.",
+          };
+        }
+
+        const steady = await readSteadyStatus(t, zoomSettle);
+        if (!steady.ok) return { ok: false, error: zoomMovingError(steady, "framing") };
+        const { block, status } = steady;
+        if (status.aiMode === "unknown") {
+          return {
+            ok: false,
+            error:
+              "could not read the camera's AI-tracking mode (the status block didn't decode this " +
+              "read — this can happen during a brief mode-switch transient); retry.",
+          };
+        }
+        if (status.aiMode !== "no-tracking") {
+          return {
+            ok: false,
+            error:
+              `AI tracking is active (${status.aiMode}); it moves the gimbal itself and would ` +
+              `fight the framing. Disable it with obsbot_ai_track {enabled:false} first.`,
+          };
+        }
+        const resolved = resolveMagnification(status);
+        if (!resolved.ok) {
+          if (resolved.reason === "unknown-fov") {
+            return {
+              ok: false,
+              error:
+                `could not read the camera's FOV mode (raw byte 0x${block[0x11].toString(16).padStart(2, "0")}); ` +
+                `refusing to guess it. Set a known mode with obsbot_image_fov (e.g. {fov:"wide"}) and retry.`,
+            };
+          }
+          return {
+            ok: false,
+            error:
+              `the camera's zoom reading (zoomPercent ${resolved.zoomPercent}) resolves to a ` +
+              `magnification outside the camera's known range [${MIN_MAGNIFICATION}, ` +
+              `${MAX_MAGNIFICATION}]; refusing rather than frame from what looks like a corrupt ` +
+              `status read. Retry, or set a known mode with obsbot_image_fov.`,
+          };
+        }
+        const magnification = resolved.magnification;
+
+        // Same read path as obsbot_gimbal_position / obsbot_aim_at_pixel.
+        const yaw = (await t.camCtrlGet(CAMERA_CONTROL_PAN)).value;
+        const pitch = -(await t.camCtrlGet(CAMERA_CONTROL_TILT)).value;
+
+        // Aim uses the CURRENT magnification: it has to match the optics the
+        // caller's frame was actually captured at, not the new fitted zoom.
+        const centerX = x + width / 2;
+        const centerY = y + height / 2;
+        const aim = aimAtPixel(
+          centerX, centerY,
+          { width: frameWidth, height: frameHeight },
+          { magnification },
+          { yaw, pitch },
+        );
+
+        if (aim.overTheTop) {
+          return {
+            ok: false,
+            error:
+              `region centre (${centerX},${centerY}) lies past vertical from the current pose (yaw ` +
+              `${yaw.toFixed(1)}, pitch ${pitch.toFixed(1)}); it is not reachable while keeping the ` +
+              `image upright, only by an "over the top" rotation that would swing the camera the ` +
+              `opposite way. Tilt toward the region first (e.g. obsbot_gimbal_move), then re-aim.`,
+          };
+        }
+
+        // required = m * min(frameW/width, frameH/height) / (1+margin). The MIN
+        // (not MAX) is deliberate: it's the axis that needs LESS extra zoom to fill,
+        // and zooming only that far keeps the OTHER axis from overflowing the frame
+        // — i.e. it's what keeps the whole region visible instead of cropping it.
+        // Note the frame's aspect ratio and VERTICAL_TANGENT_CORRECTION (src/geometry/aim.ts)
+        // do NOT appear here: writing out the fit condition on each axis, those terms
+        // scale tanH and tanV identically on both sides and cancel. They matter for
+        // AIMING at the region's centre (already folded into `aim` above via
+        // aimAtPixel) and not at all for how far to zoom.
+        const requiredRaw =
+          (magnification * Math.min(frameWidth / width, frameHeight / height)) / (1 + margin);
+        const requiredMagnification = clamp(requiredRaw, MIN_MAGNIFICATION, MAX_MAGNIFICATION);
+        const fitClamped = requiredMagnification !== requiredRaw;
+        const ratio = zoomRatioFromMagnification(requiredMagnification);
+
+        // Move BEFORE zoom. Zoom is centre-preserving but not target-preserving:
+        // zooming first can push the region's centre out of frame entirely, after
+        // which the move would be aiming at a pixel that no longer means what it
+        // did when it was measured.
+        await t.gimbalSet(aim.target.yaw, aim.target.pitch, 0);
+
+        const { min, max } = await t.zoomRange();
+        await t.zoomSet(zoomRatioToUnits(ratio, min, max));
+
+        // Zoom ramps rather than jumping, so a status read taken immediately after
+        // the write can catch it mid-transit — settled:false is a RESULT for the
+        // caller to check, not thrown as an error, since a slower-than-expected
+        // zoom is information, not a failure of this call.
+        const settled = await waitForZoomSettle(t, ratio, zoomSettle);
+
+        return {
+          ok: true,
+          target: aim.target,
+          ratio,
+          magnification: requiredMagnification,
+          clamped: fitClamped || aim.clamped,
+          settled,
           ...(ready.reconnected ? { reconnected: true } : {}),
         };
       },
@@ -1350,7 +1752,15 @@ export function createTools(
               { type: "image", data: snap.base64, mimeType: snap.mime },
               {
                 type: "text",
-                text: JSON.stringify({ width: snap.width, height: snap.height, source }),
+                text: JSON.stringify({
+                  width: snap.width,
+                  height: snap.height,
+                  source,
+                  // Frame rate picks the field of view on this camera, so the
+                  // negotiated format is part of what a pixel means. Reported
+                  // when the platform helper knows it; see Snapshot.sourceFormat.
+                  ...(snap.sourceFormat ? { sourceFormat: snap.sourceFormat } : {}),
+                }),
               },
             ],
           };

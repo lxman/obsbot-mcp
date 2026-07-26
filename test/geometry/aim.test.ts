@@ -2,7 +2,8 @@ import { expect, test } from "vitest";
 import {
   halfAngles, pixelToOffset, aimAtPixel,
   HORIZONTAL_FOV_DEG, VERTICAL_TANGENT_CORRECTION, GIMBAL_YAW_LIMIT_DEG, GIMBAL_PITCH_LIMIT_DEG,
-  WIDE_HFOV_DEG, FOV_MAGNIFICATION,
+  WIDE_HFOV_DEG, FOV_MAGNIFICATION, MIN_MAGNIFICATION, MAX_MAGNIFICATION,
+  magnificationFromZoomRatio, zoomRatioFromMagnification,
 } from "../../src/geometry/aim.js";
 
 const HD = { width: 1280, height: 720 };
@@ -36,18 +37,60 @@ test("the derived table really is derived, not three literals", () => {
   }
 });
 
+test("magnification is linear in the UVC zoom ratio", () => {
+  // m = 3r - 2, measured to better than 0.05% (spec section 1.1). Ratio 2.0 is
+  // 4x linear, not 2x — a note this project carried unsourced until it was
+  // measured.
+  expect(magnificationFromZoomRatio(1.0)).toBeCloseTo(1.0, 9);
+  expect(magnificationFromZoomRatio(1.25)).toBeCloseTo(1.75, 9);
+  expect(magnificationFromZoomRatio(1.5)).toBeCloseTo(2.5, 9);
+  expect(magnificationFromZoomRatio(2.0)).toBeCloseTo(4.0, 9);
+});
+
+test("the ratio conversion round-trips", () => {
+  for (const r of [1.0, 1.1, 1.25, 1.5, 1.75, 1.9, 2.0]) {
+    expect(zoomRatioFromMagnification(magnificationFromZoomRatio(r))).toBeCloseTo(r, 9);
+  }
+});
+
+test("the FOV presets sit on the same magnification scale as the zoom", () => {
+  // The discrete modes are not a separate control — they are points on the zoom
+  // scale, which is why obsbot_zoom_uvc {ratio:1} does not clear `custom`:
+  // ratio 1.0 IS wide.
+  expect(zoomRatioFromMagnification(FOV_MAGNIFICATION.wide)).toBeCloseTo(1.0, 9);
+  expect(zoomRatioFromMagnification(FOV_MAGNIFICATION.medium)).toBeCloseTo(1.05020, 4);
+  expect(zoomRatioFromMagnification(FOV_MAGNIFICATION.narrow)).toBeCloseTo(1.15691, 4);
+});
+
+test("magnification divides the tangent, and the wide field is the reference", () => {
+  const wide = halfAngles({ magnification: 1 }, HD);
+  const twice = halfAngles({ magnification: 2 }, HD);
+  expect(wide.h).toBeCloseTo(33.5, 9);
+  expect(Math.tan(rad(twice.h))).toBeCloseTo(Math.tan(rad(wide.h)) / 2, 9);
+});
+
+test("the collapsed optics reproduce the derived per-mode fields exactly", () => {
+  // Guards the restructure: passing a mode's magnification must give exactly the
+  // half-angle the derived HORIZONTAL_FOV_DEG table gives. If this drifts, the
+  // rename moved a measured value.
+  for (const mode of ["wide", "medium", "narrow"] as const) {
+    expect(halfAngles({ magnification: FOV_MAGNIFICATION[mode] }, HD).h)
+      .toBeCloseTo(HORIZONTAL_FOV_DEG[mode] / 2, 9);
+  }
+});
+
 test("the horizontal half-angle is half the measured field of view", () => {
-  expect(halfAngles({ fov: "wide" }, HD).h).toBeCloseTo(33.5, 9);
-  expect(halfAngles({ fov: "medium" }, HD).h).toBeCloseTo(29.9098, 3);
-  expect(halfAngles({ fov: "narrow" }, HD).h).toBeCloseTo(24.2296, 3);
+  expect(halfAngles({ magnification: 1 }, HD).h).toBeCloseTo(33.5, 9);
+  expect(halfAngles({ magnification: FOV_MAGNIFICATION.medium }, HD).h).toBeCloseTo(29.9098, 3);
+  expect(halfAngles({ magnification: FOV_MAGNIFICATION.narrow }, HD).h).toBeCloseTo(24.2296, 3);
 });
 
 test("the vertical half-angle takes the measured correction, not bare geometry", () => {
   // Square-pixel geometry would give tan(33.5deg) * 0.5625 -> V ~= 20.4208deg.
   // Hardware says the vertical field is shorter than that, so the measured
   // correction applies and V ~= 19.6110deg. See VERTICAL_TANGENT_CORRECTION.
-  expect(halfAngles({ fov: "wide" }, HD).v).toBeCloseTo(19.6110, 2);
-  expect(halfAngles({ fov: "wide" }, HD).v).not.toBeCloseTo(20.4208, 1);
+  expect(halfAngles({ magnification: 1 }, HD).v).toBeCloseTo(19.6110, 2);
+  expect(halfAngles({ magnification: 1 }, HD).v).not.toBeCloseTo(20.4208, 1);
 });
 
 test("the vertical correction is the measured value, not a no-op", () => {
@@ -59,7 +102,7 @@ test("the vertical correction is the measured value, not a no-op", () => {
 });
 
 test("the measured vertical/horizontal tangent ratio is ~0.538 at 16:9", () => {
-  const { h, v } = halfAngles({ fov: "wide" }, HD);
+  const { h, v } = halfAngles({ magnification: 1 }, HD);
   expect(Math.tan(rad(v)) / Math.tan(rad(h))).toBeCloseTo(0.538312, 3);
   // Square-pixel geometry demands 0.5625; the camera does not deliver it.
   expect(Math.tan(rad(v)) / Math.tan(rad(h))).not.toBeCloseTo(0.5625, 2);
@@ -67,22 +110,53 @@ test("the measured vertical/horizontal tangent ratio is ~0.538 at 16:9", () => {
 
 test("the vertical half-angle still scales with the frame aspect ratio", () => {
   // The correction multiplies the aspect term, it does not replace it.
-  const tall = halfAngles({ fov: "narrow" }, { width: 1000, height: 1000 });
-  const flat = halfAngles({ fov: "narrow" }, { width: 1000, height: 500 });
+  const tall = halfAngles({ magnification: FOV_MAGNIFICATION.narrow }, { width: 1000, height: 1000 });
+  const flat = halfAngles({ magnification: FOV_MAGNIFICATION.narrow }, { width: 1000, height: 500 });
   expect(Math.tan(rad(tall.v))).toBeCloseTo(2 * Math.tan(rad(flat.v)), 9);
 });
 
 test("zoom crops the field of view by dividing the tangent, not the angle", () => {
-  const oneX = halfAngles({ fov: "wide" }, HD).h;
-  const twoX = halfAngles({ fov: "wide", zoom: 2 }, HD).h;
+  const oneX = halfAngles({ magnification: 1 }, HD).h;
+  const twoX = halfAngles({ magnification: 2 }, HD).h;
   // If zoom divided the ANGLE, 2x would give 17deg. It divides the TANGENT.
   expect(Math.tan(rad(twoX))).toBeCloseTo(Math.tan(rad(oneX)) / 2, 9);
   expect(twoX).toBeCloseTo(18.3116, 2);
   expect(twoX).not.toBeCloseTo(17.0, 1);
 });
 
-test("omitted zoom is treated as 1x", () => {
-  expect(halfAngles({ fov: "wide" }, HD).h).toBeCloseTo(halfAngles({ fov: "wide", zoom: 1 }, HD).h, 9);
+// --- degenerate magnification is refused, not silently miscomputed ---
+//
+// Dividing by optics.magnification with no guard would let a magnification of
+// 0 yield tanH = Infinity (atan resolves that to a silent 90-degree half-angle),
+// a negative value flip the half-angle's sign with no error, and NaN propagate
+// all the way through aimAtPixel's output with no error anywhere. Now that
+// resolveMagnification (src/mcp/tools.ts) derives magnification from a
+// device-reported zoomPercent, a malformed reading is exactly how one of these
+// gets in — so the geometry module itself refuses rather than trusting the
+// caller.
+
+test("zero magnification throws rather than silently producing a 90-degree half-angle", () => {
+  expect(() => halfAngles({ magnification: 0 }, HD)).toThrow(/magnification/i);
+});
+
+test("negative magnification throws rather than silently flipping the aim's sign", () => {
+  expect(() => pixelToOffset(960, 360, HD, { magnification: -1 })).toThrow(/magnification/i);
+});
+
+test("NaN magnification throws rather than propagating to a NaN aim", () => {
+  expect(() => aimAtPixel(960, 360, HD, { magnification: NaN }, { yaw: 0, pitch: 0 })).toThrow(/magnification/i);
+});
+
+test("magnification outside the camera's known range throws", () => {
+  expect(() => halfAngles({ magnification: MAX_MAGNIFICATION + 0.01 }, HD)).toThrow(/magnification/i);
+  expect(() => halfAngles({ magnification: MIN_MAGNIFICATION - 0.01 }, HD)).toThrow(/magnification/i);
+});
+
+test("the camera's known magnification range is exactly what the endpoints allow", () => {
+  // MIN/MAX are inclusive — the wide field (m=1) and the top of the measured
+  // zoom range (m=4, ratio 2.0) must both compute without throwing.
+  expect(() => halfAngles({ magnification: MIN_MAGNIFICATION }, HD)).not.toThrow();
+  expect(() => halfAngles({ magnification: MAX_MAGNIFICATION }, HD)).not.toThrow();
 });
 
 // --- pixel -> angular offset ---
@@ -97,7 +171,7 @@ test("omitted zoom is treated as 1x", () => {
 // negative yaw swept the scene LEFT across the frame, which is what an unmirrored
 // capture path does.
 
-const WIDE = { fov: "wide" as const };
+const WIDE = { magnification: 1 };
 
 test("the center pixel needs no correction", () => {
   const o = pixelToOffset(640, 360, HD, WIDE);
@@ -156,7 +230,7 @@ test("dPitch increases monotonically as y increases", () => {
 
 test("zooming in shrinks the offset for the same pixel", () => {
   const oneX = pixelToOffset(960, 360, HD, WIDE).dYaw;
-  const twoX = pixelToOffset(960, 360, HD, { ...WIDE, zoom: 2 }).dYaw;
+  const twoX = pixelToOffset(960, 360, HD, { magnification: 2 }).dYaw;
   expect(Math.abs(twoX)).toBeLessThan(Math.abs(oneX));
 });
 

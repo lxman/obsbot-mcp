@@ -292,6 +292,9 @@ export class HelperProcess {
       width: resp.width as number,
       height: resp.height as number,
       base64: resp.base64 as string,
+      ...(typeof resp.sourceFormat === "string" && resp.sourceFormat !== ""
+        ? { sourceFormat: resp.sourceFormat }
+        : {}),
     };
   }
 

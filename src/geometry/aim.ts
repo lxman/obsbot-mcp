@@ -18,13 +18,22 @@ export interface Pose {
 }
 
 export interface Optics {
-  fov: FovType;
-  /** Zoom factor, >= 1. Zoom is a crop, so it divides the tangent. Defaults to 1. */
-  zoom?: number;
+  /**
+   * Total linear magnification relative to the WIDE field, which is 1.0.
+   *
+   * One number, deliberately. The camera has a single magnification scale: the
+   * discrete FOV modes are points on it (FOV_MAGNIFICATION) and a continuous
+   * zoom writes to it directly (magnificationFromZoomRatio). Setting a zoom
+   * ratio REPLACES the mode's magnification rather than multiplying it —
+   * `narrow` plus ratio 1.5 measures 2.509, the same as `wide` plus 1.5, not
+   * 1.47 x 2.5. An earlier `{ fov, zoom }` shape made that double-counting easy
+   * to write and had to warn against it; this shape makes it unrepresentable.
+   */
+  magnification: number;
   /**
    * Whether the capture path horizontally flips the preview. This inverts the
    * yaw correction, so it is an explicit input rather than a baked-in
-   * assumption — see the spec's section 3. Defaults to false.
+   * assumption. Defaults to false.
    */
   mirrored?: boolean;
 }
@@ -68,12 +77,24 @@ const toDeg = (rad: number): number => (rad * 180) / Math.PI;
  * the constant differing: a target at u = +0.91 left a yaw residual of -0.823
  * degrees under the old 68 and -0.274 under 67.
  *
- * CAPTURE FORMAT WARNING: MJPEG 1920x1080 is a 1.201x crop of YUYV 1920x1080 on
- * this camera — same resolution, different window onto the sensor. These
- * constants describe the WIDE field, which is what `obsbot_capture_snapshot`
- * delivers. `obsbot_capture_preview` pins MJPEG and therefore shows ~20% less.
- * Any future measurement through ffmpeg must state its pixel format; a
- * resolution alone does not identify the field.
+ * CAPTURE FORMAT WARNING: at 1920x1080 this camera has two different windows
+ * onto the sensor, and FRAME RATE selects between them — not the codec.
+ * MEASURED 2026-07-25 at one pose and one zoom: MJPEG@30 vs YUYV@30 came out at
+ * scale 1.00001, t (0.2, 0.0) over 2382 inliers at 0.12 px, i.e. the same field
+ * to within a fifth of a pixel; MJPEG@60 is a 1.214x crop of BOTH (1.21422 and
+ * 1.21404). An earlier revision recorded this as "MJPEG is a 1.201x crop of
+ * YUYV" — that comparison was MJPEG@60 against YUYV@30 and charged the codec
+ * for what the frame rate did.
+ *
+ * These constants describe the WIDE (30fps) field. That is what
+ * `obsbot_capture_snapshot` delivers: its graph negotiates MJPG 1920x1080@30,
+ * which the reply now states outright in `sourceFormat`.
+ * `obsbot_capture_preview` pins 60fps to buy smooth motion and therefore shows
+ * ~21% less — so preview pixels are NOT interchangeable with snapshot pixels
+ * for aiming.
+ *
+ * Any future measurement must state pixel format AND frame rate; neither a
+ * resolution nor a codec alone identifies the field.
  *
  * SCOPE: 16:9 capture at any resolution. A 4:3 path would need re-measuring.
  */
@@ -143,12 +164,48 @@ export const HORIZONTAL_FOV_DEG: Record<FovType, number> = {
  */
 export const VERTICAL_TANGENT_CORRECTION = 0.957;
 
+/** Magnification of the wide field, and of the whole scale, at its extremes. */
+export const MIN_MAGNIFICATION = 1;
+export const MAX_MAGNIFICATION = 4;
+
+/**
+ * Linear magnification for a UVC zoom ratio. MEASURED 2026-07-25: magnification
+ * is linear in the ratio, `m = 3r - 2`, holding to better than 0.05% at ratios
+ * 1.25, 1.5 and 2.0. So ratio 2.0 is 4x linear — carried for a long time as an
+ * unsourced note, now measured to four figures. See the spec's section 1.1.
+ */
+export const magnificationFromZoomRatio = (ratio: number): number => 3 * ratio - 2;
+
+/** Inverse of {@link magnificationFromZoomRatio}: the ratio that yields `m`. */
+export const zoomRatioFromMagnification = (m: number): number => (m + 2) / 3;
+
 // The tangents are the useful form for every downstream calculation, so they are
 // computed once here and the degree-valued halfAngles() is a thin wrapper. Going
 // through degrees would mean an atan followed immediately by a tan.
+//
+// This is also the ONE place every public entry point (halfAngles, pixelToOffset,
+// aimAtPixel) funnels through, which is why the magnification bound is enforced
+// here rather than trusted from the caller. A magnification of 0 divides out to
+// tanH = Infinity, which atan silently resolves to a 90-degree half-angle; a
+// negative value flips the half-angle's sign with no error; NaN propagates all
+// the way through aimAtPixel's output. Before this guard MIN_MAGNIFICATION/
+// MAX_MAGNIFICATION were exported but enforced nowhere — decorative constants
+// that a malformed device reading (this module's callers now derive magnification
+// from a reported zoomPercent) could silently violate. Callers that already
+// validate their own input (resolveMagnification in src/mcp/tools.ts) should
+// never actually trip this; it exists as the backstop for whichever caller
+// doesn't.
 const halfAngleTangents = (optics: Optics, frame: Frame): { tanH: number; tanV: number } => {
-  const zoom = optics.zoom ?? 1;
-  const tanH = Math.tan(toRad(HORIZONTAL_FOV_DEG[optics.fov] / 2)) / zoom;
+  if (
+    !Number.isFinite(optics.magnification) ||
+    optics.magnification < MIN_MAGNIFICATION ||
+    optics.magnification > MAX_MAGNIFICATION
+  ) {
+    throw new RangeError(
+      `optics.magnification must be finite and within [${MIN_MAGNIFICATION}, ${MAX_MAGNIFICATION}], got ${optics.magnification}`,
+    );
+  }
+  const tanH = Math.tan(toRad(WIDE_HFOV_DEG / 2)) / optics.magnification;
   // Vertical starts from the horizontal half-angle scaled by the frame aspect —
   // what square-pixel geometry predicts — then takes the measured correction,
   // because hardware says the real vertical field is ~4.3% shorter than that.

@@ -66,6 +66,30 @@ test("snapshot returns the decoded frame from the helper", async () => {
   await h.close();
 });
 
+// Frame rate selects the field of view on this camera (1080p30 and 1080p60 are
+// different windows onto the sensor), so the negotiated format is part of what a
+// snapshot pixel means to the aiming geometry. It has to survive the trip from
+// the helper rather than being dropped on the floor here.
+test("snapshot surfaces the helper's negotiated source format", async () => {
+  const h = new HelperProcess(["node", fake]);
+  await h.start();
+  const snap = await h.snapshot({ path: "withformat" });
+  expect(snap.sourceFormat).toBe("MJPG 1920x1080@30.00");
+  await h.close();
+});
+
+// A helper that cannot determine the format sends an empty string. That means
+// "unknown", and unknown must not masquerade as a real answer -- a caller
+// checking `if (snap.sourceFormat)` would otherwise see a falsy-but-present
+// field, and one serializing it would publish an empty format as fact.
+test("snapshot omits an empty source format rather than reporting it", async () => {
+  const h = new HelperProcess(["node", fake]);
+  await h.start();
+  const snap = await h.snapshot({ path: "blankformat" });
+  expect(snap).not.toHaveProperty("sourceFormat");
+  await h.close();
+});
+
 test("snapshot throws CameraBusyError when the helper reports busy", async () => {
   const h = new HelperProcess(["node", fake]);
   await h.start();
