@@ -380,6 +380,16 @@ export const IMAGE_CONTROLS = Object.keys(IMAGE_CONTROL_PROP) as ImageControl[];
 export const percentToRange = (pct: number, min: number, max: number): number =>
   Math.round(min + (max - min) * (pct / 100));
 
+/**
+ * Inverse of {@link percentToRange}: put a raw device value back on the 0-100
+ * scale the tools speak, so a control reads back in the units it was written in.
+ *
+ * A degenerate range (min === max) yields 0 rather than dividing by zero — a
+ * device that reports no span has no position to express as a fraction of it.
+ */
+export const rangeToPercent = (value: number, min: number, max: number): number =>
+  max === min ? 0 : Math.round(((value - min) / (max - min)) * 100);
+
 // ---------------------------------------------------------------------------
 //  Status block (UVC XU selector 6, GET_CUR) — a flat fixed-offset snapshot,
 //  NOT a V3 frame reply: no magic, no CRC. Offsets confirmed against the

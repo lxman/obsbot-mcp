@@ -938,6 +938,56 @@ test("obsbot_debug_probe still gives up when the device truly never answers", as
   expect(result.error).toMatch(/no valid reply/);
 });
 
+// Focus is a standard UVC control, NOT part of the 60-byte vendor status block, so
+// it takes a second read to report. It is worth the read: obsbot_focus_auto and
+// obsbot_focus_manual were write-only, and the only way to answer "is it still in
+// autofocus?" was to bypass the tool surface entirely and call camctrl_get on the
+// helper by hand.
+// Under autofocus this camera echoes the last written value instead of exposing the
+// motor -- MEASURED 2026-07-25, it stayed pinned across a 40deg pan, a 3.34x->1x zoom
+// and 9s of settling. Publishing that would read as a live focus distance while being
+// a stale write, so the field is withheld and the caller can tell the difference.
+test("obsbot_status reports autofocus WITHOUT a position, which the camera cannot supply", async () => {
+  const transport = makeFakeTransport();
+  transport.camCtrlGet = vi.fn(async (_p: number) => ({ value: 120, flags: 1 })); // 1 = auto
+  const result = await findTool(createTools(makeFakeMgr(transport)), "obsbot_status").handler({});
+  expect(result).toMatchObject({ ok: true, focusMode: "auto" });
+  expect(result).not.toHaveProperty("focusPosition");
+});
+
+// In manual mode the value IS the setpoint, and round-trips exactly, so it is worth
+// reporting -- on the same 0-100 scale obsbot_focus_manual accepts, whatever the
+// device's own range happens to be.
+test("obsbot_status reports the manual focus setpoint, normalised to 0-100", async () => {
+  const transport = makeFakeTransport();
+  transport.camCtrlRange = vi.fn(async (_p: number) => ({ min: 0, max: 200 }));
+  transport.camCtrlGet = vi.fn(async (_p: number) => ({ value: 50, flags: 2 })); // 2 = manual
+  const result = await findTool(createTools(makeFakeMgr(transport)), "obsbot_status").handler({});
+  expect(result).toMatchObject({ ok: true, focusMode: "manual", focusPosition: 25 });
+});
+
+// A focus flags value we don't recognise is reported as unknown rather than guessed
+// at — the same rule the FOV and AI-mode decodes already follow.
+test("obsbot_status calls an unrecognised focus mode unknown rather than guessing", async () => {
+  const transport = makeFakeTransport();
+  transport.camCtrlGet = vi.fn(async (_p: number) => ({ value: 10, flags: 7 }));
+  const result = await findTool(createTools(makeFakeMgr(transport)), "obsbot_status").handler({});
+  expect(result).toMatchObject({ ok: true, focusMode: "unknown" });
+});
+
+// The status BLOCK is the point of this tool; focus is a bonus. A device or platform
+// that cannot answer the focus query must not take the whole status read down with
+// it — losing awake/aiMode/zoomPercent to learn nothing about focus is a bad trade.
+test("obsbot_status still returns the status block when the focus read fails", async () => {
+  const transport = makeFakeTransport();
+  transport.camCtrlGet = vi.fn(async (_p: number) => {
+    throw new Error("control not supported on this device");
+  });
+  const result = await findTool(createTools(makeFakeMgr(transport)), "obsbot_status").handler({});
+  expect(result).toMatchObject({ ok: true, aiMode: "no-tracking", focusMode: "unknown" });
+  expect(result).not.toHaveProperty("focusPosition");
+});
+
 test("obsbot_status omits the raw RE block unless debug is enabled", async () => {
   const transport = makeFakeTransport();
   const block = Buffer.alloc(60);

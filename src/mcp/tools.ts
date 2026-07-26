@@ -17,6 +17,7 @@ import {
   encodeFov,
   encodeHdr,
   percentToRange,
+  rangeToPercent,
   AI_FRAMING_MODES,
   AI_SCENE_MODES,
   AI_TRACK_SPEEDS,
@@ -580,6 +581,50 @@ const zoomMovingError = (r: { fromPct: number; toPct: number }, verb: string): s
   `measured was captured at a magnification the camera has already left — ${verb} from it would ` +
   `be wrong in proportion. Wait for the zoom to finish, take a fresh snapshot, and try again.`;
 
+/**
+ * Read the focus control for {@link obsbot_status}.
+ *
+ * Focus is a standard UVC control, not a field of the 60-byte vendor status
+ * block, so reporting it costs two extra reads. Worth it: obsbot_focus_auto and
+ * obsbot_focus_manual were write-only, and answering "is it still in autofocus?"
+ * previously meant going underneath the tool surface to the helper's camctrl_get
+ * by hand.
+ *
+ * NEVER THROWS. The status block is what this tool is for, and focus is an
+ * addition to it — trading awake/aiMode/zoomPercent for a failed focus query
+ * would be a bad deal on any device or platform that cannot answer it. A failure
+ * reports mode "unknown" and omits the position, which is also what an
+ * unrecognised flags value gets: the same refuse-to-guess rule the FOV and
+ * AI-mode decodes already follow.
+ *
+ * focusPosition is reported ONLY in manual mode, where it is the setpoint and
+ * round-trips exactly (write 25, read 25). Under autofocus the device does not
+ * expose the motor: MEASURED 2026-07-25, the value stayed pinned at the last
+ * written position across a 40-degree pan, a zoom from 3.34x to 1x, and 9s of
+ * settling — a scene change that must have re-focused the lens. It is the same
+ * setpoint-echo this camera does for pan/tilt. Reporting that number under
+ * autofocus would look like a live focus distance while being a stale write, so
+ * the field is omitted instead and the caller can tell the difference.
+ *
+ * In manual mode the position is normalised onto the same 0-100 scale
+ * obsbot_focus_manual accepts, so the control reads back in the units it was
+ * written in.
+ */
+async function readFocus(
+  t: ObsbotTransport,
+): Promise<{ focusMode: "auto" | "manual" | "unknown"; focusPosition?: number }> {
+  try {
+    const { value, flags } = await t.camCtrlGet(CAMERA_CONTROL_FOCUS);
+    const focusMode =
+      flags === UVC_FLAG_AUTO ? "auto" : flags === UVC_FLAG_MANUAL ? "manual" : "unknown";
+    if (focusMode !== "manual") return { focusMode };
+    const { min, max } = await t.camCtrlRange(CAMERA_CONTROL_FOCUS);
+    return { focusMode, focusPosition: rangeToPercent(value, min, max) };
+  } catch {
+    return { focusMode: "unknown" };
+  }
+}
+
 const allEmpty = (slots: PresetSlot[]): boolean => slots.every((s) => !s.occupied);
 
 /**
@@ -899,12 +944,18 @@ export function createTools(
       name: "obsbot_status",
       description:
         "Read the camera's live status block. Returns { awake, hdr, faceAe, aiMode, trackSpeed, " +
-        "fovMode, zoomPercent }: " +
+        "fovMode, zoomPercent, focusMode, focusPosition }: " +
         "faceAe is whether auto-exposure is metering for a detected face; " +
         "aiMode is the current AI framing (no-tracking|normal|upper-body|close-up|headless|" +
         "lower-body|desk|whiteboard|hand|group|unknown); trackSpeed is standard|sport|unknown; " +
         "fovMode is the field-of-view mode (wide|medium|narrow|custom|unknown), where custom means " +
-        "a continuous zoom overrode the discrete modes; zoomPercent is the zoom position, 0-100. " +
+        "a continuous zoom overrode the discrete modes; zoomPercent is the zoom position, 0-100; " +
+        "focusMode is auto|manual|unknown. focusPosition is present ONLY in manual mode, on the " +
+        "same 0-100 scale obsbot_focus_manual takes: under autofocus this camera does not expose " +
+        "the motor, it echoes the last written value, so reporting it would look like a live " +
+        "focus distance while being stale. Focus is a standard UVC control rather than a field " +
+        "of the status block, so it costs an extra read; a device that cannot answer it reports " +
+        "focusMode unknown rather than failing the whole read. " +
         "Under --debug the result also carries `raw`: the full 60-byte status block as hex " +
         "(for reverse-engineering undecoded offsets).",
       schema: getStatusSchema,
@@ -913,7 +964,12 @@ export function createTools(
         const t = await getTransport(camera);
         try {
           const block = await t.recvStatus();
-          return { ok: true, ...decodeStatus(block), ...(debug ? { raw: block.toString("hex") } : {}) };
+          return {
+            ok: true,
+            ...decodeStatus(block),
+            ...(await readFocus(t)),
+            ...(debug ? { raw: block.toString("hex") } : {}),
+          };
         } catch (e) {
           return { ok: false, error: `could not read camera status: ${(e as Error).message}` };
         }
