@@ -13,7 +13,9 @@ since been written, compiled, and verified against hardware; see §9.**
 **Sent to `linux-media` 2026-07-25**, Message-ID
 `<20260725212332.64927-1-jordan.mymail@gmail.com>`
 ([lore](https://lore.kernel.org/linux-media/20260725212332.64927-1-jordan.mymail@gmail.com/)).
-Awaiting review.
+**Under review**: first response from Ricardo Ribalda 2026-07-31 ("not
+against the idea", three questions and an alternative proposal); answered
+same day. See §9, "First review".
 
 > **Update 2026-07-25.** Sections 1–4 and 7 stand as written. Section 5's
 > "what must be built first" is done (§9). Section 8 contained an error and has
@@ -569,6 +571,59 @@ that this list responds better to flexibility than to a dug-in position:
 A fourth item, noted but not raised: `uvc_mapping_get_xctrl_compound()` still
 reads `UVC_CTRL_DATA_CURRENT`. No compound control is flagged volatile, so
 there is no bug, but it is the second wiring point if the concept generalises.
+
+### First review (2026-07-31): Ricardo Ribalda
+
+Ricardo Ribalda (Chromium; among the most active uvcvideo maintainers)
+replied six days after submission
+([his mail](https://lore.kernel.org/linux-media/CANiDSCsyVYanm5MowQv5-rGy1EYs080WRsZYJCT=J=SesPFnjQ@mail.gmail.com/)).
+Friendly, opens with "I am not against the idea proposed by this patch."
+Substance, and how each point was answered
+([our reply](https://lore.kernel.org/linux-media/20260731151509.577383-1-jordan.mymail@gmail.com/),
+sent same day, archived copies at `~/kernel-uvc-work/reply-to-ribalda.{txt,eml}`):
+
+1. **Use case: continuous position, or just end-of-move?** Answered: continuous
+   — relative framing math needs the current pose, and under on-device AI
+   tracking the gimbal moves autonomously for minutes with no SET_CUR in
+   flight and no end-of-move at all.
+2. **Suggested V4L2 control events instead.** Declined on three levels:
+   uvcvideo's only device-originated event source is
+   `uvc_ctrl_status_event()`, fed by the Control Change interrupt, which the
+   spec promises only "at the end of the movement" (one event per move, not a
+   trajectory); this device never emits that interrupt (GET_INFO=0x03, no
+   Autoupdate/Asynchronous bits — §2); autonomous tracking has no end of
+   movement to signal.
+3. **His one technical critique**: a scenario where, after the camera has
+   autonomously tracked away from the last commanded pose, a single-axis
+   write RMWs from `UVC_CTRL_DATA_CURRENT` (the setpoint) and yanks the
+   other axis back, fighting the tracker. **Real, but pre-existing** — the
+   patch's write path is byte-identical to mainline. Both merge-source
+   behaviours already ship, selected by the device's GET_INFO bits: setpoint
+   merge (his scenario, this camera) vs live merge on Autoupdate devices —
+   which is exactly the §4.1 user-move cancellation, measured on this
+   hardware via the asleep-probe incident. The reply laid out both horns
+   with the measurements. Bonus noted: under the patch, reads no longer set
+   `ctrl->loaded`, so the write path can never merge against a stale sample
+   frozen by an earlier G_CTRL.
+4. **His counter-proposal**: ownership-based cache validity (user-commanded
+   move in flight → cache valid; device-owned → never cached), with
+   pseudo-code. Endorsed as the right frame *for the write path* and as
+   composable with (not a replacement for) the read-path patch — he himself
+   conceded it "still doesn't support polling the live mid-flight position,"
+   which is the entire use case. Two practical flaws flagged: his first hunk
+   loads live data into `UVC_CTRL_DATA_CURRENT`, the RMW source, recreating
+   the §4.1 cancellation unconditionally on Autoupdate devices (the separate
+   `DATA_LIVE` buffer exists precisely to avoid this); and anything keyed on
+   `AUTO_UPDATE`/`ASYNCHRONOUS` never triggers on this camera, whose
+   GET_INFO reports neither — plus his "until the move completes" ownership
+   needs a completion interrupt this firmware never sends.
+
+The reply closed by offering a respin that argues the autonomous-tracking use
+case in the commit message itself. Likely next moves from his side: "respin
+with that" (easy v2 — the argument is already drafted in the reply), or a
+design discussion on ownership as follow-on write-path work. Reply Message-ID
+`<20260731151509.577383-1-jordan.mymail@gmail.com>`, threaded correctly under
+his mail on lore.
 
 ---
 
