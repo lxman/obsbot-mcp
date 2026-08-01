@@ -1,6 +1,6 @@
 {
   "name": "obsbot-mcp",
-  "version": "0.6.2",
+  "version": "0.6.3",
   "description": "Cross-platform MCP server for OBSBOT Tiny 2 (UVC) camera control",
   "mcpName": "io.github.lxman/obsbot-mcp",
   "license": "MIT",

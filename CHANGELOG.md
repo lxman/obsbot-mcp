@@ -1,5 +1,69 @@
 # Changelog
 
+## [0.6.3] — 2026-08-01
+
+### Fixed: a two-axis gimbal move could lose one of its axes (Linux)
+
+Pan and tilt are not two controls on this camera. They are one 8-byte UVC control
+(`CT_PANTILT_ABSOLUTE`) that uvcvideo *presents* as two V4L2 controls, so a write naming a
+single axis has to read-modify-write the other one. Where the driver reads that other value
+from is decided by the device's `GET_INFO` bits, and both of the available answers are wrong
+in a different situation:
+
+- Merging from the **cached setpoint** fights the camera's autonomous AI tracking: while
+  tracking has the gimbal somewhere new, a write yanks the untouched axis back to whatever the
+  host last commanded.
+- Merging from a **live `GET_CUR`** cancels user moves: the second of two writes samples the
+  first axis while it is still travelling and commits it straight back to where it started.
+
+`gimbalSet` and `gimbalRecenter` issued two parallel single-axis writes, which walks into
+whichever of those applies. Both now go out as a single `VIDIOC_S_EXT_CTRLS`: both fields are
+staged before the one commit, so whatever the read-modify-write loaded is fully overwritten
+and the merge source stops mattering. The hazard is unreachable rather than unlikely.
+
+This needs nothing from the [pending uvcvideo patch](https://lore.kernel.org/linux-media/20260725212332.64927-1-jordan.mymail@gmail.com/) —
+it is a fix on stock, unpatched kernels. Thanks to Ricardo Ribalda, who pointed out
+`VIDIOC_S_EXT_CTRLS` while reviewing that patch.
+
+Verified on hardware across four two-axis moves, including an asymmetric large-yaw/small-pitch
+case where a dropped axis is most visible, with both axes confirmed physically moving.
+
+An older helper binary that predates the new `pantilt_set` op falls back to the two-write path,
+so an install whose npm package updated without the native helper being rebuilt degrades rather
+than losing gimbal movement.
+
+### Fixed: the hardware verification that should have caught it
+
+`scripts/e2e.mjs` drove the gimbal only with vendor frames, so `gimbalSet` and `gimbalRecenter` —
+different code paths on every platform — were never exercised. The bug above would have passed
+the project's main hardware sequence with `EXIT=0`. It now runs two-axis moves through the
+transport API and prints the pose after each. Printed, not asserted: on a stock kernel that
+readback is the driver echoing what we wrote, so asserting on it would manufacture confidence
+rather than evidence.
+
+`npm run build:helper` builds the native helper *and stages it* into
+`native/prebuilt/<platform>-<arch>/`, which is the only copy the Node stack loads. Building
+without staging silently verifies the old binary — the copy on the development machine was 11
+days stale, and nothing said so.
+
+### Changed: `package.json` is the single source of truth for the version
+
+The version used to be hand-written in six places, guarded by a test that regexed each one. That
+guard could only fail *after* someone had edited five files and missed the sixth, and it had
+already failed that way: `package.json` reached 0.4.0 while all three native helpers still
+reported 0.1.0.
+
+Nothing outside `package.json` declares a version now. The helpers read it at compile time
+(CMake ≥ 3.19 parses JSON, and all three already required 3.20), `src/version.ts` is generated,
+and `server.json` is rewritten by the `npm version` hook. The helpers `#error` rather than
+defaulting when the definition is absent — a helper that silently reports a wrong version is
+worse than one that refuses to compile, because that value reaches clients over the handshake.
+
+Verifying this turned up a seventh site nobody was tracking: `package-lock.json`, pinned at
+0.4.1 while `package.json` was 0.6.2. It ships in the tarball. Corrected and now asserted.
+
+Releasing is `npm version patch`. See `RELEASING.md`.
+
 ## [0.6.2] — 2026-07-26
 
 ### Fixed: `npx obsbot-mcp` did nothing at all on Linux and macOS
