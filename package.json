@@ -34,9 +34,11 @@
     "node": ">=18"
   },
   "scripts": {
+    "prebuild": "node scripts/sync-version.mjs",
     "build": "tsc -p tsconfig.json",
     "build:helper": "node scripts/build-helper.mjs",
     "build:all": "npm run build && npm run build:helper",
+    "version": "node scripts/sync-version.mjs && git add src/version.ts server.json",
     "test": "vitest run",
     "test:watch": "vitest",
     "integration": "node scripts/integration/run.mjs"

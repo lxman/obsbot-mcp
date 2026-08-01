@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.20)
 project(obsbot_helper CXX)
 set(CMAKE_CXX_STANDARD 17)
+include(${CMAKE_CURRENT_SOURCE_DIR}/../cmake/ObsbotVersion.cmake)
 add_executable(obsbot-helper helper.cpp)
+target_compile_definitions(obsbot-helper PRIVATE OBSBOT_VERSION="${OBSBOT_VERSION}")
 target_link_libraries(obsbot-helper strmiids ole32 oleaut32 uuid windowscodecs crypt32 cfgmgr32)
 set_target_properties(obsbot-helper PROPERTIES OUTPUT_NAME "obsbot-helper")

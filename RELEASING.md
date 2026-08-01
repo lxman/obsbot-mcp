@@ -26,19 +26,41 @@ After that, all releases are automated and require no npm credentials.
 ## Cutting a release
 
 1. Ensure `master` is green in CI.
-2. Bump the version everywhere it is declared — `package.json`, the MCP server
-   handshake in `src/mcp/server.ts`, all three native helpers, and **both**
-   version fields in `server.json`. `test/version-sync.test.ts` fails if any
-   site drifts, so `npm test` tells you when you have them all.
-3. Commit: `git commit -am "release: 0.1.1"`.
-4. Tag and push:
+2. Bump the version. **`package.json` is the single source of truth** — edit
+   nothing else:
+   ```bash
+   npm version patch --no-git-tag-version   # or minor / major / an explicit 0.1.1
+   ```
+   The `version` lifecycle script regenerates `src/version.ts` and rewrites both
+   version fields in `server.json`, and `npm` updates `package-lock.json`. The
+   three native helpers read the version from `package.json` at compile time
+   (`native/cmake/ObsbotVersion.cmake`, and `VERSION_DEF` in the macOS
+   `Makefile`), so there is nothing to edit for them at all.
+3. Add a `CHANGELOG.md` entry.
+4. Commit: `git commit -am "release: 0.1.1"`.
+5. Tag and push:
    ```bash
    git tag v0.1.1
    git push origin master --tags
    ```
-5. The Release workflow builds, guards that the tag matches `package.json` and
+6. The Release workflow builds, guards that the tag matches `package.json` and
    `server.json`, publishes to npm, publishes to the MCP Registry, and creates
    the GitHub Release.
+
+### Why there is nothing to hand-edit
+
+Until 0.6.2 the version was hand-written in six places and a regex test caught
+the drift *after* the fact — it could only fail once someone had already edited
+five files and missed the sixth. It had failed that way before: `package.json`
+reached 0.4.0 while all three helpers still reported 0.1.0. When the derivation
+was introduced, a probe bump immediately turned up a **seventh** site nobody was
+tracking, `package-lock.json`, two releases stale at 0.4.1.
+
+`test/version-sync.test.ts` still guards this, but its job is now the inverse:
+it asserts that no site hand-writes a version, that each helper `#error`s if
+`OBSBOT_VERSION` is missing rather than defaulting to a wrong value, and that
+every build path injects it. If you find yourself editing a version string
+outside `package.json`, that is the bug.
 
 ## Testing the pipeline without publishing
 

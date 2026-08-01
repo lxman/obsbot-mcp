@@ -357,10 +357,20 @@ static int probe_xu_unit(int fd)
 
 // ---- operations ----
 
+/*
+ * OBSBOT_VERSION is injected from package.json at configure time — see
+ * native/cmake/ObsbotVersion.cmake. It is deliberately NOT defaulted here: a
+ * helper that reports the wrong version over the handshake is worse than one
+ * that refuses to build, and defaulting is how the old hand-edited literals
+ * drifted three minor releases behind package.json without anyone noticing.
+ */
+#ifndef OBSBOT_VERSION
+#error "OBSBOT_VERSION is not defined — build via CMake, not by invoking the compiler directly"
+#endif
+
 static void do_version(void)
 {
-    /* Must match package.json's version; test/version-sync.test.ts enforces it. */
-    printf("{\"ok\":true,\"version\":\"0.6.2\",\"helper\":\"v4l2\"}\n");
+    printf("{\"ok\":true,\"version\":\"" OBSBOT_VERSION "\",\"helper\":\"v4l2\"}\n");
     fflush(stdout);
 }
 

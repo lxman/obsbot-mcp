@@ -577,9 +577,18 @@ static void pumpRunLoop(NSTimeInterval seconds) {
 // Op handlers
 // ---------------------------------------------------------------------------
 
+// OBSBOT_VERSION is injected from package.json at build time — by
+// native/cmake/ObsbotVersion.cmake for CI, and by the Makefile's VERSION_DEF
+// for local builds. Deliberately not defaulted: a helper that reports the wrong
+// version over the handshake is worse than one that refuses to build.
+#ifndef OBSBOT_VERSION
+#error "OBSBOT_VERSION is not defined — build via CMake or `make -C native/macos`"
+#endif
+
 static void doVersion(void) {
-  // Must match package.json's version; test/version-sync.test.ts enforces it.
-  ok(@",\"version\":\"0.6.2-macos\"");
+  // The "-macos" suffix distinguishes this helper in handshake logs; the semver
+  // ahead of it is what test/version-sync.test.ts checks.
+  ok([NSString stringWithFormat:@",\"version\":\"%s-macos\"", OBSBOT_VERSION]);
 }
 
 static void doEnumerate(void) {

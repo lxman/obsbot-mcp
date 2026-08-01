@@ -11,7 +11,9 @@ set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0" CACHE STRING "Minimum macOS version")
 
 project(obsbot_helper OBJC)
 set(CMAKE_OBJC_STANDARD 11)
+include(${CMAKE_CURRENT_SOURCE_DIR}/../cmake/ObsbotVersion.cmake)
 add_executable(obsbot-helper helper.m)
+target_compile_definitions(obsbot-helper PRIVATE OBSBOT_VERSION="${OBSBOT_VERSION}")
 # ARC, matching the Makefile used for local builds.
 target_compile_options(obsbot-helper PRIVATE -fobjc-arc)
 target_link_libraries(obsbot-helper PRIVATE

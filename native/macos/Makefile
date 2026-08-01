@@ -20,13 +20,24 @@ HELPER    := $(TARGET_DIR)/obsbot-helper
 # 14.0 is the newest API the helper uses (AVCaptureDeviceTypeExternal).
 MIN_MACOS := 14.0
 
+# The helper reports this over the stdio handshake, so it is a runtime fact, not
+# a label. It comes from package.json — the single source of truth — exactly as
+# CMakeLists.txt does via native/cmake/ObsbotVersion.cmake. helper.m #errors if
+# it is missing rather than defaulting, so a build that cannot read package.json
+# fails loudly instead of shipping a binary that lies about its version.
+VERSION := $(shell node -p "require('$(PROJ_ROOT)/package.json').version")
+ifeq ($(strip $(VERSION)),)
+$(error could not read .version from $(PROJ_ROOT)/package.json)
+endif
+VERSION_DEF := -DOBSBOT_VERSION='"$(VERSION)"'
+
 .PHONY: all clean run dist
 
 all: $(HELPER)
 
 $(HELPER): helper.m
 	mkdir -p $(TARGET_DIR)
-	xcrun clang -fobjc-arc \
+	xcrun clang -fobjc-arc $(VERSION_DEF) \
 		-mmacosx-version-min=$(MIN_MACOS) \
 		-framework IOKit \
 		-framework AVFoundation \
@@ -41,9 +52,9 @@ $(HELPER): helper.m
 # under native/prebuilt/darwin/ for the CI release pipeline).
 dist:
 	mkdir -p $(PROJ_ROOT)/native/prebuilt/darwin
-	xcrun clang -fobjc-arc -target arm64-apple-macos$(MIN_MACOS) \
+	xcrun clang -fobjc-arc $(VERSION_DEF) -target arm64-apple-macos$(MIN_MACOS) \
 		-c helper.m -o /tmp/obsbot-helper-arm64.o
-	xcrun clang -fobjc-arc -target x86_64-apple-macos$(MIN_MACOS) \
+	xcrun clang -fobjc-arc $(VERSION_DEF) -target x86_64-apple-macos$(MIN_MACOS) \
 		-c helper.m -o /tmp/obsbot-helper-x86_64.o
 	xcrun clang -arch arm64 -arch x86_64 \
 		-framework IOKit \
@@ -68,7 +79,7 @@ X64_HELPER := $(X64_DIR)/obsbot-helper
 
 $(X64_HELPER): helper.m
 	mkdir -p $(X64_DIR)
-	xcrun clang -fobjc-arc -target x86_64-apple-macos$(MIN_MACOS) \
+	xcrun clang -fobjc-arc $(VERSION_DEF) -target x86_64-apple-macos$(MIN_MACOS) \
 		-framework IOKit \
 		-framework AVFoundation \
 		-framework CoreMedia \

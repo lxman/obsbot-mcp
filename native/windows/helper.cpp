@@ -371,7 +371,15 @@ static void releaseSession() {
 // ---- ops -------------------------------------------------------------
 
 // Must match package.json's version; test/version-sync.test.ts enforces it.
-static void doVersion() { ok(",\"version\":\"0.6.2\""); }
+// OBSBOT_VERSION is injected from package.json at configure time — see
+// native/cmake/ObsbotVersion.cmake. Deliberately not defaulted: a helper that
+// reports the wrong version over the handshake is worse than one that refuses
+// to build.
+#ifndef OBSBOT_VERSION
+#error "OBSBOT_VERSION is not defined — build via CMake, not by invoking the compiler directly"
+#endif
+
+static void doVersion() { ok(",\"version\":\"" OBSBOT_VERSION "\""); }
 
 static void doEnumerate() {
   ICreateDevEnum* devEnum = nullptr;

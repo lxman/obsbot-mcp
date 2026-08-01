@@ -12,6 +12,7 @@ import { createTools, ToolDef } from "./tools.js";
 import { renderToolResult } from "./render.js";
 import { CaptureManager } from "../capture/manager.js";
 import { Coordinator, serialize } from "../ipc/coordinator.js";
+import { VERSION } from "../version.js";
 
 export async function startServer(opts: { debug?: boolean } = {}): Promise<void> {
   // helperFactory subscribes every helper it spawns to the OS bus events, so
@@ -77,8 +78,8 @@ export async function startServer(opts: { debug?: boolean } = {}): Promise<void>
   process.on("SIGTERM", () => { shutdown(); process.exit(0); });
 
   const server = new Server(
-    // Must match package.json's version; test/version-sync.test.ts enforces it.
-    { name: "obsbot-mcp", version: "0.6.2" },
+    // VERSION is generated from package.json — see scripts/sync-version.mjs.
+    { name: "obsbot-mcp", version: VERSION },
     { capabilities: { tools: {} } },
   );
 
