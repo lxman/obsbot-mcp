@@ -625,6 +625,68 @@ design discussion on ownership as follow-on write-path work. Reply Message-ID
 `<20260731151509.577383-1-jordan.mymail@gmail.com>`, threaded correctly under
 his mail on lore.
 
+### Second exchange (2026-07-31 → 08-01): deferred to Hans Verkuil
+
+Ricardo came back the same evening, ~8 hours after our reply
+([his mail](https://lore.kernel.org/linux-media/CANiDSCsS-JJrGMaoBqR-XX54dtp_uQEVVSct-BWL0gQNL4OfRQ@mail.gmail.com/)),
+and **added Hans Verkuil to the To: line**. He did not push back on the patch.
+He restated the problem as two separable items — (1) this firmware is broken,
+so the general case must be designed for compliant cameras with a quirk added
+later for this device; (2) the desired merge source differs by owner (device
+tracking → live values; user move finalising → the user's pan/tilt pair) — then
+closed with *"Let's wait a bit for Laurent or HansG (or even Hans Verkuil) to
+comment"* and *"I am very curious what HansV thinks."* He is OOO the week of
+2026-08-03, so replies will be slow.
+
+Four things were aimed at us, and were answered
+([our reply](https://lore.kernel.org/linux-media/20260801050049.984234-1-jordan.mymail@gmail.com/),
+sent 2026-08-01, archived at `~/kernel-uvc-work/reply-to-ribalda-2.{txt,eml}`):
+
+1. **"How accurate does the frame/position mapping need to be? You may be
+   processing frame NOW-4 when you read position NOW."** Conceded and
+   clarified: *not accurate at all*. Our first reply answered "the former" to a
+   question whose example was frame-tagging, which overstated the case. Nothing
+   here correlates a position with a particular frame — the position is a
+   control-loop input and a UI number, and the gimbal's own time constants
+   (hundreds of ms per move) dwarf a few frames of pipeline skew. Explicitly
+   granted that frame-accurate pose would be a per-frame metadata problem for
+   which G_CTRL is the wrong instrument.
+2. **`VIDIOC_S_EXT_CTRLS` to set both axes at once.** Conceded as a real fix we
+   had missed. Verified in source: `uvc_ctrl_set()` still calls
+   `__uvc_ctrl_load_cur()` for each partial mapping, but both mappings land in
+   `UVC_CTRL_DATA_CURRENT` before the *single* commit, so whatever the load put
+   there is fully overwritten and the merge source stops mattering. This
+   sidesteps the §4.1 hazard entirely from userspace — see the project action
+   item below. It does nothing for the read side, which is what the patch is
+   about.
+3. **"If AUTO_UPDATE is present you would get fresh data when you poll."**
+   Half right, and corrected precisely because it bears on what HansV is being
+   asked to weigh: that holds via the *interrupt*, not the poll. `ctrl->loaded`
+   is cleared in exactly two places — `uvc_ctrl_status_event()` (uvc_ctrl.c:2201,
+   the Control Change interrupt) and `uvc_ctrl_commit_entity()` for AUTO_UPDATE
+   controls (~:2480). `__uvc_ctrl_load_cur()` returns early on `loaded` (:1474),
+   so polls *between* notifications return the cache. On a compliant autoupdate
+   device the refresh rate is therefore the device's signalling rate, and
+   §4.2.2.1.15 promises that signal only at end-of-movement: good enough for
+   "it stopped, here is where," not for sampling a trajectory.
+4. **"Ping the vendor to fix their firmware."** Agreed, with no expectations on
+   timeline. (§8 already scopes that report.)
+
+Deliberately **not** re-argued: his items (1) and (2) above. Those are now
+addressed to the other maintainers, our position is already on the record in
+the first reply, and a long rebuttal would have buried the thread before HansV
+read it.
+
+**Status: waiting on Hans Verkuil.** Expect a quiet thread for several days
+given the OOO. The v2 shape is no longer predictable — it depends on what HansV
+says, not on anything already decided. Do not respin speculatively.
+
+**Project action item arising from point 2:** this repo's Linux pan/tilt writes
+should send both axes in a single `VIDIOC_S_EXT_CTRLS` rather than two
+sequential single-axis `S_CTRL` calls. That removes the §4.1 user-move
+cancellation from our own stack on *stock, unpatched* kernels, independent of
+whether the patch ever lands. Not yet implemented.
+
 ---
 
 ## Appendix A — the scrapped patch (for reference; do not send)
