@@ -703,13 +703,27 @@ wrote and prove nothing. The asymmetric case is the discriminating one: a
 cancelled axis shows up as the small-travel axis failing to move while the
 large one succeeds.
 
-Two coverage notes found while verifying, neither fixed here:
-`scripts/e2e.mjs` drives the gimbal with vendor frames and never calls
-`gimbalSet`, so it does not exercise this path at all; and
-`.claude/skills/verify` is written entirely for macOS (`system_profiler`,
-`make -C native/macos`, DriverKit) and needs a Linux section. Also note the
-Node stack loads `native/prebuilt/<platform>-<arch>/`, NOT the CMake output —
-staging the rebuilt binary is a required step, and the stale copy is silent.
+Three gaps surfaced while verifying, all closed in the follow-up commit:
+
+- `scripts/e2e.mjs` drove the gimbal only with vendor frames and never called
+  `gimbalSet`, so this bug would have passed it with `EXIT=0`. It now runs
+  two-axis moves through the transport API — including the asymmetric
+  large-yaw/small-pitch case — and prints the pose after each, for the
+  supervisor to compare against.
+- `.claude/skills/verify` was written entirely for macOS (`system_profiler`,
+  `make -C native/macos`, DriverKit). It now covers Linux, and records that
+  what a passing readback *proves* depends on the kernel: an echo on stock, a
+  live measurement on the patched module.
+- The Node stack loads `native/prebuilt/<platform>-<arch>/`, NOT the CMake
+  output, so a rebuild without staging silently verifies the old binary — the
+  copy on this box was 11 days stale. `npm run build:helper`
+  (`scripts/build-helper.mjs`) now builds and stages in one step, mirroring
+  the release workflow's matrix.
+
+Also corrected while there: the skill's "known rough edge" claiming
+`e2e.mjs` hangs and leaks the helper on the no-camera path. The `try/finally`
+now covers device selection; re-verified via the `OBSBOT_HELPER_CMD` override,
+which exits 1 cleanly with no orphan.
 
 ---
 
