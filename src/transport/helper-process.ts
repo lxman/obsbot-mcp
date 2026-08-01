@@ -302,6 +302,20 @@ export class HelperProcess {
     await this.rpc({ op: "camctrl_set", property, value, flags });
   }
 
+  /**
+   * Absolute pan+tilt in one VIDIOC_S_EXT_CTRLS, in V4L2 arc-seconds.
+   *
+   * Not a convenience wrapper over two `camCtrlSet` calls — the single ioctl is
+   * what stops uvcvideo's read-modify-write from cancelling half the move. See
+   * `v4l2_set_pantilt()` in native/linux/helper.c.
+   *
+   * Linux-only: it exists to work around a uvcvideo-specific hazard, and the
+   * Windows and macOS helpers have no `pantilt_set` op.
+   */
+  async panTiltSet(pan: number, tilt: number): Promise<void> {
+    await this.rpc({ op: "pantilt_set", pan, tilt });
+  }
+
   async camCtrlRange(property: number): Promise<{ min: number; max: number }> {
     const resp = await this.rpc({ op: "camctrl_range", property });
     return { min: resp.min as number, max: resp.max as number };

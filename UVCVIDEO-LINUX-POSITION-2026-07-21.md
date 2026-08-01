@@ -681,11 +681,35 @@ read it.
 given the OOO. The v2 shape is no longer predictable — it depends on what HansV
 says, not on anything already decided. Do not respin speculatively.
 
-**Project action item arising from point 2:** this repo's Linux pan/tilt writes
-should send both axes in a single `VIDIOC_S_EXT_CTRLS` rather than two
-sequential single-axis `S_CTRL` calls. That removes the §4.1 user-move
-cancellation from our own stack on *stock, unpatched* kernels, independent of
-whether the patch ever lands. Not yet implemented.
+**Project action item arising from point 2 — implemented 2026-08-01.** This
+repo's Linux pan/tilt writes now send both axes in a single
+`VIDIOC_S_EXT_CTRLS` rather than two sequential single-axis `S_CTRL` calls,
+which removes the §4.1 user-move cancellation from our own stack on *stock,
+unpatched* kernels, independent of whether the patch ever lands. New helper op
+`pantilt_set` (`v4l2_set_pantilt()` in `native/linux/helper.c`, both controls in
+one `V4L2_CTRL_CLASS_CAMERA` request), surfaced as `HelperProcess.panTiltSet`,
+used by both `gimbalSet` and `gimbalRecenter` in `src/transport/linux.ts`. An
+older helper binary that does not know the op falls back to the two-write path
+so a package-updated-but-helper-not-rebuilt install degrades rather than losing
+gimbal movement.
+
+**Hardware-verified 2026-08-01** on kernel `7.2.0-rc4+`. Four two-axis moves
+through `gimbalSet`/`gimbalRecenter` — (20, 10), (−15, −8), the asymmetric
+(25, 1), and recenter — each landing within the firmware's whole-degree step on
+*both* axes, with a supervisor confirming all four physically moved both axes.
+The readback is genuine live position rather than a cache echo, since the box
+runs the patched module; on a stock kernel this check would only replay what it
+wrote and prove nothing. The asymmetric case is the discriminating one: a
+cancelled axis shows up as the small-travel axis failing to move while the
+large one succeeds.
+
+Two coverage notes found while verifying, neither fixed here:
+`scripts/e2e.mjs` drives the gimbal with vendor frames and never calls
+`gimbalSet`, so it does not exercise this path at all; and
+`.claude/skills/verify` is written entirely for macOS (`system_profiler`,
+`make -C native/macos`, DriverKit) and needs a Linux section. Also note the
+Node stack loads `native/prebuilt/<platform>-<arch>/`, NOT the CMake output —
+staging the rebuilt binary is a required step, and the stale copy is silent.
 
 ---
 

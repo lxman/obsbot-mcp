@@ -138,11 +138,42 @@ export class LinuxTransport implements ObsbotTransport {
    * V4L2 tilt_absolute + = tilt up (opposite of our +pitch = down convention).
    */
   async gimbalSet(yawDeg: number, pitchDeg: number, _rollDeg?: number): Promise<void> {
-    // V4L2 pan/tilt drives in parallel — both are independent controls.
-    await Promise.all([
-      this.camCtrlSet(0, Math.round(yawDeg * ARCSEC_PER_DEG), 2),
-      this.camCtrlSet(1, Math.round(-pitchDeg * ARCSEC_PER_DEG), 2),
-    ]);
+    await this.panTiltAbsolute(
+      Math.round(yawDeg * ARCSEC_PER_DEG),
+      Math.round(-pitchDeg * ARCSEC_PER_DEG),
+    );
+  }
+
+  /**
+   * Commit an absolute pan+tilt pose (V4L2 arc-seconds) in a single ioctl.
+   *
+   * The two axes are ONE UVC control (CT_PANTILT_ABSOLUTE, 8 bytes) that
+   * uvcvideo exposes as two V4L2 controls, so a write naming a single axis
+   * read-modify-writes the other from a source chosen by the device's GET_INFO
+   * bits. When that source is a live GET_CUR, it is sampled while the first
+   * axis is still travelling and commits that axis back to where it started —
+   * the move is silently half-cancelled. This code used to issue two parallel
+   * `camCtrlSet` calls and hit exactly that: measured on this camera whenever
+   * uvcvideo probed it asleep and pan/tilt kept UVC_CTRL_FLAG_AUTO_UPDATE.
+   * Full writeup in UVCVIDEO-LINUX-POSITION-2026-07-21.md sections 4.1 and 9.
+   *
+   * Sending both axes together makes the hazard unreachable rather than
+   * unlikely, and needs nothing from the pending kernel patch — it is a fix on
+   * stock kernels.
+   *
+   * The fallback keeps older helper binaries working: `pantilt_set` is newer
+   * than the rest of the stdio surface, and a user whose npm package updated
+   * without the native helper being rebuilt would otherwise lose gimbal
+   * movement entirely. Degraded, not broken — the old path still moves the
+   * gimbal, it just carries the cancellation risk it always did.
+   */
+  private async panTiltAbsolute(panAsec: number, tiltAsec: number): Promise<void> {
+    try {
+      await this.helper.panTiltSet(panAsec, tiltAsec);
+    } catch (err) {
+      if (!/unknown op/i.test(err instanceof Error ? err.message : String(err))) throw err;
+      await Promise.all([this.camCtrlSet(0, panAsec, 2), this.camCtrlSet(1, tiltAsec, 2)]);
+    }
   }
 
   /**
@@ -171,10 +202,9 @@ export class LinuxTransport implements ObsbotTransport {
    * Hardware-verified to physically recenter the gimbal (2026-07-21).
    */
   async gimbalRecenter(): Promise<void> {
-    await Promise.all([
-      this.camCtrlSet(0, 0, 2),
-      this.camCtrlSet(1, 0, 2),
-    ]);
+    // Same single-ioctl path as gimbalSet — recentring is two axes moving at
+    // once, which is precisely the shape the read-modify-write can cancel.
+    await this.panTiltAbsolute(0, 0);
   }
 
   async readSerial(): Promise<string> {

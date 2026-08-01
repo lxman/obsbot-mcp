@@ -15,6 +15,7 @@ function makeFakeHelper(camCtrlGetValue = 288000) {
       base64: "QUJD",
     })),
     camCtrlSet: vi.fn(async (_p: number, _v: number, _f: number) => {}),
+    panTiltSet: vi.fn(async (_pan: number, _tilt: number) => {}),
     camCtrlRange: vi.fn(async (_p: number) => ({ min: 0, max: 100 })),
     camCtrlGet: vi.fn(async (_p: number) => ({ value: camCtrlGetValue, flags: 2 })),
     procAmpSet: vi.fn(async (_p: number, _v: number, _f: number) => {}),
@@ -89,26 +90,56 @@ test("pan/tilt keep their sub-degree precision", async () => {
   expect(r).toEqual({ value: 5.975, flags: 2 });
 });
 
-test("gimbalSet writes pan/tilt via V4L2 camCtrlSet, in parallel", async () => {
+test("gimbalSet commits both axes in a single panTiltSet, never as two writes", async () => {
   const helper = makeFakeHelper();
   const t = new LinuxTransport(helper);
 
   await t.gimbalSet(10, 5);
 
   // yaw=10 -> pan raw = 10*3600 = 36000; pitch=5 (down) -> tilt raw = -5*3600 = -18000.
-  expect(helper.camCtrlSet).toHaveBeenCalledWith(0, 36000, 2);
-  expect(helper.camCtrlSet).toHaveBeenCalledWith(1, -18000, 2);
+  expect(helper.panTiltSet).toHaveBeenCalledWith(36000, -18000);
+  // The point of the change: two single-axis writes let uvcvideo's
+  // read-modify-write cancel half the move, so splitting them is the bug.
+  expect(helper.camCtrlSet).not.toHaveBeenCalled();
   expect(helper.xuSet).not.toHaveBeenCalled();
 });
 
-test("gimbalRecenter writes pan=0, tilt=0 via V4L2 camCtrlSet", async () => {
+test("gimbalRecenter commits pan=0, tilt=0 in a single panTiltSet", async () => {
   const helper = makeFakeHelper();
   const t = new LinuxTransport(helper);
 
   await t.gimbalRecenter();
 
-  expect(helper.camCtrlSet).toHaveBeenCalledWith(0, 0, 2);
-  expect(helper.camCtrlSet).toHaveBeenCalledWith(1, 0, 2);
+  expect(helper.panTiltSet).toHaveBeenCalledWith(0, 0);
+  expect(helper.camCtrlSet).not.toHaveBeenCalled();
+});
+
+test("gimbalSet falls back to two writes when the helper predates pantilt_set", async () => {
+  // A user whose npm package updated without the native helper being rebuilt
+  // must still be able to move the gimbal — degraded, not broken.
+  const helper = makeFakeHelper();
+  (helper.panTiltSet as ReturnType<typeof vi.fn>).mockRejectedValue(
+    new Error("unknown op: pantilt_set"),
+  );
+  const t = new LinuxTransport(helper);
+
+  await t.gimbalSet(10, 5);
+
+  expect(helper.camCtrlSet).toHaveBeenCalledWith(0, 36000, 2);
+  expect(helper.camCtrlSet).toHaveBeenCalledWith(1, -18000, 2);
+});
+
+test("gimbalSet propagates real helper failures instead of falling back", async () => {
+  // Only "unknown op" means an old binary. Anything else is a genuine failure
+  // and must not be retried down a path that hides it.
+  const helper = makeFakeHelper();
+  (helper.panTiltSet as ReturnType<typeof vi.fn>).mockRejectedValue(
+    new Error("pantilt_set: set failed"),
+  );
+  const t = new LinuxTransport(helper);
+
+  await expect(t.gimbalSet(10, 5)).rejects.toThrow("set failed");
+  expect(helper.camCtrlSet).not.toHaveBeenCalled();
 });
 
 test("gimbalSpeed sends a vendor frame then an auto-stop frame, negating yaw", async () => {

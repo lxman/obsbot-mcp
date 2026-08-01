@@ -231,6 +231,52 @@ static int v4l2_set_ctrl(int fd, int cid, int value)
     return ioctl(fd, VIDIOC_S_CTRL, &c);
 }
 
+/*
+ * Set pan and tilt in ONE ioctl.
+ *
+ * Two sequential VIDIOC_S_CTRL calls are NOT equivalent, and the difference is
+ * a real move-cancelling bug rather than a micro-optimisation. uvcvideo packs
+ * both axes into a single 8-byte UVC control (CT_PANTILT_ABSOLUTE, selector
+ * 0x0D), so a write naming only one axis must read-modify-write the other.
+ * Which value it merges in is chosen by the device's GET_INFO bits, and on a
+ * device reporting AUTO_UPDATE the merge source is a fresh GET_CUR — sampled
+ * while the first axis is still travelling, so committing it hands that axis
+ * its own starting position back and cancels half the move. Measured on this
+ * camera; see UVCVIDEO-LINUX-POSITION-2026-07-21.md section 4.1.
+ *
+ * One VIDIOC_S_EXT_CTRLS removes the hazard by construction: both fields are
+ * written into the driver's staging buffer before the single commit, so
+ * whatever the read-modify-write loaded is fully overwritten and the merge
+ * source stops mattering. Works on stock, unpatched kernels — it needs nothing
+ * from the pending uvcvideo volatile-position patch.
+ *
+ * Suggested by Ricardo Ribalda during that patch's review, 2026-07-31.
+ *
+ * Returns 0 on success, -1 on failure (errno set by ioctl).
+ */
+static int v4l2_set_pantilt(int fd, int pan, int tilt)
+{
+    struct v4l2_ext_control c[2];
+    struct v4l2_ext_controls ctrls;
+
+    memset(c, 0, sizeof(c));
+    memset(&ctrls, 0, sizeof(ctrls));
+
+    c[0].id    = V4L2_CID_PAN_ABSOLUTE;
+    c[0].value = pan;
+    c[1].id    = V4L2_CID_TILT_ABSOLUTE;
+    c[1].value = tilt;
+
+    /* Both controls live in the camera class, so naming it explicitly is safe
+       on every kernel — unlike V4L2_CTRL_WHICH_CUR_VAL, whose mixed-class
+       behaviour only arrived in 3.17. */
+    ctrls.ctrl_class = V4L2_CTRL_CLASS_CAMERA;
+    ctrls.count      = 2;
+    ctrls.controls   = c;
+
+    return ioctl(fd, VIDIOC_S_EXT_CTRLS, &ctrls);
+}
+
 static int v4l2_query_ctrl(int fd, int cid, int *min, int *max)
 {
     struct v4l2_queryctrl q;
@@ -577,6 +623,36 @@ static void do_camctrl_set(const char *prop_str, const char *val_str,
     /* Cache pan/tilt values for repair after XU corruption */
     if (cid == V4L2_CID_PAN_ABSOLUTE) g_last_pan = value;
     if (cid == V4L2_CID_TILT_ABSOLUTE) g_last_tilt = value;
+    ok_response("");
+}
+
+/*
+ * Absolute pan+tilt as a single atomic write. Values are in V4L2 arc-seconds,
+ * already scaled and rounded by the caller — this op deliberately does no unit
+ * conversion, matching camctrl_set. See v4l2_set_pantilt() for why both axes
+ * have to travel in one ioctl.
+ */
+static void do_pantilt_set(const char *pan_str, const char *tilt_str)
+{
+    int pan, tilt;
+
+    if (g_fd < 0) { error_response("pantilt_set: no device open"); return; }
+    if (!pan_str || !tilt_str) {
+        error_response("pantilt_set: missing pan/tilt");
+        return;
+    }
+
+    pan  = (int)strtol(pan_str, NULL, 10);
+    tilt = (int)strtol(tilt_str, NULL, 10);
+
+    if (v4l2_set_pantilt(g_fd, pan, tilt) < 0) {
+        error_response("pantilt_set: set failed");
+        return;
+    }
+
+    /* Same repair cache camctrl_set maintains — see g_last_pan's declaration. */
+    g_last_pan  = pan;
+    g_last_tilt = tilt;
     ok_response("");
 }
 
@@ -987,6 +1063,8 @@ int main(void)
             do_camctrl_set(get_field(line, "property"),
                             get_field(line, "value"),
                             get_field(line, "flags"));
+        } else if (strcmp(op, "pantilt_set") == 0) {
+            do_pantilt_set(get_field(line, "pan"), get_field(line, "tilt"));
         } else if (strcmp(op, "camctrl_range") == 0) {
             do_camctrl_range(get_field(line, "property"));
         } else if (strcmp(op, "camctrl_get") == 0) {
