@@ -60,7 +60,9 @@ With the installed binary, use `"command": "obsbot-mcp"` and `"args": ["--debug"
 
 ## Tools
 
-36 tools total. All names below are current as of v0.4.0 — **every tool was renamed in this
+35 tools on Windows and macOS, 34 on Linux (`obsbot_gimbal_move_speed` is unavailable there — see
+[limitations](#linux-gimbal-position-feedback-is-not-live)). `--debug` adds `obsbot_debug_probe` for
+one more. All names below are current as of v0.4.0 — **every tool was renamed in this
 release and there is no backward-compatible alias**; see [CHANGELOG.md](./CHANGELOG.md) for the
 full old→new mapping if you're updating a caller.
 

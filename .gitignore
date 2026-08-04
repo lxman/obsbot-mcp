@@ -34,3 +34,6 @@ logs/
 
 # Integration-test run reports (timestamped run output, not source)
 artifacts/
+
+# Vendor bug-report drafts (contain device serial; not for the public repo)
+obsbot-firmware-bug-report.md
