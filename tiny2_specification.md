@@ -353,11 +353,36 @@ source**), `CAM_GET_AUDIO_VOLUME`, `CAM_GET_SUSPEND_TIME` (600 s), `CAM_GET_WDR_
 
 ## 9. Hazards — do not send these
 
-**`CAM_GET_ISO_THRESHOLD` (wireCmd `0x3D82`, receiver `0x02`) hard-kills the camera.** The device
-drops off the USB bus entirely — absent from the OS device tree — and only a physical replug
-recovers it. Verified: the `SET_CUR` succeeded and the following `GET_CUR` 60 ms later returned
-`kIOReturnNoDevice`. This is an ordinary Camera-subsystem opcode, so the hazard is **not** confined
-to exotic subsystems.
+**`CAM_GET_ISO_THRESHOLD` (wireCmd `0x3D82`, receiver `0x02`) — attribution retracted 2026-08-04.**
+
+This section previously stated flatly that this opcode "hard-kills the camera," dropping it off the
+USB bus until physically replugged, and marked that **Verified** on the strength of one macOS
+observation (the `SET_CUR` succeeded; the following `GET_CUR` 60 ms later returned
+`kIOReturnNoDevice`).
+
+**It does not reproduce.** Re-tested against the same physical Tiny 2 on Windows/DirectShow, six
+sends across every condition constructible on that platform:
+
+| Frame flavour | Power state | Result | Device after |
+|---|---|---|---|
+| `0x01` header-only GET | asleep | silent (8 polls, no reply) | alive, 3 bus nodes `OK` |
+| `0x01` header-only GET | awake | silent (8 polls, no reply) | alive, 3 bus nodes `OK` |
+| `0x25` command flavour | awake | accepted, no state change | alive at +476 ms and +8 s; live gimbal readback |
+
+`CAM_GET_WDR_MODE` was run as a negative control in each condition and answered normally, and the
+CRC used for the hand-built `0x25` frames was validated against four device-accepted frames — so
+neither the transport nor the framing can account for the null result. The `0x25` zero-payload frame
+also did **not** overwrite the target register (WDR still read `1` afterwards), ruling out the
+hypothesis that the command flavour acts as a blind destructive write.
+
+What is actually established: `0x3D82` is **inert** on this firmware — it ignores a header-only GET,
+like the other opcodes that want a payload parameter (§8). The single macOS kill was most plausibly
+misattributed to whichever opcode was in flight when an unrelated crash landed — the same trap this
+section's next paragraph already hedges against for the 161-opcode sweep ("the leading suspect").
+
+Treat `0x3D82` as unexplained-but-not-demonstrated rather than lethal. The original event was real;
+its cause is unknown. Re-testing on macOS would close the remaining gap, since that is the platform
+the kill was seen on and a host-stack interaction cannot be excluded from Windows evidence alone.
 
 **Do not blind-sweep the command surface.** A single pass over all 161 GET opcodes took the device
 off the bus. The Upgrade subsystem's state machine (`UG_GET_STATE`, `UG_GET_RESULT`,
