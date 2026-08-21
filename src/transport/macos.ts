@@ -1,5 +1,5 @@
 import { HelperProcess } from "./helper-process.js";
-import { ObsbotTransport, Snapshot, SnapshotOpts } from "./transport.js";
+import { ObsbotTransport, Snapshot, SnapshotOpts, livePoseOverride } from "./transport.js";
 import { encodeRecenter, encodePtzMoveAngle, encodePtzMoveSpeed } from "../codec/commands.js";
 import { readSerialVia } from "./read-serial.js";
 
@@ -112,6 +112,17 @@ export class MacosTransport implements ObsbotTransport {
       result.value = result.value / ARCSEC_PER_DEG;
     }
     return result;
+  }
+
+  /**
+   * macOS reads pan/tilt live from the device already, so it is exposed to the
+   * pose-composition hazard — but its shipped behaviour is hardware-verified and
+   * this gate is not the change to flip that in. Honour OBSBOT_LIVE_POSE only;
+   * default off until it has been exercised on Mac hardware. No probe here: the
+   * read-latency signal is a Linux/uvcvideo caching artefact.
+   */
+  async livePoseReads(): Promise<boolean> {
+    return livePoseOverride() === true;
   }
 
   async procAmpSet(property: number, value: number, flags: number): Promise<void> {

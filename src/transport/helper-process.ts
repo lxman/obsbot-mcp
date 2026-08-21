@@ -326,6 +326,17 @@ export class HelperProcess {
     return { value: resp.value as number, flags: resp.flags as number };
   }
 
+  /**
+   * Time repeated GET_CUR reads of a camera control, in the helper (C), so the
+   * ~150us cache-vs-live signal is not buried by this JSON-RPC round trip. Used
+   * by LinuxTransport.livePoseReads to detect a live-reading kernel without
+   * moving the gimbal. Reads only.
+   */
+  async readLatency(property: number, samples = 40): Promise<{ meanUs: number; minUs: number; maxUs: number }> {
+    const resp = await this.rpc({ op: "read_latency", property, samples });
+    return { meanUs: resp.meanUs as number, minUs: resp.minUs as number, maxUs: resp.maxUs as number };
+  }
+
   async procAmpSet(property: number, value: number, flags: number): Promise<void> {
     await this.rpc({ op: "procamp_set", property, value, flags });
   }

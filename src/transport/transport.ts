@@ -35,15 +35,25 @@ export class CameraBusyError extends Error {
 }
 
 /**
- * OBSBOT_LIVE_POSE release gate (1/true/yes/on). Enables the behaviours that only
- * make sense where pan/tilt reads report LIVE position rather than a cached
- * setpoint: pose settling before composition (mcp/tools.ts readSteadyPose) and the
- * Linux closed-loop move retry (transport/linux.ts). Off by default until the
- * uvcvideo change that makes Linux reads live is upstream; see readSteadyPose for
- * the full rationale and why it cannot be auto-detected.
+ * OBSBOT_LIVE_POSE override for the live-pose behaviours (pose settling before
+ * composition in mcp/tools.ts, and the Linux closed-loop move retry in
+ * transport/linux.ts). TRI-STATE: `1/true/yes/on` forces them on, `0/false/no/off`
+ * forces them off, unset (or empty) means "decide automatically". Returns the
+ * forced boolean, or undefined to defer to a transport's own detection.
+ *
+ * Automatic detection is per-transport: see ObsbotTransport.livePoseReads. On
+ * Linux it is a read-latency probe (transport/linux.ts) that measures whether the
+ * driver serves pan/tilt from cache or re-queries the device — mechanism-agnostic
+ * and immune to the kernel-version/backport traps a uname gate walks into.
  */
-export const livePoseEnabled = (): boolean =>
-  /^(1|true|yes|on)$/i.test(process.env.OBSBOT_LIVE_POSE ?? "");
+export const livePoseOverride = (): boolean | undefined => {
+  const v = process.env.OBSBOT_LIVE_POSE;
+  if (v === undefined || v === "") return undefined;
+  return /^(1|true|yes|on)$/i.test(v);
+};
+
+/** Back-compat: the plain on/off reading of the override (unset => off). */
+export const livePoseEnabled = (): boolean => livePoseOverride() === true;
 
 export interface ObsbotTransport {
   sendVendor(frame: Buffer): Promise<void>;
@@ -72,6 +82,13 @@ export interface ObsbotTransport {
   camCtrlRange(property: number): Promise<{ min: number; max: number }>;
   /** Read the current value + flags of an IAMCameraControl property (GET_CUR). */
   camCtrlGet(property: number): Promise<{ value: number; flags: number }>;
+  /**
+   * Whether pan/tilt reads report LIVE device position (vs a cached setpoint),
+   * which decides whether the pose-settle and closed-loop move-retry behaviours
+   * run. OBSBOT_LIVE_POSE overrides; otherwise the transport decides (Linux
+   * probes read latency, macOS/Windows default off). Cached after first call.
+   */
+  livePoseReads(): Promise<boolean>;
   /** IAMVideoProcAmp::Set(property, value, flags) — used for white balance. */
   procAmpSet(property: number, value: number, flags: number): Promise<void>;
   /** IAMVideoProcAmp::GetRange(property) → device-unit min/max. */

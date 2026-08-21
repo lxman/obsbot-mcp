@@ -1,5 +1,5 @@
 import { HelperProcess } from "./helper-process.js";
-import { ObsbotTransport, Snapshot, SnapshotOpts, livePoseEnabled } from "./transport.js";
+import { ObsbotTransport, Snapshot, SnapshotOpts, livePoseOverride } from "./transport.js";
 import { encodePtzMoveSpeed } from "../codec/commands.js";
 import { readSerialVia } from "./read-serial.js";
 
@@ -33,6 +33,14 @@ const PANTILT_STEP_ASEC = 3600;
 const SETTLE_FIRST_READ_MS = 250;
 const SETTLE_BEAT_MS = 150;
 const SETTLE_TIMEOUT_MS = 3000;
+
+// Read-latency threshold (microseconds) separating a CACHED pan/tilt read from a
+// LIVE one. Measured 2026-08-21 on this camera: cached reads are a driver memcpy
+// at ~2us and pinned flat; live reads are a USB GET_CUR at ~150us and never below
+// ~115us. 40us sits ~20x above the cached ceiling and ~3x below the live floor —
+// orders of magnitude of margin either way. See do_read_latency in
+// native/linux/helper.c and LinuxTransport.livePoseReads.
+const LIVE_READ_THRESHOLD_US = 40;
 
 /**
  * Linux V4L2 transport — functionally identical to {@link WindowsTransport}
@@ -203,7 +211,7 @@ export class LinuxTransport implements ObsbotTransport {
    */
   private async panTiltAbsolute(panAsec: number, tiltAsec: number): Promise<void> {
     await this.commitPanTilt(panAsec, tiltAsec);
-    if (!livePoseEnabled()) return;
+    if (!(await this.livePoseReads())) return;
 
     /*
      * Closed loop, Linux only, behind OBSBOT_LIVE_POSE.
@@ -239,6 +247,40 @@ export class LinuxTransport implements ObsbotTransport {
     return this.moveRetryCount;
   }
   private moveRetryCount = 0;
+
+  /**
+   * Whether this kernel's uvcvideo serves pan/tilt reads LIVE from the device
+   * rather than from its own cache — the condition under which the pose-settle
+   * and move-retry paths are correct and useful.
+   *
+   * OBSBOT_LIVE_POSE forces the answer either way. Unset, we PROBE: time a batch
+   * of GET_CUR reads in the helper and compare the mean to LIVE_READ_THRESHOLD_US.
+   * This detects the actual behaviour (are reads live) rather than a flag or a
+   * kernel version, so it fires for Ricardo's AUTO_UPDATE quirk (which advertises
+   * nothing), for the volatile patch, and for any future fix alike — and it is
+   * immune to the stable-backport and distro-versioning traps that make a
+   * uname-based gate wrong on exactly the kernels most users run.
+   *
+   * Cached for the transport's lifetime: the kernel does not change under us, and
+   * the probe reads the device a few dozen times. A probe failure (an older
+   * helper with no read_latency op, or an unreadable control) resolves to the
+   * override, or false — degrading to today's shipped behaviour, never throwing.
+   */
+  livePoseReads(): Promise<boolean> {
+    return (this.livePoseReadsCache ??= this.detectLivePoseReads());
+  }
+  private livePoseReadsCache?: Promise<boolean>;
+
+  private async detectLivePoseReads(): Promise<boolean> {
+    const override = livePoseOverride();
+    if (override !== undefined) return override;
+    try {
+      const { meanUs } = await this.helper.readLatency(0);
+      return meanUs >= LIVE_READ_THRESHOLD_US;
+    } catch {
+      return false;
+    }
+  }
 
   private async commitPanTilt(panAsec: number, tiltAsec: number): Promise<void> {
     try {

@@ -2,6 +2,7 @@ import { expect, test, vi } from "vitest";
 import { z } from "zod";
 import { createTools } from "../../src/mcp/tools.js";
 import type { ObsbotTransport } from "../../src/transport/transport.js";
+import { livePoseOverride } from "../../src/transport/transport.js";
 import { CameraBusyError } from "../../src/transport/transport.js";
 import type { DeviceManager } from "../../src/device/manager.js";
 import { AmbiguousCameraError } from "../../src/device/manager.js";
@@ -58,6 +59,7 @@ function makeFakeTransport() {
     gimbalSet: vi.fn(async (_yaw: number, _pitch: number, _roll?: number) => {}),
     gimbalSpeed: vi.fn(async (_yaw: number, _pitch: number, _roll: number, _autoStopMs: number) => {}),
     gimbalRecenter: vi.fn(async () => {}),
+    livePoseReads: vi.fn(async () => livePoseOverride() === true),
     readSerial: vi.fn(async () => "FAKESERIAL0001"),
     nextSeq: vi.fn(() => ++seq),
     close: vi.fn(async () => {}),

@@ -18,6 +18,7 @@ function makeFakeHelper(camCtrlGetValue = 288000) {
     panTiltSet: vi.fn(async (_pan: number, _tilt: number) => {}),
     camCtrlRange: vi.fn(async (_p: number) => ({ min: 0, max: 100 })),
     camCtrlGet: vi.fn(async (_p: number) => ({ value: camCtrlGetValue, flags: 2 })),
+    readLatency: vi.fn(async () => ({ meanUs: 2, minUs: 2, maxUs: 2 })),
     procAmpSet: vi.fn(async (_p: number, _v: number, _f: number) => {}),
     procAmpRange: vi.fn(async (_p: number) => ({ min: 0, max: 100 })),
     close: vi.fn(async () => {}),
@@ -254,4 +255,57 @@ test("gate on: recenter goes through the same closed loop", () =>
     expect(helper.panTiltSet).toHaveBeenCalledTimes(2);
     expect(helper.panTiltSet).toHaveBeenLastCalledWith(0, 0);
     expect(t.moveRetries).toBe(1);
+  }));
+
+// --- livePoseReads: read-latency probe (auto-detect a live-reading kernel) ---
+
+test("livePoseReads probes read latency and reports live above the threshold", () =>
+  withGate(undefined, async () => {
+    const helper = makeFakeHelper();
+    (helper.readLatency as ReturnType<typeof vi.fn>).mockResolvedValue({ meanUs: 150, minUs: 115, maxUs: 700 });
+    const t = new LinuxTransport(helper);
+    expect(await t.livePoseReads()).toBe(true);
+  }));
+
+test("livePoseReads reports cached below the threshold", () =>
+  withGate(undefined, async () => {
+    const helper = makeFakeHelper();
+    (helper.readLatency as ReturnType<typeof vi.fn>).mockResolvedValue({ meanUs: 2, minUs: 1.9, maxUs: 2.1 });
+    const t = new LinuxTransport(helper);
+    expect(await t.livePoseReads()).toBe(false);
+  }));
+
+test("livePoseReads caches the probe: the helper is timed once per transport", () =>
+  withGate(undefined, async () => {
+    const helper = makeFakeHelper();
+    (helper.readLatency as ReturnType<typeof vi.fn>).mockResolvedValue({ meanUs: 150, minUs: 115, maxUs: 700 });
+    const t = new LinuxTransport(helper);
+    await t.livePoseReads();
+    await t.livePoseReads();
+    expect(helper.readLatency).toHaveBeenCalledTimes(1);
+  }));
+
+test("OBSBOT_LIVE_POSE=1 forces live without probing", () =>
+  withGate("1", async () => {
+    const helper = makeFakeHelper();
+    const t = new LinuxTransport(helper);
+    expect(await t.livePoseReads()).toBe(true);
+    expect(helper.readLatency).not.toHaveBeenCalled();
+  }));
+
+test("OBSBOT_LIVE_POSE=0 forces cached even when the probe would say live", () =>
+  withGate("0", async () => {
+    const helper = makeFakeHelper();
+    (helper.readLatency as ReturnType<typeof vi.fn>).mockResolvedValue({ meanUs: 150, minUs: 115, maxUs: 700 });
+    const t = new LinuxTransport(helper);
+    expect(await t.livePoseReads()).toBe(false);
+    expect(helper.readLatency).not.toHaveBeenCalled();
+  }));
+
+test("a probe failure (old helper, unreadable control) degrades to cached, never throws", () =>
+  withGate(undefined, async () => {
+    const helper = makeFakeHelper();
+    (helper.readLatency as ReturnType<typeof vi.fn>).mockRejectedValue(new Error("unknown op: read_latency"));
+    const t = new LinuxTransport(helper);
+    expect(await t.livePoseReads()).toBe(false);
   }));

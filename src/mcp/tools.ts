@@ -59,7 +59,6 @@ import {
 } from "../codec/preset.js";
 import type { PresetSlot, PresetPose } from "../codec/preset.js";
 import { ObsbotTransport, CameraBusyError } from "../transport/transport.js";
-import { livePoseEnabled } from "../transport/transport.js";
 import { DeviceManager } from "../device/manager.js";
 import { ensureReady, msg } from "./ready.js";
 import type { ReadyResult, ReconnectCtl } from "./ready.js";
@@ -498,7 +497,9 @@ const POSE_SETTLE_DEFAULTS: Required<PoseSettleOpts> = {
 const POSE_STEADY_TOLERANCE_DEG = 1;
 
 /**
- * RELEASE GATE. Settling is off unless `OBSBOT_LIVE_POSE` is set to 1/true/yes/on.
+ * RELEASE GATE. Settling runs only where pose reads report LIVE position, decided
+ * by t.livePoseReads(): OBSBOT_LIVE_POSE forces it either way, otherwise the
+ * transport detects it (Linux probes read latency; macOS/Windows default off).
  *
  * The hazard readSteadyPose addresses only exists where pose reads report LIVE
  * position. Today that is macOS always, and Linux only on a kernel carrying the
@@ -522,7 +523,6 @@ const POSE_STEADY_TOLERANCE_DEG = 1;
  * The same gate also enables LinuxTransport's closed-loop move retry; the flag
  * itself lives in transport/transport.ts so both sides read one switch.
  */
-const livePoseSettlingEnabled = livePoseEnabled;
 
 /**
  * Read the gimbal pose, and refuse to hand it back while the gimbal is still
@@ -571,10 +571,11 @@ async function readSteadyPose(
     pitch: -(await t.camCtrlGet(CAMERA_CONTROL_TILT)).value,
   });
 
-  if (!livePoseSettlingEnabled()) {
-    // Gated off: one read, exactly as before this helper existed. `settled` is
-    // an assumption here, not a measurement — it reports "safe to compose"
-    // because on a commanded-echo kernel it is, not because motion was checked.
+  if (!(await t.livePoseReads())) {
+    // Reads are a commanded echo (or the caller forced the gate off): one read,
+    // exactly as before this helper existed. `settled` is an assumption here,
+    // not a measurement — it reports "safe to compose" because on an echo kernel
+    // it is, not because motion was checked.
     const only = await readPose();
     return { yaw: only.yaw, pitch: only.pitch, settled: true };
   }

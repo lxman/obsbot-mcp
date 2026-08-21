@@ -1,5 +1,5 @@
 import { HelperProcess } from "./helper-process.js";
-import { ObsbotTransport, Snapshot, SnapshotOpts } from "./transport.js";
+import { ObsbotTransport, Snapshot, SnapshotOpts, livePoseOverride } from "./transport.js";
 import { encodeRecenter, encodePtzMoveAngle, encodePtzMoveSpeed } from "../codec/commands.js";
 import { readSerialVia } from "./read-serial.js";
 
@@ -72,6 +72,15 @@ export class WindowsTransport implements ObsbotTransport {
 
   async camCtrlGet(property: number): Promise<{ value: number; flags: number }> {
     return this.helper.camCtrlGet(property);
+  }
+
+  /**
+   * Windows drives the gimbal with vendor frames and does not have the uvcvideo
+   * cached-read hazard; the settle/retry paths are Linux/macOS concerns. Honour
+   * the override for parity, default off.
+   */
+  async livePoseReads(): Promise<boolean> {
+    return livePoseOverride() === true;
   }
 
   async procAmpSet(property: number, value: number, flags: number): Promise<void> {

@@ -25,6 +25,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/time.h>
+#include <time.h>
 #include <dirent.h>
 #include <linux/limits.h>
 #include <linux/videodev2.h>
@@ -690,6 +691,71 @@ static void do_camctrl_range(const char *prop_str)
     fflush(stdout);
 }
 
+/*
+ * Time repeated GET_CUR reads of a pan/tilt control to tell a LIVE driver from a
+ * cached one, without moving the gimbal.
+ *
+ * On stock uvcvideo this camera's CT_PANTILT_ABSOLUTE is served from the
+ * driver's own cache (its GET_INFO stub strips AUTO_UPDATE, so ctrl->loaded is
+ * never cleared): a read is a memcpy, ~2 us. With Ricardo's AUTO_UPDATE fixup or
+ * the volatile patch, every VIDIOC_G_CTRL forces a fresh USB GET_CUR, ~150 us.
+ * Measured 2026-08-21: 1.9-2.0 us cached vs 115-716 us live, a ~70x gap with no
+ * overlap. The caller thresholds the mean (obsbot-mcp uses 40 us).
+ *
+ * This detects the PROPERTY (are reads live) rather than any flag or kernel
+ * version, so it is mechanism-agnostic — quirk, volatile patch, or a future fix
+ * all read as live — and immune to the backport/distro-versioning traps a
+ * uname-based gate walks into. Must run in C: the ~150 us signal is buried by
+ * the helper's own JSON-RPC round trip if timed from the caller.
+ *
+ * Reads only; the gimbal does not move. Warmup reads are discarded so a cold
+ * cache or an autosuspend resume on the first read does not skew the mean.
+ */
+static double monotonic_us(void)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (double)t.tv_sec * 1e6 + (double)t.tv_nsec / 1e3;
+}
+
+static void do_read_latency(const char *prop_str, const char *samples_str)
+{
+    int prop, cid, value, i;
+    int samples = (samples_str && *samples_str) ? (int)strtol(samples_str, NULL, 10) : 40;
+    const int WARMUP = 5;
+    double sum = 0.0, mn = 1e18, mx = 0.0;
+
+    if (g_fd < 0) { error_response("read_latency: no device open"); return; }
+    if (!prop_str || !*prop_str) { error_response("read_latency: missing property"); return; }
+    if (samples < 1) samples = 1;
+    if (samples > 500) samples = 500;
+
+    prop = (int)strtol(prop_str, NULL, 10);
+    cid = camctrl_to_v4l2(prop);
+    if (cid < 0) { error_response("read_latency: unknown property"); return; }
+
+    /* Confirm the control reads at all before timing it. */
+    if (v4l2_get_ctrl_ex(g_fd, cid, &value) < 0) {
+        error_response("read_latency: control not readable");
+        return;
+    }
+
+    for (i = 0; i < WARMUP + samples; i++) {
+        double a = monotonic_us();
+        int r = v4l2_get_ctrl_ex(g_fd, cid, &value);
+        double d = monotonic_us() - a;
+        if (r < 0) { error_response("read_latency: read failed mid-probe"); return; }
+        if (i < WARMUP) continue;
+        sum += d;
+        if (d < mn) mn = d;
+        if (d > mx) mx = d;
+    }
+
+    printf("{\"ok\":true,\"samples\":%d,\"meanUs\":%.1f,\"minUs\":%.1f,\"maxUs\":%.1f}\n",
+           samples, sum / samples, mn, mx);
+    fflush(stdout);
+}
+
 static void do_camctrl_get(const char *prop_str)
 {
     int prop, cid, value, auto_cid;
@@ -1079,6 +1145,8 @@ int main(void)
             do_camctrl_range(get_field(line, "property"));
         } else if (strcmp(op, "camctrl_get") == 0) {
             do_camctrl_get(get_field(line, "property"));
+        } else if (strcmp(op, "read_latency") == 0) {
+            do_read_latency(get_field(line, "property"), get_field(line, "samples"));
         } else if (strcmp(op, "procamp_set") == 0) {
             do_procamp_set(get_field(line, "property"),
                             get_field(line, "value"),
