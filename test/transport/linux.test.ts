@@ -173,3 +173,85 @@ test("close delegates to helper", async () => {
   await t.close();
   expect(helper.close).toHaveBeenCalledOnce();
 });
+
+// --- closed-loop move retry (OBSBOT_LIVE_POSE, Linux only) ---
+//
+// The camera intermittently lands one axis on a previously commanded pose. With
+// live reads that is detectable, so panTiltAbsolute settles, compares, and
+// re-sends ONCE. Gated off by default: on a stock kernel the read is a cached
+// echo, a retry could never trigger, and the settle would just cost time.
+
+function withGate<T>(value: string | undefined, fn: () => Promise<T>): Promise<T> {
+  const prev = process.env.OBSBOT_LIVE_POSE;
+  if (value === undefined) delete process.env.OBSBOT_LIVE_POSE;
+  else process.env.OBSBOT_LIVE_POSE = value;
+  return fn().finally(() => {
+    if (prev === undefined) delete process.env.OBSBOT_LIVE_POSE;
+    else process.env.OBSBOT_LIVE_POSE = prev;
+  });
+}
+
+// A helper whose pan/tilt readback is a function of how many commits it has seen:
+// `poseAfter[n]` is the pose it reports after n panTiltSet calls.
+function makeStatefulHelper(poseAfter: Array<[number, number]>) {
+  const helper = makeFakeHelper();
+  let commits = 0;
+  (helper.panTiltSet as ReturnType<typeof vi.fn>).mockImplementation(async () => { commits++; });
+  (helper.camCtrlGet as ReturnType<typeof vi.fn>).mockImplementation(async (p: number) => {
+    const pose = poseAfter[Math.min(commits, poseAfter.length - 1)];
+    return { value: p === 0 ? pose[0] : pose[1], flags: 2 };
+  });
+  return helper;
+}
+
+test("gate off: one commit, no settle reads, no retry", () =>
+  withGate(undefined, async () => {
+    const helper = makeStatefulHelper([[0, 0], [999, 999]]); // would look badly off-target if read
+    const t = new LinuxTransport(helper);
+    await t.gimbalSet(10, -5);
+    expect(helper.panTiltSet).toHaveBeenCalledTimes(1);
+    expect(helper.camCtrlGet).not.toHaveBeenCalled();
+    expect(t.moveRetries).toBe(0);
+  }));
+
+test("gate on: a move that lands within one step is not retried", () =>
+  withGate("1", async () => {
+    // Lands one 3600-step short of the commanded pan, as the hardware does.
+    const helper = makeStatefulHelper([[0, 0], [36000 - 3600, -18000]]);
+    const t = new LinuxTransport(helper);
+    await t.gimbalSet(10, 5);
+    expect(helper.panTiltSet).toHaveBeenCalledTimes(1);
+    expect(helper.camCtrlGet).toHaveBeenCalled();
+    expect(t.moveRetries).toBe(0);
+  }));
+
+test("gate on: an axis that lands on a stale pose is re-sent once and corrects", () =>
+  withGate("1", async () => {
+    // After the 1st commit pan sits at a previously commanded 216000 instead of
+    // 36000; after the 2nd commit it is where it was told to go.
+    const helper = makeStatefulHelper([[0, 0], [216000, -18000], [36000, -18000]]);
+    const t = new LinuxTransport(helper);
+    await t.gimbalSet(10, 5);
+    expect(helper.panTiltSet).toHaveBeenCalledTimes(2);
+    expect(helper.panTiltSet).toHaveBeenNthCalledWith(2, 36000, -18000);
+    expect(t.moveRetries).toBe(1);
+  }));
+
+test("gate on: a move that is still off after the retry is not retried again", () =>
+  withGate("1", async () => {
+    const helper = makeStatefulHelper([[0, 0], [216000, -18000], [216000, -18000]]);
+    const t = new LinuxTransport(helper);
+    await expect(t.gimbalSet(10, 5)).resolves.toBeUndefined(); // no throw: the caller's settle reports it
+    expect(helper.panTiltSet).toHaveBeenCalledTimes(2);
+    expect(t.moveRetries).toBe(1);
+  }));
+
+test("gate on: recenter goes through the same closed loop", () =>
+  withGate("1", async () => {
+    const helper = makeStatefulHelper([[36000, 0], [36000, 0], [0, 0]]); // pan ignores the first (0,0)
+    const t = new LinuxTransport(helper);
+    await t.gimbalRecenter();
+    expect(helper.panTiltSet).toHaveBeenCalledTimes(2);
+    expect(helper.panTiltSet).toHaveBeenLastCalledWith(0, 0);
+    expect(t.moveRetries).toBe(1);
+  }));

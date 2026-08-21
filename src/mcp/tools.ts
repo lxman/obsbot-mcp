@@ -59,6 +59,7 @@ import {
 } from "../codec/preset.js";
 import type { PresetSlot, PresetPose } from "../codec/preset.js";
 import { ObsbotTransport, CameraBusyError } from "../transport/transport.js";
+import { livePoseEnabled } from "../transport/transport.js";
 import { DeviceManager } from "../device/manager.js";
 import { ensureReady, msg } from "./ready.js";
 import type { ReadyResult, ReconnectCtl } from "./ready.js";
@@ -470,6 +471,127 @@ const napMs = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 // reflects the last commanded pose) without implying precision the readout
 // doesn't have.
 const round2 = (deg: number): number => Math.round(deg * 100) / 100;
+
+export interface PoseSettleOpts {
+  pollMs?: number;
+  timeoutMs?: number;
+  /** Beat between the two pose reads that decide whether the gimbal is moving. */
+  motionPollMs?: number;
+}
+
+// motionPollMs is the sensitivity knob, same idea as readSteadyStatus: a beat of
+// B ms detects any slew faster than POSE_STEADY_TOLERANCE_DEG * 1000/B deg/s.
+// 120ms with a 1° band => 8.3 deg/s, against a measured gimbalSet slew of ~50
+// deg/s (2026-08-21: a 90° pan took ~1.7s) — six times the threshold, while
+// costing each aim one extra pose read and 120ms.
+const POSE_SETTLE_DEFAULTS: Required<PoseSettleOpts> = {
+  pollMs: 100,
+  timeoutMs: 3000,
+  motionPollMs: 120,
+};
+// The band cannot be zero the way readSteadyStatus's is. A settled gimbal does
+// NOT read identically every time: holding position, this camera dithers by one
+// 3600 arc-second step (measured 2026-08-21: tilt read 40.0, 40.0, 41.0, 40.0
+// while mechanically stationary). One degree is that dither exactly, and the
+// hardware readout is only accurate to ±1° anyway, so a tighter band would spin
+// until the deadline on a camera that is not moving at all.
+const POSE_STEADY_TOLERANCE_DEG = 1;
+
+/**
+ * RELEASE GATE. Settling is off unless `OBSBOT_LIVE_POSE` is set to 1/true/yes/on.
+ *
+ * The hazard readSteadyPose addresses only exists where pose reads report LIVE
+ * position. Today that is macOS always, and Linux only on a kernel carrying the
+ * uvcvideo AUTO_UPDATE fixup for 3564:fef8 or the volatile patch — neither of
+ * which is upstream yet. On a stock Linux kernel the read is a commanded echo,
+ * settling changes no result, and the only effect is +motionPollMs on every aim
+ * and preset write. So the default stays off and shipped behaviour is unchanged
+ * on every platform.
+ *
+ * FLIP THE DEFAULT when the uvcvideo change lands upstream. Auto-detection is
+ * not available and is not worth building: the fixup restores AUTO_UPDATE
+ * WITHOUT advertising V4L2_CTRL_FLAG_VOLATILE, so the flag cannot distinguish it
+ * from a stock kernel, and the Linux helper's `flags` field carries a
+ * DirectShow-style auto/manual indicator rather than V4L2 control flags anyway.
+ *
+ * macOS is gated too, deliberately. It reads live and therefore has this bug
+ * today, but its behaviour is hardware-verified as shipped and this is not the
+ * change to unverify it in — enable the env var there once it has been exercised
+ * on Mac hardware.
+ *
+ * The same gate also enables LinuxTransport's closed-loop move retry; the flag
+ * itself lives in transport/transport.ts so both sides read one switch.
+ */
+const livePoseSettlingEnabled = livePoseEnabled;
+
+/**
+ * Read the gimbal pose, and refuse to hand it back while the gimbal is still
+ * travelling.
+ *
+ * WHY THIS EXISTS. `aimAtPixel` and preset save/update do not use the pose as a
+ * report — they compose a NEW ABSOLUTE TARGET from it. A pose read mid-slew
+ * therefore does not merely look wrong, it lands the camera somewhere it was
+ * never asked to go: the composed target is short by exactly the distance the
+ * gimbal still had left to travel.
+ *
+ * This was invisible before 2026-08-21 because on Linux it could not happen.
+ * uvcvideo served CT_PANTILT_ABSOLUTE from its own cache, so a read taken during
+ * a move returned the last COMMANDED pose — the very thing the composition
+ * wanted — and the bug was masked by a driver defect. macOS has always read live
+ * and has always been exposed. Once the Linux driver reports true position (the
+ * uvcvideo AUTO_UPDATE fixup, or the pending volatile patch — see
+ * UVCVIDEO-LINUX-POSITION-2026-07-21.md), Linux is exposed too. Measured on
+ * hardware: five reads issued immediately after commanding a 90° pan returned
+ * 0.0, 18.0, 37.0, 60.0, 79.0 — five different intermediate poses, any of which
+ * would have been composed against.
+ *
+ * Correct on BOTH kernels, which is why it is unconditional rather than gated on
+ * a capability. Where the read is a cached setpoint, the two reads agree on the
+ * first beat and this returns after one `motionPollMs` with the same value the
+ * old code would have used. Where the read is live, it waits for arrival.
+ *
+ * Returns `settled` rather than throwing on timeout, matching waitForZoomSettle:
+ * a gimbal still moving after the bound is information the caller may want to
+ * act on, and the pose returned is still the freshest one available. Read
+ * failures are NOT swallowed here — unlike the zoom settle, which runs after the
+ * write it reports on, this runs BEFORE the move it feeds, and composing a
+ * target from a pose we failed to read is exactly the outcome to avoid.
+ */
+async function readSteadyPose(
+  t: ObsbotTransport,
+  opts: PoseSettleOpts = {},
+): Promise<{ yaw: number; pitch: number; settled: boolean }> {
+  const { pollMs, timeoutMs, motionPollMs } = { ...POSE_SETTLE_DEFAULTS, ...opts };
+  const deadline = Date.now() + timeoutMs;
+  // UVC pan is degrees with our yaw sign (+ = camera-left); UVC tilt is degrees
+  // but positive = up, so negate to match our +pitch = down convention. Same
+  // read path and same signs as obsbot_gimbal_position.
+  const readPose = async () => ({
+    yaw: (await t.camCtrlGet(CAMERA_CONTROL_PAN)).value,
+    pitch: -(await t.camCtrlGet(CAMERA_CONTROL_TILT)).value,
+  });
+
+  if (!livePoseSettlingEnabled()) {
+    // Gated off: one read, exactly as before this helper existed. `settled` is
+    // an assumption here, not a measurement — it reports "safe to compose"
+    // because on a commanded-echo kernel it is, not because motion was checked.
+    const only = await readPose();
+    return { yaw: only.yaw, pitch: only.pitch, settled: true };
+  }
+
+  let last = await readPose();
+  for (;;) {
+    await napMs(motionPollMs);
+    const next = await readPose();
+    const steady =
+      Math.abs(next.yaw - last.yaw) <= POSE_STEADY_TOLERANCE_DEG &&
+      Math.abs(next.pitch - last.pitch) <= POSE_STEADY_TOLERANCE_DEG;
+    if (steady) return { yaw: next.yaw, pitch: next.pitch, settled: true };
+    last = next;
+    if (Date.now() >= deadline) return { yaw: next.yaw, pitch: next.pitch, settled: false };
+    await napMs(pollMs);
+  }
+}
 
 export interface ZoomSettleOpts {
   pollMs?: number;
@@ -1260,10 +1382,10 @@ export function createTools(
         }
         const magnification = resolved.magnification;
 
-        // Same read path as obsbot_gimbal_position: UVC pan is degrees with our
-        // yaw sign; UVC tilt is degrees but positive = up, so negate it.
-        const yaw = (await t.camCtrlGet(CAMERA_CONTROL_PAN)).value;
-        const pitch = -(await t.camCtrlGet(CAMERA_CONTROL_TILT)).value;
+        // Settled pose, not a bare read: this becomes a composed absolute target
+        // below, so a mid-slew reading would aim short by whatever travel was
+        // left. See readSteadyPose.
+        const { yaw, pitch } = await readSteadyPose(t);
 
         // resolveMagnification already folded fovMode and zoomPercent into one
         // number — a discrete mode's inherent crop and a continuous zoom are two
@@ -1412,9 +1534,9 @@ export function createTools(
         }
         const magnification = resolved.magnification;
 
-        // Same read path as obsbot_gimbal_position / obsbot_aim_at_pixel.
-        const yaw = (await t.camCtrlGet(CAMERA_CONTROL_PAN)).value;
-        const pitch = -(await t.camCtrlGet(CAMERA_CONTROL_TILT)).value;
+        // Same read path as obsbot_aim_at_pixel, and settled for the same reason:
+        // this pose is composed into an absolute target, not reported.
+        const { yaw, pitch } = await readSteadyPose(t);
 
         // Aim uses the CURRENT magnification: it has to match the optics the
         // caller's frame was actually captured at, not the new fitted zoom.
@@ -1520,11 +1642,10 @@ export function createTools(
           if (before[slot - 1].occupied) {
             return { ok: false, error: `slot ${slot} is occupied; update or delete first` };
           }
-          // Mirror obsbot_gimbal_position's read path exactly: UVC pan is degrees, same
-          // sign as our yaw; UVC tilt is degrees but positive = up, so negate to match
-          // our +pitch = down convention.
-          const yaw = (await t.camCtrlGet(CAMERA_CONTROL_PAN)).value;
-          const pitch = -(await t.camCtrlGet(CAMERA_CONTROL_TILT)).value;
+          // Settled pose: a preset is a pose the user will RECALL later, so saving
+          // one sampled mid-slew bakes an arbitrary waypoint into the slot
+          // permanently. See readSteadyPose.
+          const { yaw, pitch } = await readSteadyPose(t);
           // T6: ObsbotTransport exposes no zoom getter, so the live zoom ratio can't be
           // read back here — zoom is hardcoded to 1 rather than guessed. Not an oversight.
           pose = { pan: yaw, tilt: pitch, roll: 0, zoom: 1 };
@@ -1607,11 +1728,9 @@ export function createTools(
           // handing it back costs nothing and is the only restore path the caller has:
           // the device keeps no history and UPDATE is not reversible.
           previous = before[slot - 1].pose;
-          // Mirror obsbot_preset_save's read path exactly: UVC pan is degrees, same sign as
-          // our yaw; UVC tilt is degrees but positive = up, so negate to match our +pitch =
-          // down convention.
-          const yaw = (await t.camCtrlGet(CAMERA_CONTROL_PAN)).value;
-          const pitch = -(await t.camCtrlGet(CAMERA_CONTROL_TILT)).value;
+          // Mirror obsbot_preset_save's read path exactly, settled for the same
+          // reason: this pose is written into the slot, not reported.
+          const { yaw, pitch } = await readSteadyPose(t);
           // T6: ObsbotTransport exposes no zoom getter, so the live zoom ratio can't be
           // read back here — zoom is hardcoded to 1 rather than guessed. Not an oversight.
           pose = { pan: yaw, tilt: pitch, roll: 0, zoom: 1 };

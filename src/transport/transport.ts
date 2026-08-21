@@ -34,6 +34,17 @@ export class CameraBusyError extends Error {
   }
 }
 
+/**
+ * OBSBOT_LIVE_POSE release gate (1/true/yes/on). Enables the behaviours that only
+ * make sense where pan/tilt reads report LIVE position rather than a cached
+ * setpoint: pose settling before composition (mcp/tools.ts readSteadyPose) and the
+ * Linux closed-loop move retry (transport/linux.ts). Off by default until the
+ * uvcvideo change that makes Linux reads live is upstream; see readSteadyPose for
+ * the full rationale and why it cannot be auto-detected.
+ */
+export const livePoseEnabled = (): boolean =>
+  /^(1|true|yes|on)$/i.test(process.env.OBSBOT_LIVE_POSE ?? "");
+
 export interface ObsbotTransport {
   sendVendor(frame: Buffer): Promise<void>;
   /**

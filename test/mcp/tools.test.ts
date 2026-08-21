@@ -8,6 +8,7 @@ import { AmbiguousCameraError } from "../../src/device/manager.js";
 import type { CaptureManager } from "../../src/capture/manager.js";
 import { CaptureError, FfmpegMissingError } from "../../src/capture/manager.js";
 import { buildFrame } from "../../src/codec/frame.js";
+import { CAMERA_CONTROL_PAN, CAMERA_CONTROL_TILT } from "../../src/codec/commands.js";
 import { aimAtPixel } from "../../src/geometry/aim.js";
 
 // Real awake status block captured from the device (starts 0x25, byte[2]=0 → awake).
@@ -2011,6 +2012,85 @@ test("aiming at the center pixel leaves the pose unchanged", async () => {
   expect(r.clamped).toBe(false);
   expect(r.fovMode).toBe("wide");
   expect(transport.gimbalSet).toHaveBeenCalled();
+});
+
+// --- OBSBOT_LIVE_POSE release gate (readSteadyPose) ---
+//
+// The pose feeding aimAtPixel becomes a composed ABSOLUTE target, so reading it
+// mid-slew aims short by the travel remaining. That can only happen where the
+// read is live: macOS always, Linux only on a kernel carrying the uvcvideo
+// AUTO_UPDATE fixup or the volatile patch. Neither is upstream, so settling is
+// gated off and stock behaviour is byte-for-byte unchanged.
+
+test("gate off: the pose is read once per axis, no settling poll", async () => {
+  const prev = process.env.OBSBOT_LIVE_POSE;
+  delete process.env.OBSBOT_LIVE_POSE;
+  try {
+    const transport = makeFakeTransport();
+    // A pose that is still travelling: every read returns something different.
+    let n = 0;
+    transport.camCtrlGet = vi.fn(async (_p: number) => ({ value: n++ * 10, flags: 2 }));
+    const tool = findTool(createTools(makeFakeMgr(transport)), "obsbot_aim_at_pixel");
+    const r = (await tool.handler({ x: 640, y: 360, ...HD_FRAME })) as { ok: boolean };
+    expect(r.ok).toBe(true);
+    // Exactly two reads (pan, tilt). Settling would have taken at least four.
+    expect(transport.camCtrlGet).toHaveBeenCalledTimes(2);
+  } finally {
+    if (prev === undefined) delete process.env.OBSBOT_LIVE_POSE;
+    else process.env.OBSBOT_LIVE_POSE = prev;
+  }
+});
+
+test("gate on: a moving gimbal is polled until the pose stops changing", async () => {
+  const prev = process.env.OBSBOT_LIVE_POSE;
+  process.env.OBSBOT_LIVE_POSE = "1";
+  try {
+    const transport = makeFakeTransport();
+    // Pan slews 0 -> 30 -> 60 -> 90 and then holds; tilt sits at 0 throughout.
+    // Reads arrive in (pan, tilt) pairs, so drive the ramp off the pan reads.
+    const panSeq = [0, 30, 60, 90, 90, 90, 90, 90];
+    let panIdx = 0;
+    transport.camCtrlGet = vi.fn(async (p: number) => {
+      if (p !== CAMERA_CONTROL_PAN) return { value: 0, flags: 2 };
+      return { value: panSeq[Math.min(panIdx++, panSeq.length - 1)], flags: 2 };
+    });
+    const tool = findTool(createTools(makeFakeMgr(transport)), "obsbot_aim_at_pixel");
+    const r = (await tool.handler({ x: 640, y: 360, ...HD_FRAME })) as {
+      ok: boolean; target: { yaw: number };
+    };
+    expect(r.ok).toBe(true);
+    // It kept polling past the ramp rather than composing against 0 or 30.
+    expect(panIdx).toBeGreaterThan(3);
+    // Centre pixel = no offset, so the target is whatever settled pose it read.
+    expect(r.target.yaw).toBeCloseTo(90, 6);
+  } finally {
+    if (prev === undefined) delete process.env.OBSBOT_LIVE_POSE;
+    else process.env.OBSBOT_LIVE_POSE = prev;
+  }
+});
+
+test("gate on: a gimbal holding position settles despite 1-degree dither", async () => {
+  const prev = process.env.OBSBOT_LIVE_POSE;
+  process.env.OBSBOT_LIVE_POSE = "1";
+  try {
+    const transport = makeFakeTransport();
+    // Measured on hardware 2026-08-21: a stationary gimbal reports one 3600
+    // arc-second step of jitter. A zero-tolerance band would never settle.
+    const dither = [40, 40, 41, 40, 41, 40, 40];
+    let i = 0;
+    transport.camCtrlGet = vi.fn(async (p: number) => {
+      if (p !== CAMERA_CONTROL_TILT) return { value: 0, flags: 2 };
+      return { value: dither[Math.min(i++, dither.length - 1)], flags: 2 };
+    });
+    const tool = findTool(createTools(makeFakeMgr(transport)), "obsbot_aim_at_pixel");
+    const r = (await tool.handler({ x: 640, y: 360, ...HD_FRAME })) as { ok: boolean };
+    expect(r.ok).toBe(true);
+    // Settled on the first comparison rather than polling to the deadline.
+    expect(transport.camCtrlGet).toHaveBeenCalledTimes(4);
+  } finally {
+    if (prev === undefined) delete process.env.OBSBOT_LIVE_POSE;
+    else process.env.OBSBOT_LIVE_POSE = prev;
+  }
 });
 
 test("an off-center pixel commands the offset the geometry module computes", async () => {
