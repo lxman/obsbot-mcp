@@ -141,12 +141,22 @@ async function main() {
         }
         return out;
       },
-      until: async (fn, { timeoutMs = 8000, everyMs = 250 } = {}) => {
+      // On timeout the error carries the last thing `probe` saw, so a failed
+      // check says where the camera actually was instead of just "not there".
+      // Without it, gimbal.move.absolute failed twice on 2026-08-21 with no
+      // record of the pose it had landed on — the one fact needed to debug it.
+      until: async (fn, { timeoutMs = 8000, everyMs = 250, probe } = {}) => {
         const deadline = Date.now() + timeoutMs;
         for (;;) {
           const v = await fn();
           if (v) return v;
-          if (Date.now() > deadline) throw new Error(`condition not met within ${timeoutMs}ms`);
+          if (Date.now() > deadline) {
+            let seen = "";
+            if (probe) {
+              try { seen = `; last observed: ${JSON.stringify(await probe())}`; } catch { /* best effort */ }
+            }
+            throw new Error(`condition not met within ${timeoutMs}ms${seen}`);
+          }
           await heartbeat();
           await sleep(everyMs);
         }

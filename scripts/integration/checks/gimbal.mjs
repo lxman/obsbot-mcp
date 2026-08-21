@@ -32,7 +32,7 @@ export const gimbalChecks = [
           const p = await ctx.pos();
           return near(p.yaw, target.yaw) && near(p.pitch, target.pitch) ? p : null;
         },
-        { timeoutMs: 20000, everyMs: 250 },
+        { timeoutMs: 20000, everyMs: 250, probe: () => ctx.pos() },
       );
       return {
         evidence: { landed },
