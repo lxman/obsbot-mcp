@@ -1,5 +1,44 @@
 # Changelog
 
+## [0.7.0] — 2026-08-28
+
+### Added: Linux detects a live-reading kernel and closes the loop on gimbal moves
+
+Pan/tilt reads on Linux mean two different things depending on the kernel. Stock uvcvideo
+serves this camera's `CT_PANTILT_ABSOLUTE` from its cache (the firmware's `GET_INFO` stub
+strips the `AUTO_UPDATE` flag), so a read returns the last *commanded* pose. With the uvcvideo
+fix now under review on linux-media — a flags fixup for 3564:fef8, sent as
+`[PATCH 0/3] media: uvcvideo: live pan/tilt position on the OBSBOT Tiny 2` — the same read
+returns the *live* position, mid-slew or after the gimbal is moved by hand.
+
+Two things quietly depended on the cached meaning, and now behave correctly on both kernels:
+
+- **Pose composition settles first.** `obsbot_aim_at_pixel` and preset save/update compose a
+  new absolute target from the current pose. Read mid-slew, that target was short by the travel
+  remaining (five reads after a 90° pan returned 0, 18, 37, 60, 79°). They now wait for two reads
+  a beat apart to agree within one degree before composing.
+- **Moves are closed-loop.** The firmware occasionally sends one axis to a *previously*
+  commanded pose instead of the one just sent. On a stock kernel this is invisible; with live
+  reads it is detectable, so a Linux move now settles, compares against the target within one
+  step, and re-sends once.
+
+Both turn on automatically when reads are live. Detection is by **read latency**, measured in
+the native helper (new `read_latency` op): a cached read is a ~2µs memcpy, a live one is a
+~150µs+ USB `GET_CUR`, a ~70× gap with no overlap. That detects the property itself rather
+than a kernel version, so it works for the fixup, for stable/distro backports of it, and for
+any future kernel that reads live. `OBSBOT_LIVE_POSE` is tri-state: `1` forces on, `0` forces
+off, unset auto-detects. macOS and Windows honour only the override and default off. An older
+helper without the op degrades to off, never throws.
+
+`obsbot_gimbal_position` itself is unchanged — it is a report, and already promises a value
+valid during a move.
+
+### Changed: hardware verification
+
+`gimbal.move.absolute` now records where the gimbal actually was when a move times out, and
+`ai.tracking.enable` is re-tiered MANUAL: whether tracking engages depends on whether someone is
+in frame, which an automated check cannot control.
+
 ## [0.6.3] — 2026-08-01
 
 ### Fixed: a two-axis gimbal move could lose one of its axes (Linux)
