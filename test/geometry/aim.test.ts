@@ -2,6 +2,7 @@ import { expect, test } from "vitest";
 import {
   halfAngles, pixelToOffset, aimAtPixel,
   HORIZONTAL_FOV_DEG, VERTICAL_TANGENT_CORRECTION, GIMBAL_YAW_LIMIT_DEG, GIMBAL_PITCH_LIMIT_DEG,
+  gimbalYawLimitDeg,
   WIDE_HFOV_DEG, FOV_MAGNIFICATION, MIN_MAGNIFICATION, MAX_MAGNIFICATION,
   magnificationFromZoomRatio, zoomRatioFromMagnification,
 } from "../../src/geometry/aim.js";
@@ -242,9 +243,24 @@ test("zooming in shrinks the offset for the same pixel", () => {
 // takes `current` as a parameter and cannot police any of that — holding the
 // invariant is the calling tool's job. See spec section 5.
 
-test("the gimbal limits are the hardware-verified bounds", () => {
-  expect(GIMBAL_YAW_LIMIT_DEG).toBe(150);
+test("the gimbal limits are the hardware-verified bounds for this platform", () => {
+  expect(GIMBAL_YAW_LIMIT_DEG).toBe(process.platform === "linux" ? 130 : 150);
   expect(GIMBAL_PITCH_LIMIT_DEG).toBe(90);
+});
+
+// On Linux the V4L2 write path silently clamps pan to the range the device
+// ADVERTISES (±468000 arcsec = ±130°), which under-reports the ±150° the
+// mechanism reaches — hardware-verified 2026-09-01: writes of 540000 and
+// 504000 arcsec both return success and land at exactly 468000. A yaw limit
+// wider than what the platform can command makes every aim past 130° a
+// guaranteed miss that also burns the closed loop's one retry, so the limit is
+// the COMMANDABLE bound, per platform. macOS (raw USB) and Windows (vendor
+// DLL) bypass the kernel clamp and keep the mechanical bound.
+test("the commandable yaw limit is the kernel-clamped range on Linux only", () => {
+  expect(gimbalYawLimitDeg("linux")).toBe(130);
+  expect(gimbalYawLimitDeg("darwin")).toBe(150);
+  expect(gimbalYawLimitDeg("win32")).toBe(150);
+  expect(gimbalYawLimitDeg()).toBe(GIMBAL_YAW_LIMIT_DEG);
 });
 
 test("the target composes the current pose with the pixel's ray", () => {
@@ -323,7 +339,7 @@ test("the offset matches pixelToOffset only when one axis is zero", () => {
 test("a yaw target beyond the limit is clamped and reported", () => {
   // Left edge gives +33.5deg; from yaw 149 that would be 182.5deg.
   const aim = aimAtPixel(0, 360, HD, WIDE, { yaw: 149, pitch: 0 });
-  expect(aim.target.yaw).toBe(150);
+  expect(aim.target.yaw).toBe(GIMBAL_YAW_LIMIT_DEG);
   expect(aim.clamped).toBe(true);
 });
 
@@ -335,7 +351,7 @@ test("aiming past vertical yields the over-the-top solution, and clamps", () => 
   // clamped it to 90, which pointed somewhere the target was not.
   const aim = aimAtPixel(640, 720, HD, WIDE, { yaw: 0, pitch: 85 });
   expect(aim.target.pitch).toBeCloseTo(75.388952, 5);
-  expect(aim.target.yaw).toBe(-150);
+  expect(aim.target.yaw).toBe(-GIMBAL_YAW_LIMIT_DEG);
   expect(aim.clamped).toBe(true);
 });
 
@@ -364,7 +380,7 @@ test("clamping at the negative end is reported too", () => {
   // composed solution goes over the top, clamping on yaw and leaving pitch
   // unclamped, rather than the additive model's pitch beyond -90.
   const aim = aimAtPixel(1280, 0, HD, WIDE, { yaw: -140, pitch: -80 });
-  expect(aim.target.yaw).toBe(-150);
+  expect(aim.target.yaw).toBe(-GIMBAL_YAW_LIMIT_DEG);
   expect(aim.target.pitch).toBeCloseTo(-56.789344, 5);
   expect(aim.clamped).toBe(true);
 });
@@ -376,7 +392,7 @@ test("saturating one axis does not falsely clamp the other", () => {
   // offset before the asin, same cone effect as the invariant tests above.
   // Only zero pitch or zero horizontal offset reproduces the additive value.
   const aim = aimAtPixel(0, 360, HD, WIDE, { yaw: 149, pitch: 3 });
-  expect(aim.target.yaw).toBe(150);
+  expect(aim.target.yaw).toBe(GIMBAL_YAW_LIMIT_DEG);
   expect(aim.target.pitch).toBeCloseTo(2.501309, 5);
   expect(aim.clamped).toBe(true);
 });

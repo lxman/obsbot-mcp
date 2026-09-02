@@ -10,7 +10,7 @@ import type { CaptureManager } from "../../src/capture/manager.js";
 import { CaptureError, FfmpegMissingError } from "../../src/capture/manager.js";
 import { buildFrame } from "../../src/codec/frame.js";
 import { CAMERA_CONTROL_PAN, CAMERA_CONTROL_TILT } from "../../src/codec/commands.js";
-import { aimAtPixel } from "../../src/geometry/aim.js";
+import { aimAtPixel, GIMBAL_YAW_LIMIT_DEG } from "../../src/geometry/aim.js";
 
 // Real awake status block captured from the device (starts 0x25, byte[2]=0 → awake).
 const HEALTHY_STATUS_AWAKE = Buffer.from(
@@ -484,8 +484,8 @@ test("obsbot_gimbal_move clamps yaw/pitch to conservative limits", async () => {
   const result = await tool.handler({ yaw: 999, pitch: -999, roll: 0 });
 
   expect(transport.gimbalSet).toHaveBeenCalledTimes(1);
-  expect(transport.gimbalSet).toHaveBeenCalledWith(150, -90, 0);
-  expect(result).toEqual({ yaw: 150, pitch: -90, roll: 0 });
+  expect(transport.gimbalSet).toHaveBeenCalledWith(GIMBAL_YAW_LIMIT_DEG, -90, 0);
+  expect(result).toEqual({ yaw: GIMBAL_YAW_LIMIT_DEG, pitch: -90, roll: 0 });
 });
 
 test("obsbot_ai_track rejects an unknown mode", async () => {
@@ -2207,8 +2207,8 @@ test("saturation is reported and never commands an out-of-range pose", async () 
   };
   expect(r.ok).toBe(true);
   expect(r.clamped).toBe(true);
-  expect(r.target.yaw).toBe(150);
-  expect(transport.gimbalSet).toHaveBeenCalledWith(150, expect.any(Number), expect.any(Number));
+  expect(r.target.yaw).toBe(GIMBAL_YAW_LIMIT_DEG);
+  expect(transport.gimbalSet).toHaveBeenCalledWith(GIMBAL_YAW_LIMIT_DEG, expect.any(Number), expect.any(Number));
 });
 
 test("an over-the-top target is refused without moving the gimbal, even though it would clamp", async () => {
@@ -2238,7 +2238,7 @@ test("an ordinary out-of-range clamp (not over the top) still moves and reports 
   };
   expect(r.ok).toBe(true);
   expect(r.clamped).toBe(true);
-  expect(r.target.yaw).toBe(150);
+  expect(r.target.yaw).toBe(GIMBAL_YAW_LIMIT_DEG);
   expect(transport.gimbalSet).toHaveBeenCalled();
 });
 

@@ -262,26 +262,39 @@ export function pixelToOffset(x: number, y: number, frame: Frame, optics: Optics
 }
 
 /**
- * Mechanical limits of the Tiny 2's gimbal, in degrees. Hardware-verified.
+ * Limits of the Tiny 2's gimbal, in degrees: the pose the running platform can
+ * COMMAND. Hardware-verified.
  *
  * These live here rather than in the tool layer so there is exactly one
  * definition: `obsbot_gimbal_move` imports them for its own clamping. Two copies
  * of a bound that must agree is a defect waiting to happen.
  *
- * ±150 is the mechanical yaw range on EVERY platform, and these limits are not
- * platform-conditional. Measured 2026-07-25: commanded 145 reads back 145, and
- * 150 reads back 149. Position feedback comes from the camera's physical
- * encoder, which is a property of the hardware and does not vary by OS.
+ * ±150 is the mechanical yaw range on every platform. Measured 2026-07-25:
+ * commanded 145 reads back 145, and 150 reads back 149. Position feedback comes
+ * from the camera's physical encoder, which does not vary by OS.
  *
- * Do not "fix" this to 130. `transport/linux.ts` and `transport/macos.ts` record
- * a `CT_PANTILT_ABSOLUTE` range of ±468000 arcsec = ±130°, which reads like a
- * conflict and was raised as one during review. It is not: that is the range the
- * UVC control *advertises* — a descriptor value that under-reports the mechanism
- * it describes — not where the gimbal stops. Nothing clamps to it either;
- * `LinuxTransport.gimbalSet` writes `yawDeg * ARCSEC_PER_DEG` unclamped, so the
- * arcsec figure lives only in comments. See the spec's §8.
+ * The COMMANDABLE range does vary by OS, which is why the yaw limit is resolved
+ * per platform. `CT_PANTILT_ABSOLUTE` *advertises* ±468000 arcsec = ±130° — a
+ * descriptor value that under-reports the mechanism it describes — and on Linux
+ * uvcvideo silently clamps every write to the advertised range. Measured
+ * 2026-09-01: writes of 540000 and 504000 arcsec both return success and land
+ * at exactly 468000. A limit wider than the platform can command turns every
+ * aim past 130° into a guaranteed miss that also burns the closed-loop mover's
+ * one retry (`transport/linux.ts`), so on Linux the limit is the kernel's, not
+ * the mechanism's. macOS commands the control raw over USB and Windows goes
+ * through the vendor protocol; neither clamps, so both keep the mechanical
+ * bound. The mechanism still REACHES ±148–149° on every platform — speed moves,
+ * hand moves and AI tracking all park it past 130° and Linux live reads report
+ * it truthfully (measured -532800/+536400 arcsec at the stops) — so this bounds
+ * what may be commanded, never what a read may return. See the spec's §8.
+ *
+ * Pitch needs no per-platform split: the advertised ±324000 arcsec is exactly
+ * the mechanical ±90°.
  */
-export const GIMBAL_YAW_LIMIT_DEG = 150;
+export function gimbalYawLimitDeg(platform: string = process.platform): number {
+  return platform === "linux" ? 130 : 150;
+}
+export const GIMBAL_YAW_LIMIT_DEG = gimbalYawLimitDeg();
 export const GIMBAL_PITCH_LIMIT_DEG = 90;
 
 export interface Aim {
