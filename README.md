@@ -3,7 +3,8 @@
 A cross-platform [Model Context Protocol](https://modelcontextprotocol.io) server that controls an
 **OBSBOT Tiny 2** camera over its standard UVC/USB interface — pan/tilt/roll the gimbal, zoom, AI
 subject tracking, focus/exposure/white-balance/image controls, HDR and field-of-view, plus snapshot,
-preview, and recording — without any vendor SDK.
+preview, and recording — without any vendor SDK. It also controls the **OBSBOT Tail 2** network
+camera over its HTTP/WS API (see [OBSBOT Tail 2](#obsbot-tail-2-network-cameras) below).
 
 ## Install
 
@@ -62,7 +63,9 @@ With the installed binary, use `"command": "obsbot-mcp"` and `"args": ["--debug"
 
 35 tools on Windows and macOS, 34 on Linux (`obsbot_gimbal_move_speed` is unavailable there — see
 [limitations](#linux-gimbal-position-feedback-is-not-live)). `--debug` adds `obsbot_debug_probe` for
-one more. All names below are current as of v0.4.0 — **every tool was renamed in this
+one more. Every Tail 2 camera on the network adds the 16 `obsbot_tail2_*` tools in
+[OBSBOT Tail 2](#obsbot-tail-2-network-cameras) below (all platforms — they are pure TypeScript).
+All names below are current as of v0.4.0 — **every tool was renamed in this
 release and there is no backward-compatible alias**; see [CHANGELOG.md](./CHANGELOG.md) for the
 full old→new mapping if you're updating a caller.
 
@@ -248,6 +251,56 @@ name, independent of `camera`.
 ¹ `record`/`preview` shell out to **ffmpeg**/**ffplay** (install: `winget install Gyan.FFmpeg`
 on Windows, `brew install ffmpeg` on macOS, `apt install ffmpeg` on Linux). `snapshot` does **not**
 need ffmpeg — it grabs the frame through the native helper.
+
+## OBSBOT Tail 2 (network cameras)
+
+The Tail 2 is a different animal: a network PTZ camera (NDI/RTSP/SRT/RTMP output, ethernet + WiFi,
+MTP-over-USB-C for footage offload) with **no UVC control surface** — its control plane is an HTTP
+REST API plus a WebSocket status push, documented in [`TAIL2-PROTOCOL.md`](./TAIL2-PROTOCOL.md) from
+on-device reverse engineering. That makes the whole module **pure TypeScript with zero platform-
+specific code**: no native helper, no helper build, identical behavior on Windows/Linux/macOS.
+
+Getting started:
+
+1. Put the Tail 2 on your network (it defaults to DHCP on ethernet).
+2. Call `obsbot_tail2_scan` once — it sweeps the local subnet with the same probe OBSBOT Center
+   uses and registers what answers. Or set `OBSBOT_TAIL2_HOSTS` (comma-separated addresses) in the
+   server's environment, or just pass any Tail 2 tool a `camera` parameter holding the camera's IP.
+
+The `camera` selector for these tools is the camera's **MAC** (its stable identity), or its
+`device_name`, or its host address — case-insensitive. Omitted with one Tail 2 registered it
+resolves to that one.
+
+| Tool | Parameters | Description |
+|------|------------|-------------|
+| `obsbot_tail2_devices` | — | List registered Tail 2 cameras (mac, name, host(s)). Registration is not liveness. |
+| `obsbot_tail2_scan` | — | Sweep the local subnet(s) for Tail 2 cameras and register them (~20 s on a full /24). |
+| `obsbot_tail2_status` | `camera`? | One WebSocket status push: the full live block — power, rec, portrait, AI mode + tracking settings, zoom ratio, roll bias, focus modes, NDI/RTSP/SRT/RTMP flags, SD card, presets with poses, and per-subsystem health. No live yaw/pitch — Tail 2 gimbal moves are open-loop. |
+| `obsbot_tail2_info` | `camera`? | Identity + static config in one call: device_info, range (zoom **1.0–12.0**, focus 1–100, WB 2000–10000 K), networkconfig (NDI/stream settings). |
+| `obsbot_tail2_zoom` | `ratio` (`1.0`–`12.0`), `speed` (`1`–`10`, default `5`), `camera`? | Absolute zoom on the camera's own ratio scale. `speed` is required by the firmware. Returns `settled` (readback-verified) — see below. |
+| `obsbot_tail2_recenter` | `camera`? | Gimbal recenter (yaw/pitch/roll 0). Open-loop: returns on ack. Can drop AI tracking to `none`; re-enable with `obsbot_tail2_ai_track`. |
+| `obsbot_tail2_portrait` | `enable`, `camera`? | Motorized 90° barrel rotation for portrait framing — no Tiny 2 equivalent. Verified on orientation feedback; retry if `settled:false` (writes can be silently dropped *while the motor is in motion* — measured). |
+| `obsbot_tail2_roll_bias` | `angle` (±90), `camera`? | Roll trim in degrees (horizon correction / deliberate tilt). |
+| `obsbot_tail2_ai_track` | `enabled`, `mode` (default `"humanTrackingSingleMode"`), `camera`? | Enable/disable AI tracking. Modes are the camera's own enum: human (single/group), animal (normal/close-up), object tracking (`objectTracking`/`objectTrackingNormal`/`objectTrackingCloseUp`). While active, tracking owns the gimbal. |
+| `obsbot_tail2_track_speed` | `speed`: `"superLazy" \| "lazy" \| "slow" \| "fast" \| "crazy" \| "customized"`, `camera`? | Tracking follow speed — the Tail 2's own six-speed enum (NOT the Tiny 2's standard/sport pair). |
+| `obsbot_tail2_preset_list` | `camera`? | The three preset slots: occupied/empty, decoded name, pose in degrees + zoom ratio. |
+| `obsbot_tail2_preset_save` | `slot` (`1`–`3`), `name`? (default `P1`/`P2`/`P3`), `camera`? | Save the CURRENT live pose into a slot — aim first, then save. **Overwrites** an occupied slot (unlike the Tiny 2's create-once), and there is no pose-by-value write in this API at all. |
+| `obsbot_tail2_preset_recall` | `slot`, `camera`? | Drive gimbal + zoom to a saved pose. Refuses an empty slot. Arrival verified via the zoom readback (gimbal axes are open-loop — the Tail 2 reports no live pose). Disable AI tracking first or it fights the move. |
+| `obsbot_tail2_preset_delete` | `slot`, `camera`? | Free a slot. |
+| `obsbot_tail2_preset_rename` | `slot`, `name`, `camera`? | Rename a slot (base64 handled transparently). |
+| `obsbot_tail2_snapshot` | `resolution` (`256`–`1920`, default `640`), `quality` (`1`–`100`, default `80`), `camera`? | Grab one still frame and return it as an image. Pulls from the camera's **SRT output** (ffmpeg SRT caller, port 5000) — requires SRT listener mode enabled in OBSBOT Center first (it disables NDI while active and is cleared by a camera reboot; Center only allows changing streaming settings while the output is off, so a failure usually means SRT is off — re-enable and retry). Hardware-verified 2026-09-26. |
+
+**Every write is verified by readback** (`settled` in the result): the Tail 2 acknowledges commands
+it may drop while an actuator is mid-motion — `{"code":200}` means *acknowledged*, not *applied*
+(measured 2026-09-26; see TAIL2-PROTOCOL.md §8). `settled:false` means the ladder ran out before
+the readback agreed; the command was still sent — retry it.
+
+Known Tail 2 gaps (details in TAIL2-PROTOCOL.md §9): image-control writes via REST
+are unprobed, and snapshot depends on the camera's SRT output being enabled from
+OBSBOT Center (exclusive with NDI, cleared by reboots — the tool explains this when
+SRT is off; on this firmware the RTSP output never serves despite its enable flag).
+The camera's control API is also **unauthenticated** — anyone on your LAN can drive
+it, including poweroff.
 
 ## Supported platforms
 

@@ -12,7 +12,11 @@ import { MacosTransport } from "../transport/macos.js";
 // OBSBOT_MODEL_PIDS) when a new OBSBOT camera model is verified on hardware.
 const REMO_VID = 0x3564;
 const OBSBOT_MODEL_PIDS = new Map<number, Set<number>>([
-  [REMO_VID, new Set<number>([0xfef8 /* Tiny 2 */])],
+  // PID shared by the Tail 2's MTP (file-offload) and UVC (webcam) USB
+  // modes — same composite PID, different interface sets. Hardware-verified
+  // 2026-09-26: UVC mode enumerates as "OBSBOT Tail 2 Camera" (MI_00),
+  // "OBSBOT Tail2 Audio" (MI_02), and a USB serial port (MI_04).
+  [REMO_VID, new Set<number>([0xfef8 /* Tiny 2 */, 0xfefc /* Tail 2 */])],
 ]);
 
 // Legacy name match — used ONLY as a fallback on platforms whose helper does not

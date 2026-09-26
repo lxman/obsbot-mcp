@@ -9,6 +9,8 @@ import { DeviceManager } from "../device/manager.js";
 import { helperFactory } from "../device/helper-factory.js";
 import { makeLogSink } from "./log-sink.js";
 import { createTools, ToolDef } from "./tools.js";
+import { Tail2Registry } from "../tail2/registry.js";
+import { createTail2Tools } from "../tail2/tools.js";
 import { renderToolResult } from "./render.js";
 import { CaptureManager } from "../capture/manager.js";
 import { Coordinator, serialize } from "../ipc/coordinator.js";
@@ -32,7 +34,16 @@ export async function startServer(opts: { debug?: boolean } = {}): Promise<void>
   // `camera` selector — so nothing per-camera is wired up out here anymore.
   const capture = new CaptureManager();
   // --debug exposes the RE/diagnostics surface (obsbot_debug_probe tool + status raw block).
-  const tools: ToolDef[] = createTools(mgr, capture, opts.debug ?? false);
+  // Tail 2 tools are pure TypeScript (HTTP/WS — no native helper), so they ride
+  // along on every platform identically; see TAIL2-PROTOCOL.md. The registry
+  // seeds itself from OBSBOT_TAIL2_HOSTS and holds no persistent resources in
+  // this first increment (status reads are one-shot WebSockets), so there is
+  // nothing of its own to close in `shutdown`.
+  const tail2 = Tail2Registry.fromEnv(process.env);
+  const tools: ToolDef[] = [
+    ...createTools(mgr, capture, opts.debug ?? false),
+    ...createTail2Tools(tail2),
+  ];
 
   // Single-owner camera coordination across concurrent MCP clients (see
   // IPC-DESIGN.md). Every instance elects: the owner runs tool calls locally
