@@ -282,7 +282,7 @@ describe("tail2 tools", () => {
     expect(text).toMatch(/autonomously/);
   });
 
-  it("snapshot options report warns against force-killing the Webcam bridge", async () => {
+  it("snapshot options report warns against force-killing the Webcam bridge (when NDI Tools present)", async () => {
     const f = makeFake();
     f.calls.srtEnabled = false;
     f.calls.ndiEnabled = false;
@@ -290,10 +290,16 @@ describe("tail2 tools", () => {
     const r = (await tool(tools, "obsbot_tail2_snapshot").handler({})) as {
       content: Array<{ type: string; text?: string }>;
     };
-    // NDI Tools presence determines whether the bridge option+warning appears;
-    // on this machine it is installed, so both must be present.
     const text = r.content[0]?.text ?? "";
-    expect(text).toMatch(/never force-kill/);
+    if (process.platform === "win32") {
+      // On Windows with NDI Tools installed the bridge option and its
+      // force-kill warning must both appear.
+      expect(text).toMatch(/never force-kill/);
+    } else {
+      // Without NDI Tools the bridge option (and its warning) are absent;
+      // the report still names SRT as the autonomous path.
+      expect(text).toMatch(/Enable SRT/);
+    }
   });
 
   it("preset_list maps the camera's 0-based ids to 1-based slots", async () => {
