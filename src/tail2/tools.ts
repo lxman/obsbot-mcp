@@ -4,8 +4,8 @@ import type { Tail2Registry } from "./registry.js";
 import { srtSnapshot, ndiToolsInstalled, type SrtSnapshot } from "./snapshot.js";
 
 /**
- * MCP tools for the OBSBOT Tail 2 (network camera — HTTP/WS control, no USB
- * UVC path; see TAIL2-PROTOCOL.md). A separate tool family from the Tiny 2's:
+ * MCP tools for the OBSBOT Tail 2 (network camera — HTTP/WS control; its USB
+ * UVC mode is not used here, see TAIL2-PROTOCOL.md §11). A separate tool family from the Tiny 2's:
  * the two cameras share semantics but not transports, and pretending otherwise
  * would make every schema a lie somewhere. Where a tool mirrors a Tiny 2 tool
  * (zoom, recenter, ai tracking) the semantics match on purpose; where the

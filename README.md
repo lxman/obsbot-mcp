@@ -255,10 +255,18 @@ need ffmpeg — it grabs the frame through the native helper.
 ## OBSBOT Tail 2 (network cameras)
 
 The Tail 2 is a different animal: a network PTZ camera (NDI/RTSP/SRT/RTMP output, ethernet + WiFi,
-MTP-over-USB-C for footage offload) with **no UVC control surface** — its control plane is an HTTP
-REST API plus a WebSocket status push, documented in [`TAIL2-PROTOCOL.md`](./TAIL2-PROTOCOL.md) from
-on-device reverse engineering. That makes the whole module **pure TypeScript with zero platform-
-specific code**: no native helper, no helper build, identical behavior on Windows/Linux/macOS.
+and a USB-C port that is either MTP for footage offload or a UVC webcam). The tools below use its
+**network control plane** — an HTTP REST API plus a WebSocket status push, documented in
+[`TAIL2-PROTOCOL.md`](./TAIL2-PROTOCOL.md) from on-device reverse engineering. That makes the whole
+module **pure TypeScript with zero platform-specific code**: no native helper, no helper build,
+identical behavior on Windows/Linux/macOS.
+
+In UVC mode the camera also answers the standard UVC controls over USB (pan, tilt, zoom, pan/tilt
+speed, focus, exposure, white balance), and its vendor Extension Unit gives tracking on/off, human
+tracking mode, tracking speed and Auto Zoom. This server has no Tail 2 USB transport yet, so none
+of that is exposed as a tool; presets, portrait rotation and roll trim are network only. See
+[TAIL2-PROTOCOL.md §11](./TAIL2-PROTOCOL.md#11-usb-c-uvc-mode-measured-2026-09-26-windows-directshow-2026-09-27-linux-uvcvideo)
+for what was measured.
 
 Getting started:
 

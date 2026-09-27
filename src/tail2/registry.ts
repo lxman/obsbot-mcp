@@ -5,8 +5,8 @@ import { Tail2Api, Tail2DeviceInfo } from "./api.js";
  * MAC-keyed registry of attached OBSBOT Tail 2 cameras.
  *
  * The Tiny 2's DeviceManager discovers cameras over USB and identifies them
- * by serial; the Tail 2 has no USB control identity worth keying on (its
- * USB-C port runs MTP for SD-card offload — TAIL2-PROTOCOL.md §1), so a Tail
+ * by serial; the Tail 2 reports no USB serial number in either of its USB-C
+ * modes (MTP or UVC — TAIL2-PROTOCOL.md §1, §11), so a Tail
  * 2's identity is its MAC, exactly as OBSBOT Center treats it. Entries are
  * created by probing a host with the discovery handshake (GET device_info,
  * then WS hello — this module only needs the first half) and can be added

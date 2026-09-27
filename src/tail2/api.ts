@@ -3,8 +3,9 @@ import WebSocket from "ws";
 /**
  * HTTP/WS client for the OBSBOT Tail 2 control API.
  *
- * The Tail 2 has no UVC control surface worth speaking of — control is a
- * lighttpd REST API plus a WebSocket status push (see TAIL2-PROTOCOL.md).
+ * The Tail 2's network control plane is a lighttpd REST API plus a WebSocket
+ * status push (see TAIL2-PROTOCOL.md). Its USB-C UVC mode has a control
+ * surface of its own (§11) that this client does not use.
  * Everything here is plain HTTP and therefore platform-independent: the same
  * code runs on Windows, Linux and macOS with no native helper, which is the
  * whole reason this module exists as a separate family from the Tiny 2's

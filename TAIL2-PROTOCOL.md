@@ -7,9 +7,11 @@ on **2026-09-26**. Everything marked INFERRED comes from reading the camera's ow
 and has not been wire-confirmed unless stated.
 
 The Tail 2 is a completely different control animal from the Tiny 2 (see [PROTOCOL.md](./PROTOCOL.md)):
-no UVC Extension Unit, no vendor V3 frames, no native helper. Control is **HTTP REST + a
-WebSocket status push**, which makes a transport for it pure TypeScript — one implementation
-for Windows/Linux/macOS with no platform-specific code at all.
+the control plane this project uses is **HTTP REST + a WebSocket status push**, with no vendor V3
+frames and no native helper, which makes a transport for it pure TypeScript — one implementation
+for Windows/Linux/macOS with no platform-specific code at all. The camera does have a UVC
+Extension Unit and standard UVC controls when its USB-C port is in UVC mode; that surface is
+documented in §11 and is not used by the `obsbot_tail2_*` tools.
 
 ---
 
@@ -29,7 +31,7 @@ for Windows/Linux/macOS with no platform-specific code at all.
 | 23/tcp | Telnet | **Linux login prompt** (`Tail 2_bc3cbc login:`). Factory credential pairs rejected 2026-09-26 (§9). |
 | 5353/udp | mDNS | Confirmed open by UDP scan (a legacy-uniccast query from Windows went unanswered — local firewall artifact, not absence). |
 | 67/udp | open\|filtered | DHCP — plausibly the camera's own WiFi-AP-mode server. |
-| (USB-C) | MTP | `usb_mode` enum in the web bundle: `0=UNKNOWN, 1=UVC, 4=MTP`; this unit reports **4** — the USB-C port is a file-offload (MTP) path for SD footage, *not* a webcam and *not* USB-ethernet. The HTTP API is the only control plane. |
+| (USB-C) | MTP or UVC | `usb_mode` enum in the web bundle: `0=UNKNOWN, 1=UVC, 4=MTP`; this unit reported **4** when scanned, i.e. file offload (MTP) for SD footage. The port can be switched to a UVC webcam mode with its own control surface (§11). It is *not* USB-ethernet in either mode: on Linux the CDC interfaces bind no driver and no network interface appears. |
 
 nmap also resolves the unit's hostname (`Tail_2_bc3cbc`) and identifies the MAC OUI as
 **Iton Technology**.
@@ -337,7 +339,7 @@ API. The working hypothesis for the RTSP "device occupied" deadlock: the RTSP
 server only serves after the stream is started via this file mechanism, and
 the URL lives in an as-yet-unread `…_start_rtsp.json`.
 
-## 11. USB-C UVC mode (MEASURED 2026-09-26, Windows DirectShow)
+## 11. USB-C UVC mode (MEASURED 2026-09-26, Windows DirectShow; 2026-09-27, Linux uvcvideo)
 
 The Tail 2's USB-C port has two modes, switched from OBSBOT Center: **MTP**
 (file offload, `usb_mode=4`) and **UVC** (webcam, `usb_mode=1` or `4` with UVC
@@ -353,23 +355,175 @@ VID/PID is **`0x3564`/`0xFEFC`** in both modes (same composite PID, different
 interface sets). Added to `OBSBOT_MODEL_PIDS` in `src/device/manager.ts` and
 the existing native helper enumerates/binds it normally.
 
-### Standard UVC controls — all hardware-verified
+### Standard UVC controls — Windows, 2026-09-26
 
 | Control | Range | Live readback | Notes |
 |---|---|---|---|
-| Pan/tilt (`CT_PANTILT_ABSOLUTE`) | ±130° / ±90° | **YES** | Absolute moves; polled during slew caught intermediate values. Descriptor range under-reports mechanism (±150°/±90° per geometry/aim.ts). |
+| Pan/tilt (`CT_PANTILT_ABSOLUTE`) | ±130° / ±90° | **YES** | Absolute moves; polled during slew caught intermediate values. Descriptor range under-reports mechanism (±150°/±90° per geometry/aim.ts; Linux measured further, see below). |
 | Zoom (`CT_ZOOM_ABSOLUTE`) | 0–100 | yes | Maps to the camera's 1.0–12.0 ratio scale |
-| Focus (`CAMERA_CONTROL_FOCUS`) | 0–100 | yes | Auto mode (flags:1) supported |
-| White balance (`VIDEOPROCAMP_WHITEBALANCE`) | 2000–10000 K | yes | Same range as the REST API |
+| Focus (`CAMERA_CONTROL_FOCUS`) | 0–100 | yes | Auto mode (flags:1) supported. On Linux this readback only echoes the last write (below); whether the Windows check saw an auto-chosen value is unconfirmed. |
+| White balance (`VIDEOPROCAMP_WHITEBALANCE`) | 2000–10000 K | yes | Same range as the REST API. Same caveat as focus. |
 | Snapshot (MJPEG) | 1920×1080@30 | — | Through the existing native helper; 38 KB frame at 640px |
 
-### Vendor XU protocol — NOT compatible with the Tiny 2
+### Standard UVC controls — Linux, 2026-09-27
 
-The camera has a vendor Extension Unit (xuNode=2). Selector 6 returns a
-60-byte block, but its layout is different from the Tiny 2's — the Tiny 2
-decoder produces plausible-looking but wrong values on it (coincidental byte
-alignments). Selector 2 returns all zeros. The vendor protocol is a separate
-RE target; low priority since standard UVC + HTTP cover the control surface.
+Measured on kernel 7.2.0-rc4+ with `uvcvideo`, USB `bcdDevice` 4.19, UVC 1.00, SuperSpeed. All
+moves went through standard V4L2 controls; no vendor commands were sent.
+
+The Camera Terminal control bitmap (`0x00023e3e`) and the vendor Extension Unit (GUID
+`9a1e7291-6843-4683-6d92-39bc7906ee49`, 19 controls) are identical to the Tiny 2's, and so is the
+GET_INFO defect: `CT_PANTILT_ABSOLUTE`, `CT_PANTILT_RELATIVE` and `CT_ZOOM_ABSOLUTE` answer `0x03`
+(GET and SET, AUTOUPDATE clear), so `uvcvideo` serves them from its cache. **Without a kernel fixup
+entry for `3564:fefc`, position readback on Linux is the last commanded value, not the live one.**
+`CT_ZOOM_RELATIVE` correctly answers `0x0f`, `CT_ROLL_ABSOLUTE` `0x01`, `CT_EXPOSURE_TIME_RELATIVE`
+`0x00`.
+
+"Live readback" below is with a probe build of `uvcvideo` that restores AUTO_UPDATE for the control.
+
+| Control (V4L2 name) | Writable | Live readback | Notes |
+|---|---|---|---|
+| `pan_absolute`, `tilt_absolute` | yes | **yes** | Tracks commanded moves and AI tracking. Advertised ±130° / ±90°. |
+| `pan_speed`, `tilt_speed` | yes | **yes** | Reads actual speed magnitude, unsigned, with accel/decel ramps. Commanded 40 reads 37–38; commanded 80 reads 42–43. Positive `pan_speed` *decreases* `pan_absolute`. Under `pan_speed` the gimbal reached −174°, past the advertised ±130°; tilt stopped itself at 86°. |
+| `zoom_absolute` | yes | **yes** | Tracks commanded moves and zoom changed at the camera. Readback tops out at 36 for commanded 50 and 100. |
+| `zoom_continuous` | — | no | Reads a constant 245, outside its advertised −100..100. |
+| `exposure_time_absolute`, `gain` | yes | until first manual write | Live under auto exposure on a camera that has never had a manual exposure write. After one manual write both latch the written values permanently, across USB re-enumeration and a power cycle, while auto exposure keeps running. |
+| `white_balance_temperature`, `red_balance`, `blue_balance` | yes | no | Reads back the last written value with auto re-enabled. |
+| `focus_absolute` | yes | no | Reads back the last written value with autofocus re-enabled. |
+| `hue` | yes | no | Constant; no auto mode. |
+| `CT_ROLL_ABSOLUTE` | no | no | GET-only, range ±180° step 90°. Not mapped by `uvcvideo`. Read 0 under roll trim, AI tracking on and off, and the landscape/portrait switch; writes return success and change nothing. |
+| brightness, contrast, saturation, sharpness, backlight compensation, power line frequency | yes | not tested | Effect on the image not verified. |
+
+Values written over UVC are stored by the camera and survive a power cycle.
+
+For comparison, the user manual (v1.0) gives the controllable range as pan ±160°, tilt −65° to 32°,
+roll ±120°, and the mechanical range as pan ±175°, tilt ±90°. The −174° measured under `pan_speed`
+is the mechanical limit; the UVC descriptor's ±130° under-reports the controllable range.
+
+Flipping the camera's landscape/portrait switch makes it drop off USB and re-enumerate (about one
+second each way).
+
+Not controllable through the standard UVC controls: AI tracking and its mode, tracking speed,
+presets, portrait rotation, roll trim, and the streaming outputs. Tracking, its mode, tracking
+speed and Auto Zoom are controllable through the vendor Extension Unit (next section). The two
+audio interfaces and the CDC interfaces bind no driver on Linux.
+
+### Vendor XU protocol (MEASURED 2026-09-27, Linux, `UVCIOC_CTRL_QUERY`)
+
+The camera has a vendor Extension Unit: unit 2, GUID
+`9a1e7291-6843-4683-6d92-39bc7906ee49`, the same GUID as the Tiny 2. The Tiny 2's **status block
+layout and V3 command frames do not apply** — the Tiny 2 decoder produces plausible-looking but
+wrong values on selector 6 (coincidental byte alignments). No V3 frame was sent to the Tail 2.
+
+What works instead is a set of **flat selectors**: plain `GET_CUR` / `SET_CUR` on the selector
+itself, 60-byte payload zero-padded, no magic byte, no sequence number, no CRC.
+
+Method: every value below was found by changing one setting at the camera and diffing reads, then
+(where marked written) by writing a value the camera had been seen to report. Measured on USB
+`bcdDevice` 4.19.
+
+#### Selector map
+
+Selectors 1–16 and 19 exist; 17, 18 and 20+ do not. All are 60 bytes and all answer `GET_INFO`
+`0x03`, including the ones that ignore writes. `GET_MIN` / `MAX` / `DEF` / `RES` return zeros
+everywhere, so the camera gives no range hints.
+
+| Selector | Read | Write |
+|---|---|---|
+| 3 | Tracking on/off: `00` / `01` | Accepted, ignored (status mirror of selector 9) |
+| 6 | Status block (below) | Not tried |
+| 7 | `06`, then six 9-byte entries tagged `ff fe fd fc fb fa`. Never changed. Undecoded | Not tried |
+| 9 | Tracking mode (below) | Yes |
+| 10 | Tracking settings block (below) | Yes, as `[index, value]` |
+| 12 | Preset count, then slot indexes (Tiny 2 layout). `01 00` in landscape, `00` in portrait | Not tried |
+| 13 | Next preset entry; reading advances a cursor (Tiny 2 behaviour). `02` = exhausted | Not tried |
+| 14 | `06 80 07`. Never changed, including across orientation. Undecoded | Not tried |
+| 1, 2, 4, 5, 8, 11, 15, 16, 19 | All zeros | Not tried |
+
+#### Selector 9 — tracking mode
+
+| Value | Mode | Read | Written |
+|---|---|---|---|
+| `00` | Tracking off | yes | yes |
+| `01` | Human tracking, single | yes | yes |
+| `02` | Human tracking, group | yes | yes |
+| `ff` | Animal tracking, normal **and** close-up | yes | no |
+
+`ff` is a catch-all: the two animal modes are byte-identical in every selector. Object tracking
+was not read (it needs a box-select in the preview window).
+
+**The camera only activates a mode when a matching subject is already in frame.** With nobody in
+frame the write is accepted and nothing changes. Writing `02` while an animal mode was running,
+with no human in frame, switched tracking off. A client must read selector 9 (or 3) back after
+writing, and treat "did not stick" as "no subject in frame".
+
+On a successful write selector 9 reads the new value within 10 ms, selector 3 follows within
+0.3 s, and the gimbal starts moving within about 1 s.
+
+#### Selector 10 — tracking settings
+
+Read layout:
+
+| Byte | Setting | Values |
+|---|---|---|
+| 0 | Tracking speed | `00` Super Lazy, `01` Lazy, `02` Slow, `03` Fast, `04` Crazy, `ff` Custom |
+| 1 | Unknown | Always `01` |
+| 2 | Auto Zoom level | `00`–`07` = Off, 3, 5, 7, 9, 10, 16, 24 |
+| 3 | Unknown | `00` in landscape, `01` in portrait |
+
+**The write layout is not the read layout.** A write is `[index, value]`: byte 0 is the position
+of the setting in the read block, byte 1 is the new value, and the rest is ignored.
+
+| Payload | Effect |
+|---|---|
+| `00 00` … `00 04` | Tracking speed (all five written and read back) |
+| `02 01`, `02 07` | Auto Zoom level 1, level 7 (written and read back; zoom responded) |
+
+Writing the read block back verbatim is a trap: `02 01 07` is parsed as index 2, value 1, and
+sets Auto Zoom to level 1.
+
+Speed names for `02` and `03` were confirmed against the app; `00`, `01` and `04` follow the
+manual's order and were not checked on the display. The app's display follows USB writes.
+
+Custom speed reads `ff`; its per-axis pan and tilt values and its two per-axis "Auto" buttons
+are not visible in any selector. Indexes 1 and 3 have not been written.
+
+Settings are kept per orientation: portrait read `03 01 00 01`, the factory defaults (Fast, Auto
+Zoom off), while landscape held the values set during the session, and returned to them exactly
+when the camera was switched back.
+
+#### Selector 6 — status block
+
+60 bytes, read-only as far as tested. Decoded offsets:
+
+| Offset | Meaning | How established |
+|---|---|---|
+| `0x05` bit 3 (`0x08`) | Portrait | `a0` landscape, `a8` portrait, one full cycle |
+| `0x06` bit 3 (`0x08`) | Manual focus | `06` autofocus on, `0e` off, one cycle |
+| `0x07` bit 1 (`0x02`) | Autofocus busy | Never set with autofocus off; set during zoom and focus hunting with it on |
+| `0x0a` | Zoom, same scale as UVC `zoom_absolute` | Within 2 of the UVC reading in every paired sample (about 2,000, read ~50 ms apart) |
+| `0x2a` | Counter of tracking events; resets at power-on | Steps during tracking, not on commanded moves |
+
+Tracking on/off and mode are **not** in this block. `0x13` read `0x28` once and `00` since;
+unexplained. Unlike the Tiny 2's, this block changes live.
+
+Reference block (landscape, tracking off, autofocus on, zoom 0):
+
+```
+0x00: 32 00 08 00 20 a0 06 00
+0x08: 00 01 00 a0 00 00 ff 03
+0x10: 01 01 1e 00 00 00 32 32
+0x18: 32 32 32 00 01 64 3f 00
+0x20: 00 00 00 00 00 00 b8 0b
+0x28: 00 02 0a 06 03 00 00 00
+```
+
+#### Not found over USB
+
+- **Roll trim**: moving the app's spinner from 0.0° to 5.0° changed no selector and no status byte.
+- **Orientation control**: readable (status `0x05`), no write found. Flipping it re-enumerates
+  the camera and swaps the UVC frame sizes (1920x1080 becomes 1080x1920, and so on).
+- **Custom speed detail** and the settings the manual lists but the app did not show in UVC
+  mode (Only Me, Tracking Lock, Face Framing, Automatically track new person).
 
 ### Serial port (COM3, MI_04)
 
@@ -382,21 +536,27 @@ slewing (reopen while moving), but not a control surface.
 
 ### Platform status
 
-- **Windows**: all of the above verified via DirectShow (IAMCameraControl /
-  IAMVideoProcAmp / IKsProperty).
-- **Linux**: `uvcvideo`'s `CT_PANTILT_ABSOLUTE` cache behavior (the Tiny 2
-  kernel defect) is UNTESTED on the Tail 2 — likely the same driver-level
-  issue. A kernel quirks patch is in progress upstream for the Tiny 2.
+- **Windows**: the Windows table and serial port findings verified via
+  DirectShow (IAMCameraControl / IAMVideoProcAmp / IKsProperty). The flat
+  vendor selectors have not been exercised on Windows.
+- **Linux**: measured 2026-09-27 (table above). The Tail 2 has the same
+  GET_INFO defect as the Tiny 2, so a stock kernel reads cached pan, tilt and
+  zoom. The uvcvideo series submitted upstream for the Tiny 2 matches
+  `3564:fef8` only; the Tail 2 needs its own `3564:fefc` entries for
+  pan/tilt absolute, pan/tilt relative and zoom absolute.
 - **macOS**: IOKit UVC stack is completely different — no reason to expect
   the cache issue, but unverified.
 
 ### Architecture implication
 
-The USB-C path provides the physical control surface (gimbal with live
-feedback, zoom, focus, WB, snapshot) with zero vendor RE and zero streaming
-toggles. HTTP provides the cognitive surface (AI tracking, presets, portrait,
-discovery). A future USB transport alongside the HTTP one would let the Tail 2
-module choose per command — but only after cross-platform verification.
+The USB-C path provides the physical control surface (gimbal, zoom, focus, WB,
+snapshot) with zero vendor RE and zero streaming toggles; live gimbal and zoom
+feedback comes with it on Windows, and on Linux only with the kernel fixup.
+The vendor selectors add tracking on/off, human tracking mode, tracking speed
+and Auto Zoom over USB. HTTP remains the only route for presets, portrait,
+roll trim, animal and object mode selection, and discovery. A future USB
+transport alongside the HTTP one would let the Tail 2 module choose per
+command — but only after cross-platform verification.
 
 - Web bundle + lazy chunks cached at `Temp\opencode\tail2-*.js` (session
   scratch — re-downloadable from the camera via `/assets/…`).

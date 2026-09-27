@@ -43,7 +43,7 @@ in frame, which an automated check cannot control.
 ### Added: OBSBOT Tail 2 support (network cameras)
 
 The server now also controls the **OBSBOT Tail 2** — the network PTZ camera — alongside the Tiny 2.
-The Tail 2 has no UVC control surface: control is an HTTP REST API plus a WebSocket status push,
+These tools use the Tail 2's network control plane, an HTTP REST API plus a WebSocket status push,
 reverse-engineered from the camera's own web application and documented in
 [`TAIL2-PROTOCOL.md`](./TAIL2-PROTOCOL.md). Sixteen `obsbot_tail2_*` tools cover discovery
 (`devices`, `scan`, `status`, `info`), zoom (on the camera's own **1.0–12.0** ratio scale — six
