@@ -37,9 +37,21 @@ beforeAll(() => {
   ).toBe(true);
 });
 
+/** Everything the most recently spawned server wrote to stderr. */
+let lastStderr = "";
+
 /** Spawn `node <script>`, speak MCP at it, resolve the initialize result. */
 async function initializeVia(script: string): Promise<{ name: string; version: string }> {
-  const child = spawn(process.execPath, [script], { stdio: ["pipe", "pipe", "pipe"] });
+  // An endpoint of its own, per spawn. On the default name this server would
+  // join the owner of whatever session is open on this machine, and take the
+  // endpoint from it if this build is newer.
+  const ipcName = `obsbot-test-bin-${process.pid}-${Math.floor(Math.random() * 1e9)}`;
+  const child = spawn(process.execPath, [script], {
+    stdio: ["pipe", "pipe", "pipe"],
+    env: { ...process.env, OBSBOT_IPC_NAME: ipcName },
+  });
+  lastStderr = "";
+  child.stderr.on("data", (d: Buffer) => (lastStderr += d.toString()));
   try {
     child.stdin.write(
       JSON.stringify({
@@ -93,6 +105,16 @@ async function initializeVia(script: string): Promise<{ name: string; version: s
 test("starts when invoked at its real path", async () => {
   const info = await initializeVia(entry);
   expect(info.name).toBe("obsbot-mcp");
+}, 30_000);
+
+test("a server the tests start owns an endpoint of its own, and meets nobody", async () => {
+  await initializeVia(entry);
+  // stdout and stderr are separate pipes; give the role line a moment to arrive.
+  for (let i = 0; i < 40 && !/ipc role=/.test(lastStderr); i++) {
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  expect(lastStderr).toMatch(/obsbot-mcp: ipc role=owner/);
+  expect(lastStderr).not.toMatch(/ipc role=client/);
 }, 30_000);
 
 // Creating a symlink on Windows needs elevation or developer mode and usually
