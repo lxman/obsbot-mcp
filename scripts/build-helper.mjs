@@ -17,7 +17,7 @@
 // Usage: npm run build:helper
 
 import { execFileSync } from "node:child_process";
-import { copyFileSync, mkdirSync, existsSync } from "node:fs";
+import { copyFileSync, mkdirSync, existsSync, renameSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
@@ -58,7 +58,15 @@ if (!existsSync(built)) {
 const destDir = join(repoRoot, "native", "prebuilt", triple);
 mkdirSync(destDir, { recursive: true });
 const dest = join(destDir, target.helper);
-copyFileSync(built, dest);
+// Stage by rename, never by overwriting in place. macOS caches a binary's code
+// signature against its vnode, so writing new bytes into a file a running
+// helper still has mapped leaves a binary the kernel SIGKILLs on every launch
+// (exit 137) — while its hash still matches the build output, so it looks
+// staged. A rename gives the new binary a fresh inode and leaves the running
+// helper on the old one.
+const staging = `${dest}.new`;
+copyFileSync(built, staging);
+renameSync(staging, dest);
 
 console.log(`\n→ staged into native/prebuilt/${triple}/${target.helper}`);
 console.log("  This is the binary the Node stack loads. Rebuilding without");
