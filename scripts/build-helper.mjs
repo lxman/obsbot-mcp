@@ -20,6 +20,7 @@ import { execFileSync } from "node:child_process";
 import { copyFileSync, mkdirSync, existsSync, renameSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { describeStamp, stampBuild } from "./stamp-build.mjs";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -71,3 +72,13 @@ renameSync(staging, dest);
 console.log(`\n→ staged into native/prebuilt/${triple}/${target.helper}`);
 console.log("  This is the binary the Node stack loads. Rebuilding without");
 console.log("  staging leaves the old one in place, silently.");
+
+// A new helper is a new build. Every running instance compares build
+// identities to decide who owns the camera, and the identity covers the staged
+// helpers — so stamp it now, or a helper-only rebuild would look like no change
+// at all and the instance already running would keep its old helper.
+if (existsSync(join(repoRoot, "dist"))) {
+  console.log(describeStamp(stampBuild(repoRoot)));
+} else {
+  console.log("→ dist/ is not built yet; `npm run build` will stamp the build identity");
+}

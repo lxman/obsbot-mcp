@@ -157,6 +157,12 @@ jobs:
           for t in linux-x64 darwin-arm64 darwin-x64; do
             chmod +x "native/prebuilt/$t/obsbot-helper"
           done
+      # The build identity (dist/build-info.json) covers dist/ AND the prebuilt
+      # helpers. `npm run build` above stamped dist/ alone, because the helpers
+      # had not been downloaded yet. Stamp again now that they are in place, so
+      # the identity that ships describes what ships. See scripts/stamp-build.mjs.
+      - name: Stamp the build identity
+        run: node scripts/stamp-build.mjs
       - name: Verify staged binary layout
         run: |
           echo "--- native/prebuilt tree ---"; ls -lR native/prebuilt
@@ -177,6 +183,8 @@ jobs:
           done
           grep -q "dist/index.js" pack.txt \
             || { echo "::error::dist/index.js missing from tarball"; exit 1; }
+          grep -q "dist/build-info.json" pack.txt \
+            || { echo "::error::dist/build-info.json missing from tarball"; exit 1; }
           rm -f pack.txt
       # On a tag push (real release) inputs.dry_run is empty -> real publish, and
       # the tag/version guard above has already run. A manual workflow_dispatch
