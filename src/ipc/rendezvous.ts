@@ -15,8 +15,35 @@ import { unlinkSync } from "node:fs";
 // crash-detection for free.
 // ---------------------------------------------------------------------------
 
-/** Well-known rendezvous name → platform endpoint. */
-export function rendezvousPath(name = "obsbot-mcp"): string {
+const DEFAULT_NAME = "obsbot-mcp";
+const NAME_RE = /^[A-Za-z0-9._-]{1,64}$/;
+
+/**
+ * The rendezvous name: OBSBOT_IPC_NAME, or the well-known default.
+ *
+ * Every instance that should share one camera owner must use the same name, so
+ * the default is right for normal use. The variable exists for test harnesses
+ * — which would otherwise take the endpoint away from a developer's live
+ * session — and for deliberately isolating one session on its own build.
+ *
+ * The name becomes part of a filesystem path or pipe name, so anything outside
+ * a conservative character set is refused rather than sanitised. Unset and
+ * empty both mean the default: an MCP client config that declares the variable
+ * with no value should not be a startup error.
+ */
+export function rendezvousName(env: NodeJS.ProcessEnv = process.env): string {
+  const raw = env.OBSBOT_IPC_NAME;
+  if (raw === undefined || raw === "") return DEFAULT_NAME;
+  if (!NAME_RE.test(raw)) {
+    throw new Error(
+      `OBSBOT_IPC_NAME must be 1-64 characters from A-Z a-z 0-9 . _ - (got ${JSON.stringify(raw)})`,
+    );
+  }
+  return raw;
+}
+
+/** Rendezvous name → platform endpoint. */
+export function rendezvousPath(name: string = rendezvousName()): string {
   return process.platform === "win32"
     ? `\\\\.\\pipe\\${name}`
     : `/tmp/${name}.sock`; // portable across macOS + Linux; abstract sockets are Linux-only
