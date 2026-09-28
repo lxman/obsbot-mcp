@@ -1,7 +1,6 @@
 # Newest build wins — design
 
-**Status:** approved 2026-09-27. Not yet implemented; the plan is
-`docs/superpowers/plans/2026-09-27-newest-build-wins.md`.
+**Status:** approved 2026-09-27. Implemented by `docs/superpowers/plans/2026-09-27-newest-build-wins.md`.
 **Depends on:** the peer-elected owner in `src/ipc/` and its design note `IPC-DESIGN.md`.
 **Scope:** which server instance owns the camera endpoint, and how ownership moves to a newer
 build. No tool changes, no helper protocol changes, no change to how a lone instance behaves.
@@ -221,6 +220,7 @@ instances can never each believe they should take over from the other.
 | `STEP_DOWN_GRACE_MS` | 500 | Long enough for R to bind before anyone else tries. |
 | `ELECTION_JITTER_MS` | 0–100, uniform | Spreads clients that all lost the same owner at once. |
 | `STEP_DOWN_TIMEOUT_MS` | 15000 | Longest R waits for O's running call and release. |
+| `RELEASE_TIMEOUT_MS` | 10000 | Longest a stepping-down owner waits for its own release. Under `STEP_DOWN_TIMEOUT_MS`, so a hung helper cannot strand both instances. |
 | `MAX_TAKEOVER_ROUNDS` | 5 | Bounds the loop in §7.2. |
 
 If `STEP_DOWN_TIMEOUT_MS` passes without the socket closing, R stays a client of an owner it knows
@@ -278,7 +278,7 @@ The rendezvous name is fixed at `obsbot-mcp`. It becomes configurable:
 
 - `OBSBOT_IPC_NAME` sets the name passed to `rendezvousPath()`. Default `obsbot-mcp`.
 - It must match `^[A-Za-z0-9._-]{1,64}$`. Anything else is a startup error, because the name
-  becomes part of a filesystem path or pipe name.
+  becomes part of a filesystem path or pipe name. Unset and empty both mean the default.
 
 This is in scope because the tests need it. A harness that launches real servers on the default
 name would, under this design, take the endpoint away from the developer's live session. Every
@@ -388,6 +388,8 @@ reads status only and never moves the gimbal.
 
 Any instance of the server running in an editor or a Claude session uses the default name and is
 not disturbed.
+
+**Result.** Not yet run on hardware. `scripts/ipc-hw-smoke.mjs` is written and syntax-checked.
 
 ## 14. Known limitations
 

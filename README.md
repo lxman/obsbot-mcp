@@ -534,17 +534,34 @@ node scripts/e2e.mjs
 Two traps make it easy to test the wrong thing and believe the result. Both cost real time on
 2026-07-25.
 
-**Rebuilding and reloading is not enough — kill stale server processes first.** The MCP server runs
-from `dist/`, so a source change is invisible until `npm run build`. But reloading the server in your
-MCP client does *not* guarantee your new code executes: this project coordinates concurrent clients
-by electing a single owner process (see `IPC-DESIGN.md`), and a reload spawns a *new* client that
-**forwards its tool calls to whatever owner is already running**. An orphaned server from a previous
-session stays the owner, so the new process advertises its own up-to-date tool list while every call
-is executed by old code.
+**Rebuild, then start one server from the new build.** The MCP server runs from `dist/`, so a
+source change is invisible until `npm run build`. This project coordinates concurrent clients by
+electing a single owner process (see `IPC-DESIGN.md`), and **the owner executes every tool call**,
+whichever session made it. The owner is the newest build alive: when a server starts from a newer
+build than the owner's, the owner finishes the call in flight, releases the camera, and hands the
+endpoint over. Reloading the server in one MCP client is therefore enough. Other sessions stay open
+and their calls are served by the new build.
 
-That failure is deceptive rather than loud: a newly added tool *appears* in the tool list and can be
-called, but behaves like the old build. Two reloads in a row will not fix it. Check for orphans
-before concluding anything:
+Three things to know:
+
+- **The tool list of other sessions does not refresh.** A session that started on an older build
+  keeps the list it had; its calls run the new code. Reload that session's server to get new tools.
+- **A server that predates the handover cannot hand over** (0.7.0 and earlier). A newer server
+  will not run calls on it, and says so: `an older instance owns the camera endpoint and cannot
+  hand it over`. Stop the old process once; after that, rebuilds take over on their own.
+- **Use `npm run build` and `npm run build:helper`.** They stamp the build with its identity
+  (`dist/build-info.json`). A bare `tsc`, or a helper copied into place by hand, is not stamped and
+  does not count as a newer build.
+
+To see which build will run your next call, read the last `ipc role=` line in the server's log.
+`role=owner` means this process; `role=client owner-pid=… owner-build=…` names the one that will.
+Claude Code keeps the log under `~/Library/Caches/claude-cli-nodejs/<project>/mcp-logs-obsbot/` on
+macOS.
+
+```bash
+# Linux / macOS — every server process, with its start time
+pgrep -af "obsbot.*dist/index.js"
+```
 
 ```powershell
 # Windows
@@ -553,14 +570,9 @@ Get-CimInstance Win32_Process -Filter "Name='node.exe'" |
   Select-Object ProcessId, CreationDate
 ```
 
-```bash
-# Linux / macOS
-pgrep -af "obsbot.*dist/index.js"
-```
-
-Kill everything older than your build, then reload. The cheapest positive confirmation is to call a
-tool whose *output* changed — `obsbot_status` gaining a field, say — rather than one whose
-description changed, since descriptions come from the new process either way.
+Set `OBSBOT_IPC_NAME` to give a server a rendezvous endpoint of its own (1–64 characters from
+`A-Z a-z 0-9 . _ -`). Test harnesses do this so they leave a live session alone. Two owners on one
+machine can contend for the camera, so it is not for everyday use.
 
 **Frame rate selects the field of view, so the preview shows less than snapshots.** At 1920×1080 this
 camera has two different windows onto the sensor and the *frame rate* picks between them — not the
