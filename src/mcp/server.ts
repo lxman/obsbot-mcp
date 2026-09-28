@@ -13,7 +13,7 @@ import { Tail2Registry } from "../tail2/registry.js";
 import { createTail2Tools } from "../tail2/tools.js";
 import { renderToolResult } from "./render.js";
 import { CaptureManager } from "../capture/manager.js";
-import { Coordinator, serialize } from "../ipc/coordinator.js";
+import { Coordinator, type RunLocal } from "../ipc/coordinator.js";
 import { VERSION } from "../version.js";
 
 export async function startServer(opts: { debug?: boolean } = {}): Promise<void> {
@@ -53,11 +53,11 @@ export async function startServer(opts: { debug?: boolean } = {}): Promise<void>
   // any forwarded from clients (the local path bypasses OwnerServer's queue). A
   // lone instance is simply the owner with no peers: it behaves exactly as
   // before, plus an idle listener.
-  const runLocal = serialize(async (name, args) => {
+  const runLocal: RunLocal = async (name, args) => {
     const tool = tools.find((t) => t.name === name);
     if (!tool) throw new Error(`unknown tool: ${name}`);
     return tool.handler(args);
-  });
+  };
   const coordinator = new Coordinator(runLocal);
   await coordinator.start();
   // Report the coordination role on STDERR (never stdout — that's the JSON-RPC
