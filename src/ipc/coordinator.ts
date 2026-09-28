@@ -1,6 +1,7 @@
 import { elect, rendezvousPath } from "./rendezvous.js";
 import { OwnerServer } from "./owner.js";
 import { OwnerClient } from "./client.js";
+import { unstampedBuild } from "./build-id.js";
 
 // ---------------------------------------------------------------------------
 // Ties election + owner server + client proxy into the one thing startup needs:
@@ -105,10 +106,17 @@ export class Coordinator {
   private async doElect(): Promise<void> {
     const r = await elect(this.path);
     if (r.role === "owner") {
-      this.ownerServer = new OwnerServer(r.server, (body) => {
-        const { tool, args } = body as { tool: string; args: Record<string, unknown> };
-        return this.runLocal(tool, args);
-      });
+      this.ownerServer = new OwnerServer(
+        r.server,
+        (body) => {
+          const { tool, args } = body as { tool: string; args: Record<string, unknown> };
+          return this.runLocal(tool, args);
+        },
+        {
+          identity: () => ({ build: unstampedBuild(), pid: process.pid }),
+          takeover: () => ({ ipc: "takeover", granted: false, reason: "not-newer" }),
+        },
+      );
       this.role = "owner";
     } else {
       this.client = OwnerClient.adopt(r.socket);

@@ -1,8 +1,9 @@
 import { describe, test, expect, afterEach } from "vitest";
 import net from "node:net";
 import { elect, rendezvousPath } from "../../src/ipc/rendezvous.js";
-import { OwnerServer, type Handler } from "../../src/ipc/owner.js";
+import { OwnerServer, type ControlHandlers, type Handler } from "../../src/ipc/owner.js";
 import { OwnerClient } from "../../src/ipc/client.js";
+import type { BuildId } from "../../src/ipc/build-id.js";
 import { encodeFrame, FrameDecoder, type RpcMessage } from "../../src/ipc/protocol.js";
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -11,10 +12,21 @@ function tempPath(): string {
   return rendezvousPath(`obsbot-test-${process.pid}-${Math.floor(Math.random() * 1e9)}`);
 }
 
-async function ownerOn(path: string, handle: Handler): Promise<OwnerServer> {
+const OWNER_BUILD: BuildId = { version: "0.7.0", builtAt: 500, digest: "a".repeat(64) };
+
+const REFUSES: ControlHandlers = {
+  identity: () => ({ build: OWNER_BUILD, pid: 4242 }),
+  takeover: () => ({ ipc: "takeover", granted: false, reason: "not-newer" }),
+};
+
+async function ownerOn(
+  path: string,
+  handle: Handler,
+  control: ControlHandlers = REFUSES,
+): Promise<OwnerServer> {
   const role = await elect(path);
   if (role.role !== "owner") throw new Error("expected owner");
-  return new OwnerServer(role.server, handle);
+  return new OwnerServer(role.server, handle, control);
 }
 
 describe("owner client", () => {
