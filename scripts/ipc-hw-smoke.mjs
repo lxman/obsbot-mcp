@@ -1,35 +1,90 @@
 #!/usr/bin/env node
-// Two-instance hardware smoke test for the IPC layer (IPC-DESIGN.md).
+// Hardware smoke test for the IPC layer (IPC-DESIGN.md), against a physically
+// connected OBSBOT Tiny 2. Two cases, each with two real MCP servers speaking
+// MCP over stdio:
 //
-// Launches TWO real `dist/index.js` MCP servers against the physically
-// connected camera and speaks MCP over stdio to each:
-//   - Instance A starts first → elects OWNER (stderr: "ipc role=owner").
-//   - Instance B starts second → elects CLIENT (stderr: "ipc role=client").
-//   - Both call obsbot_status. A reads the camera directly; B's call is
-//     FORWARDED to A and served by the one owner. Both must return a valid
-//     status block — no collision, no "no device open".
+//   1. Sharing. Instance A starts first → OWNER. Instance B starts second →
+//      CLIENT. Both call obsbot_status. A reads the camera directly; B's call
+//      is FORWARDED to A. Both must return a valid status block — no
+//      collision, no "no device open".
+//
+//   2. Handover. An OLDER build owns the endpoint and has the camera open. A
+//      NEWER build starts. The older one must release the camera and step
+//      down, the newer one must open it, and obsbot_status through BOTH must
+//      then succeed. On macOS the control open is exclusive, so this only
+//      passes if the old owner has really let go before the new one opens.
+//      See docs/superpowers/specs/2026-09-27-newest-build-wins-design.md.
 //
 // Non-destructive: obsbot_status only reads; the gimbal is never moved.
 //
-// NOTE: keep any other obsbot-mcp instance (e.g. the one in your editor) idle
-// while this runs — a pre-IPC instance won't join the election and could
-// contend for the camera on Windows.
+// TINY 2 ONLY. This harness binds the camera, and binding sends the Tiny 2
+// serial query as a vendor write. The candidacy gate keeps that away from a
+// Tail 2, so with only a Tail 2 attached this fails with "no OBSBOT camera
+// found" and touches nothing — but do not go looking for a way round that.
 //
-// Usage: node scripts/ipc-hw-smoke.mjs   (after `npm run build`)
+// Every server here uses its own rendezvous name (OBSBOT_IPC_NAME), so a
+// server running in your editor or a Claude session is not disturbed, and
+// does not disturb this.
+//
+// Usage: node scripts/ipc-hw-smoke.mjs   (after `npm run build:all`)
 
 import { spawn } from "node:child_process";
+import { cpSync, existsSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import http from "node:http";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const DIST = join(dirname(fileURLToPath(import.meta.url)), "..", "dist", "index.js");
+const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+const DIST = join(repoRoot, "dist", "index.js");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-function launch(label) {
-  const proc = spawn(process.execPath, [DIST, "--debug"], { stdio: ["pipe", "pipe", "pipe"] });
-  let role = "(unknown)";
+function endpointFor(ipcName) {
+  return process.platform === "win32" ? `\\\\.\\pipe\\${ipcName}` : `/tmp/${ipcName}.sock`;
+}
+
+/**
+ * A pretend Tail 2 on localhost: answers the one request the registry makes
+ * when it is told about a host. Each server is pointed at a different one, so
+ * the registry a reply came from names the process that ran the call. It is a
+ * few lines of HTTP and has nothing to do with any real camera.
+ */
+function pretendTail2(mac) {
+  const server = http.createServer((req, res) => {
+    if (req.url === "/camera/sdk/device_info") {
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({ mac, device_name: `pretend ${mac}` }));
+    } else {
+      res.statusCode = 404;
+      res.end();
+    }
+  });
+  return new Promise((resolve) =>
+    server.listen(0, "127.0.0.1", () =>
+      resolve({ mac, host: `127.0.0.1:${server.address().port}`, close: () => server.close() }),
+    ),
+  );
+}
+
+function launch(label, ipcName, entry = DIST, tail2 = undefined) {
+  const proc = spawn(process.execPath, [entry, "--debug"], {
+    env: {
+      ...process.env,
+      OBSBOT_IPC_NAME: ipcName,
+      ...(tail2 ? { OBSBOT_TAIL2_HOSTS: tail2.host } : {}),
+    },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  const lines = [];
+  const waiters = [];
+  let errBuf = "";
   proc.stderr.on("data", (d) => {
-    const m = /ipc role=(\w+)/.exec(String(d));
-    if (m) role = m[1];
+    errBuf += d;
+    let i;
+    while ((i = errBuf.indexOf("\n")) >= 0) {
+      lines.push(errBuf.slice(0, i));
+      errBuf = errBuf.slice(i + 1);
+      for (const w of waiters.splice(0)) w();
+    }
   });
 
   const pending = new Map();
@@ -71,7 +126,36 @@ function launch(label) {
   return {
     label,
     proc,
-    role: () => role,
+    pid: proc.pid,
+    lines,
+    /** The role this instance last reported. It changes when the endpoint changes hands. */
+    role: () => {
+      for (let i = lines.length - 1; i >= 0; i--) {
+        const m = /ipc role=(\w+)/.exec(lines[i]);
+        if (m) return m[1];
+      }
+      return "(unknown)";
+    },
+    /** Resolve once `count` logged lines match `re`. Reject after `ms`. */
+    async sees(re, count = 1, ms = 20000) {
+      const deadline = Date.now() + ms;
+      for (;;) {
+        if (lines.filter((l) => re.test(l)).length >= count) return;
+        const left = deadline - Date.now();
+        if (left <= 0) {
+          throw new Error(
+            `${label} never logged ${re} x${count}. It logged:\n  ${lines.join("\n  ")}`,
+          );
+        }
+        await new Promise((resolve) => {
+          const timer = setTimeout(resolve, left);
+          waiters.push(() => {
+            clearTimeout(timer);
+            resolve();
+          });
+        });
+      }
+    },
     async handshake() {
       await send("initialize", {
         protocolVersion: "2024-11-05",
@@ -85,42 +169,172 @@ function launch(label) {
       const text = resp?.result?.content?.[0]?.text ?? "";
       return { raw: resp, text };
     },
+    /** Call through this instance until the reply lists `expected`'s camera; fail at once on another's. */
+    async answeredBy(expected, others, ms = 5000) {
+      const deadline = Date.now() + ms;
+      for (;;) {
+        const resp = await send("tools/call", { name: "obsbot_tail2_devices", arguments: {} });
+        const text = resp?.result?.content?.[0]?.text ?? JSON.stringify(resp);
+        for (const o of others) {
+          if (text.includes(o.mac)) {
+            throw new Error(
+              `a call through ${label} was run by the instance that owns ${o.mac}, ` +
+                `not the one that owns ${expected.mac}: ${text}`,
+            );
+          }
+        }
+        if (text.includes(expected.mac)) return text;
+        if (Date.now() > deadline) {
+          throw new Error(`a call through ${label} never listed ${expected.mac}: ${text}`);
+        }
+        await sleep(100);
+      }
+    },
     kill: () => proc.kill(),
   };
 }
 
-let a, b;
-try {
-  a = launch("A");
-  await sleep(700); // let A elect owner + settle before B joins
-  b = launch("B");
-  await sleep(500);
+function freeEndpoint(ipcName) {
+  if (process.platform === "win32") return;
+  try {
+    unlinkSync(endpointFor(ipcName));
+  } catch {
+    // already gone
+  }
+}
 
-  await a.handshake();
-  await b.handshake();
+// ---------------------------------------------------------------------------
+// Case 1 — sharing
+// ---------------------------------------------------------------------------
 
-  const sa = await a.status();
-  const sb = await b.status();
+async function sharing() {
+  const ipcName = `obsbot-hw-smoke-${process.pid}-share`;
+  let a, b;
+  try {
+    a = launch("A", ipcName);
+    await a.sees(/ipc role=owner/);
+    b = launch("B", ipcName);
+    await b.sees(/ipc role=client/);
 
-  console.log(`A role=${a.role()}  status=${sa.text.slice(0, 80)}`);
-  console.log(`B role=${b.role()}  status=${sb.text.slice(0, 80)}`);
+    await a.handshake();
+    await b.handshake();
 
-  const aOwner = a.role() === "owner";
-  const bClient = b.role() === "client";
-  const aOk = /awake/.test(sa.text);
-  const bOk = /awake/.test(sb.text); // B's status came THROUGH the owner
+    const sa = await a.status();
+    const sb = await b.status();
 
-  const pass = aOwner && bClient && aOk && bOk;
-  console.log(
-    pass
-      ? "HW SMOKE PASS: A owns, B forwards; both read the camera with no collision"
-      : `HW SMOKE FAIL: aOwner=${aOwner} bClient=${bClient} aOk=${aOk} bOk=${bOk}`,
+    console.log(`A role=${a.role()}  status=${sa.text.slice(0, 80)}`);
+    console.log(`B role=${b.role()}  status=${sb.text.slice(0, 80)}`);
+
+    const aOwner = a.role() === "owner";
+    const bClient = b.role() === "client";
+    const aOk = /awake/.test(sa.text);
+    const bOk = /awake/.test(sb.text); // B's status came THROUGH the owner
+
+    const pass = aOwner && bClient && aOk && bOk;
+    console.log(
+      pass
+        ? "HW SMOKE PASS (sharing): A owns, B forwards; both read the camera with no collision"
+        : `HW SMOKE FAIL (sharing): aOwner=${aOwner} bClient=${bClient} aOk=${aOk} bOk=${bOk}`,
+    );
+    return pass;
+  } finally {
+    a?.kill();
+    b?.kill();
+    await sleep(500); // let the helpers exit and the camera free up before the next case
+    freeEndpoint(ipcName);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Case 2 — handover
+// ---------------------------------------------------------------------------
+
+/**
+ * A copy of this build that claims to be a different one. It needs the helper
+ * as well as dist/, because the server resolves native/prebuilt/ relative to
+ * where it was launched from. Returns the entry point.
+ */
+function stagedBuild(runDir, name, builtAt, digestChar) {
+  const root = join(runDir, name);
+  cpSync(join(repoRoot, "dist"), join(root, "dist"), { recursive: true });
+  cpSync(join(repoRoot, "native", "prebuilt"), join(root, "native", "prebuilt"), {
+    recursive: true,
+  });
+  writeFileSync(
+    join(root, "dist", "build-info.json"),
+    JSON.stringify({ version: "0.0.0-smoke", builtAt, digest: digestChar.repeat(64) }),
   );
-  process.exitCode = pass ? 0 : 1;
+  return join(root, "dist", "index.js");
+}
+
+async function handover() {
+  const ipcName = `obsbot-hw-smoke-${process.pid}-handover`;
+  // Inside the repository, so the copies resolve node_modules and
+  // "type": "module" by walking up to the root. artifacts/ is already ignored.
+  const runDir = join(repoRoot, "artifacts", "ipc-builds", `hw-${process.pid}`);
+  let older, newer, olderCam, newerCam;
+  try {
+    const olderEntry = stagedBuild(runDir, "older", 1790100000000, "a");
+    const newerEntry = stagedBuild(runDir, "newer", 1790300000000, "c");
+    olderCam = await pretendTail2("02:00:00:00:00:0a");
+    newerCam = await pretendTail2("02:00:00:00:00:0c");
+
+    older = launch("older", ipcName, olderEntry, olderCam);
+    await older.sees(/ipc role=owner/);
+    await older.handshake();
+    const before = await older.status(); // the older build now has the camera open
+    console.log(`older role=${older.role()}  status=${before.text.slice(0, 80)}`);
+    if (!/awake/.test(before.text)) {
+      throw new Error(`the older build could not read the camera: ${before.text}`);
+    }
+
+    newer = launch("newer", ipcName, newerEntry, newerCam);
+    await newer.sees(/ipc role=owner/);
+    await older.sees(new RegExp(`ipc stepping down for pid ${newer.pid}$`));
+    await older.sees(new RegExp(`ipc role=client owner-pid=${newer.pid} `));
+    await newer.handshake();
+
+    // WHO answers, before what they answer: a reply through the older
+    // instance must come from the newer one's registry.
+    await older.answeredBy(newerCam, [olderCam]);
+
+    const viaNewer = await newer.status();
+    const viaOlder = await older.status(); // forwarded to the newer build
+    console.log(`newer role=${newer.role()}  status=${viaNewer.text.slice(0, 80)}`);
+    console.log(`older role=${older.role()}  status=${viaOlder.text.slice(0, 80)}`);
+
+    const newerOwns = newer.role() === "owner";
+    const olderForwards = older.role() === "client";
+    const newerOk = /awake/.test(viaNewer.text);
+    const olderOk = /awake/.test(viaOlder.text);
+
+    const pass = newerOwns && olderForwards && newerOk && olderOk;
+    console.log(
+      pass
+        ? "HW SMOKE PASS (handover): the older build released the camera and the newer one opened it"
+        : `HW SMOKE FAIL (handover): newerOwns=${newerOwns} olderForwards=${olderForwards} ` +
+            `newerOk=${newerOk} olderOk=${olderOk}`,
+    );
+    return pass;
+  } finally {
+    older?.kill();
+    newer?.kill();
+    olderCam?.close();
+    newerCam?.close();
+    rmSync(runDir, { recursive: true, force: true });
+    freeEndpoint(ipcName);
+  }
+}
+
+// ---------------------------------------------------------------------------
+
+let ok = false;
+try {
+  if (!existsSync(DIST)) throw new Error("dist/index.js is missing — run `npm run build:all` first");
+  const shared = await sharing();
+  const handed = await handover();
+  ok = shared && handed;
 } catch (e) {
   console.error("HW SMOKE ERROR:", e instanceof Error ? e.message : e);
-  process.exitCode = 1;
-} finally {
-  a?.kill();
-  b?.kill();
 }
+process.exit(ok ? 0 : 1);

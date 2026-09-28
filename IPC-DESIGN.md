@@ -62,6 +62,11 @@ That is the tax we **avoid**.
 
 ## Chosen design — peer-elected in-process owner (no daemon)
 
+> **Superseded in part, 2026-09-27.** The owner is no longer whichever instance started first. It
+> is the newest *build* alive, and an older owner steps down for a newer one. The election, the
+> transport and the TCC reasoning below are unchanged. See
+> `docs/superpowers/specs/2026-09-27-newest-build-wins-design.md`.
+
 The **owner** role is assumed by **whichever MCP-server instance starts first**;
 later instances attach as **clients** and forward their helper calls to the
 owner. Because the owner is just an ordinary server instance (spawned by a

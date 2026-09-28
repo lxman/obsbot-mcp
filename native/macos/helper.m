@@ -44,6 +44,7 @@
 #import <CoreVideo/CoreVideo.h>
 #import <AppKit/AppKit.h>
 #import <os/log.h>
+#include "unique_id.h"
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -51,10 +52,14 @@
 
 // USB vendor ID 0x3564 is registered to Remo Inc. — OBSBOT's manufacturer. Remo
 // ships non-OBSBOT devices under this VID, so gate on VID + a known model PID,
-// never VID alone. Mirror OBSBOT_MODEL_PIDS with OBSBOT_MODEL_PIDS in
-// src/device/manager.ts when a new OBSBOT camera model is verified on hardware.
+// never VID alone.
+//
+// This table decides what the helper can enumerate and open, neither of which
+// sends the camera anything. It is NOT a mirror of OBSBOT_MODEL_PIDS in
+// src/device/manager.ts: that one lists the models the Tiny 2 bind path may
+// write a V3 vendor frame to, and the Tail 2 is deliberately absent from it.
 static const uint16_t REMO_VID = 0x3564;
-static const uint16_t OBSBOT_MODEL_PIDS[] = { 0xFEF8 /* Tiny 2 */ };
+static const uint16_t OBSBOT_MODEL_PIDS[] = { 0xFEF8 /* Tiny 2 */, 0xFEFC /* Tail 2 */ };
 static const size_t OBSBOT_MODEL_COUNT =
     sizeof(OBSBOT_MODEL_PIDS) / sizeof(OBSBOT_MODEL_PIDS[0]);
 
@@ -317,25 +322,20 @@ static uint16_t usbProductID(io_service_t svc) {
   return pid;
 }
 
-// Does this AVFoundation uniqueID belong to the USB device at `loc`?
+// Does this AVFoundation uniqueID name THIS USB device — its location and its
+// vendor and product ids, all three?
 //
-// macOS builds a UVC camera's uniqueID as "0x" + locationID(hex) + VID(4) + PID(4).
-// Verified on hardware: locationID 0x3120000 with VID 0x3564 / PID 0xfef8 yields
-// "0x31200003564fef8".
-//
-// The exact form is checked first. The substring fallback covers formatting
-// differences across macOS releases, which this format has only been confirmed
-// against one release — if that fallback ever starts mismatching cameras, this is
-// the first place to look.
-static BOOL uniqueIDMatchesLocation(NSString *uniqueID, uint32_t loc) {
-  if (!uniqueID || uniqueID.length == 0 || loc == 0) return NO;
-  for (size_t i = 0; i < OBSBOT_MODEL_COUNT; i++) {
-    NSString *exact = [NSString stringWithFormat:@"0x%x%04x%04x",
-                       loc, (unsigned)REMO_VID, (unsigned)OBSBOT_MODEL_PIDS[i]];
-    if ([uniqueID caseInsensitiveCompare:exact] == NSOrderedSame) return YES;
-  }
-  NSString *locHex = [NSString stringWithFormat:@"%x", loc];
-  return [uniqueID localizedCaseInsensitiveContainsString:locHex];
+// The rule is in unique_id.h, where it can be tested. It used to be "the
+// uniqueID contains the location", checked against the location alone. That
+// matched a Tiny 2 at 0x1100000 to a camera at 0x100000, and once the table
+// below listed a second model it could match a Tiny 2's uniqueID to a Tail 2:
+// in doEnumerate, pairing one model's ids with the other's path, and in doOpen,
+// opening the Tail 2 when the Tiny 2 asked for was held by another process.
+// The Node layer then writes a vendor frame to whatever was opened.
+static BOOL uniqueIDNamesService(NSString *uniqueID, io_service_t service) {
+  if (!uniqueID || uniqueID.length == 0) return NO;
+  return obsbot_unique_id_names(uniqueID.UTF8String, usbLocationID(service), REMO_VID,
+                                usbProductID(service));
 }
 
 static NSMutableArray *findUsbServices(uint16_t vid, uint16_t pid) {
@@ -624,7 +624,7 @@ static void doEnumerate(void) {
       NSString *avUniqueID = @"";
       for (NSDictionary *avDev in avDevices) {
         NSString *uid = avDev[@"uniqueID"];
-        if (uniqueIDMatchesLocation(uid, loc)) { avUniqueID = uid; break; }
+        if (uniqueIDNamesService(uid, service)) { avUniqueID = uid; break; }
       }
 
       // locationID is reported so callers can correlate without re-deriving it
@@ -692,7 +692,7 @@ static void doOpen(NSString *path) {
       // fallback is false and nothing matched, so open failed for EVERY camera.
       // The old fallback is deliberately gone: it masked this bug on single-camera
       // setups and would keep masking a broken match.
-      BOOL matches = uniqueIDMatchesLocation(path, usbLocationID(svc));
+      BOOL matches = uniqueIDNamesService(path, svc);
 
       if (matches) {
         haveCtrlIf = findVideoControlInterfaceNumber(svc, &ctrlIfNum);

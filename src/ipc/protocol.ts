@@ -1,3 +1,5 @@
+import { isBuildId, type BuildId } from "./build-id.js";
+
 // ---------------------------------------------------------------------------
 // Length-prefixed JSON framing for the client↔owner control channel.
 //
@@ -59,4 +61,68 @@ export class FrameDecoder {
     }
     return out;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Control messages — how instances agree on who owns the endpoint.
+//
+// A tool request's body is {tool, args}. A control message is a body with a
+// reserved `ipc` key, carried in the same frames. See
+// docs/superpowers/specs/2026-09-27-newest-build-wins-design.md §6.
+//
+// An instance that predates these treats any body as a tool call, so a hello
+// sent to it comes back as {ok:false, error:"unknown tool: undefined"} — which
+// is how a legacy owner is recognised. A legacy CLIENT ignores a frame whose id
+// it is not waiting for, so a notice sent with NOTICE_ID is harmless to it.
+// ---------------------------------------------------------------------------
+
+/** Frame id of an owner→client notice. Request ids start at 1, so it never matches a reply. */
+export const NOTICE_ID = 0;
+
+export interface HelloBody {
+  ipc: "hello";
+  build: BuildId;
+  pid: number;
+}
+
+export interface TakeoverBody {
+  ipc: "takeover";
+  build: BuildId;
+  pid: number;
+}
+
+export interface SteppingDownBody {
+  ipc: "stepping-down";
+  successorPid: number;
+}
+
+export type TakeoverResult =
+  | { ipc: "takeover"; granted: true }
+  | { ipc: "takeover"; granted: false; reason: "not-newer" };
+
+const isPid = (x: unknown): x is number => typeof x === "number" && Number.isInteger(x) && x > 0;
+
+function identityOf(body: unknown, kind: "hello" | "takeover"): { build: BuildId; pid: number } | undefined {
+  if (typeof body !== "object" || body === null) return undefined;
+  const b = body as Record<string, unknown>;
+  if (b.ipc !== kind || !isBuildId(b.build) || !isPid(b.pid)) return undefined;
+  return { build: b.build, pid: b.pid };
+}
+
+/** The body as a hello, or undefined if it is not a well-formed one. */
+export function asHello(body: unknown): HelloBody | undefined {
+  const id = identityOf(body, "hello");
+  return id && { ipc: "hello", ...id };
+}
+
+/** The body as a takeover request, or undefined if it is not a well-formed one. */
+export function asTakeover(body: unknown): TakeoverBody | undefined {
+  const id = identityOf(body, "takeover");
+  return id && { ipc: "takeover", ...id };
+}
+
+export function isSteppingDown(body: unknown): body is SteppingDownBody {
+  if (typeof body !== "object" || body === null) return false;
+  const b = body as Record<string, unknown>;
+  return b.ipc === "stepping-down" && isPid(b.successorPid);
 }

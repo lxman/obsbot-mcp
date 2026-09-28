@@ -8,15 +8,23 @@ import { MacosTransport } from "../transport/macos.js";
 // USB vendor ID 0x3564 is registered to **Remo Inc.** — the manufacturer. OBSBOT
 // is a Remo product brand, and Remo ships non-OBSBOT (and non-camera) devices
 // under the same VID, so candidacy must gate on VID **and** a known model PID —
-// never VID alone. Add a PID here (and mirror it in native/macos/helper.m's
-// OBSBOT_MODEL_PIDS) when a new OBSBOT camera model is verified on hardware.
+// never VID alone.
+//
+// This table is the list of models that speak the Tiny 2's framed V3 vendor
+// protocol, because being a candidate here means being OPENED AND WRITTEN TO:
+// bind() and listCameras() identify a camera by sending it UG_GET_SN as a V3
+// frame on vendor selector 2. Add a PID only when that query has been verified
+// on the model's hardware.
+//
+// The Tail 2 (0xfefc — one composite PID for both its MTP and UVC USB modes) is
+// deliberately absent. It carries the Tiny 2's Extension Unit GUID but uses
+// flat selectors, not V3 frames (TAIL2-PROTOCOL.md §11), so the serial query
+// would be an untested vendor write. native/macos/helper.m's OBSBOT_MODEL_PIDS
+// does list it: that table only decides what the helper can enumerate and
+// open, which sends the camera nothing. The two tables no longer mirror.
 const REMO_VID = 0x3564;
 const OBSBOT_MODEL_PIDS = new Map<number, Set<number>>([
-  // PID shared by the Tail 2's MTP (file-offload) and UVC (webcam) USB
-  // modes — same composite PID, different interface sets. Hardware-verified
-  // 2026-09-26: UVC mode enumerates as "OBSBOT Tail 2 Camera" (MI_00),
-  // "OBSBOT Tail2 Audio" (MI_02), and a USB serial port (MI_04).
-  [REMO_VID, new Set<number>([0xfef8 /* Tiny 2 */, 0xfefc /* Tail 2 */])],
+  [REMO_VID, new Set<number>([0xfef8 /* Tiny 2 */])],
 ]);
 
 // Legacy name match — used ONLY as a fallback on platforms whose helper does not
@@ -27,6 +35,11 @@ const OBSBOT_MODEL_PIDS = new Map<number, Set<number>>([
 // binding — are correctly excluded.
 const OBSBOT_NAME_RE = /obsbot/i;
 
+// The name fallback's stand-in for the Tail 2's absence from the PID table.
+// Matches both spellings the camera's own USB strings use ("OBSBOT Tail 2
+// Camera", "OBSBOT Tail2 Audio").
+const TAIL2_NAME_RE = /tail\s*2/i;
+
 /** Message text from an unknown thrown value, for diagnostics. */
 const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
@@ -36,9 +49,13 @@ const errText = (e: unknown): string => (e instanceof Error ? e.message : String
  * VID + known-model PID table (a software "OBSBOT Virtual Camera" has no vid/pid
  * and is rejected). On Linux the helper does not report vid/pid yet, so fall
  * back to the name match there until it does.
+ *
+ * A Tail 2 is never a candidate on any platform — see OBSBOT_MODEL_PIDS.
  */
 function isObsbotCamera(d: DeviceInfo): boolean {
-  if (process.platform === "linux") return OBSBOT_NAME_RE.test(d.name);
+  if (process.platform === "linux") {
+    return OBSBOT_NAME_RE.test(d.name) && !TAIL2_NAME_RE.test(d.name);
+  }
   if (d.vid === undefined || d.pid === undefined) return false;
   return OBSBOT_MODEL_PIDS.get(d.vid)?.has(d.pid) ?? false;
 }
@@ -172,6 +189,14 @@ export class DeviceManager {
    */
   /** True while an arrival re-bind ladder is running (see handleCameraArrived). */
   private rebinding = false;
+  /**
+   * Bumped by shutdown(). shutdown() is no longer only a way out: an owner
+   * that steps down for a newer build calls it and stays alive. Work that was
+   * under way before it — a re-bind ladder waiting out its backoff — must not
+   * open the camera after it, or this instance takes back what it has just
+   * given up.
+   */
+  private epoch = 0;
 
   /**
    * Delays before each arrival re-bind attempt, in order — so four attempts
@@ -666,11 +691,15 @@ export class DeviceManager {
     if (this.rebinding) return;
 
     this.rebinding = true;
+    const epoch = this.epoch;
     const total = this.arrivalBackoffMs.length;
     try {
       for (let i = 0; i < total; i++) {
         const delay = this.arrivalBackoffMs[i]!;
         if (delay > 0) await new Promise((r) => setTimeout(r, delay));
+        // The manager was shut down while we waited: the camera is no longer
+        // ours to restore. See `epoch`.
+        if (this.epoch !== epoch) return;
         // A tool call may have bound it while we waited — it got there first.
         if (this.registry.size > 0) return;
         try {
@@ -710,6 +739,7 @@ export class DeviceManager {
    * itself throw is worse than one that leaves a process for the OS to reap.
    */
   async shutdown(): Promise<void> {
+    this.epoch++;
     const close = async (h: HelperProcess | undefined): Promise<void> => {
       if (!h) return;
       try {

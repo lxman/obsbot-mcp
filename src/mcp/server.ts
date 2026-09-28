@@ -13,10 +13,17 @@ import { Tail2Registry } from "../tail2/registry.js";
 import { createTail2Tools } from "../tail2/tools.js";
 import { renderToolResult } from "./render.js";
 import { CaptureManager } from "../capture/manager.js";
-import { Coordinator, serialize } from "../ipc/coordinator.js";
+import { Coordinator, type RunLocal } from "../ipc/coordinator.js";
+import { buildLabel, loadBuildId } from "../ipc/build-id.js";
 import { VERSION } from "../version.js";
 
 export async function startServer(opts: { debug?: boolean } = {}): Promise<void> {
+  // Which build this process loaded. Read first and never again: a rebuild
+  // under a running process changes the stamp file but not the process, and
+  // the identity has to describe the process. See src/ipc/build-id.ts.
+  const build = loadBuildId();
+  console.error(`obsbot-mcp: build ${buildLabel(build)}`);
+
   // helperFactory subscribes every helper it spawns to the OS bus events, so
   // the manager hears about a camera arriving or leaving instead of finding
   // out by failing a call. See src/device/helper-factory.ts.
@@ -48,22 +55,33 @@ export async function startServer(opts: { debug?: boolean } = {}): Promise<void>
   // Single-owner camera coordination across concurrent MCP clients (see
   // IPC-DESIGN.md). Every instance elects: the owner runs tool calls locally
   // against the one DeviceManager; clients forward theirs to the owner and
-  // re-elect if it dies. runLocal is the tool dispatch, serialize()-wrapped so
-  // it is the single-camera lock — covering both this instance's own calls and
-  // any forwarded from clients (the local path bypasses OwnerServer's queue). A
-  // lone instance is simply the owner with no peers: it behaves exactly as
+  // re-elect if it goes away. The owner is the newest build alive — an older
+  // owner steps down for a newer one (see
+  // docs/superpowers/specs/2026-09-27-newest-build-wins-design.md). runLocal is
+  // the bare tool dispatch; the coordinator runs it behind the single-camera
+  // lock, which covers this instance's own calls and the ones forwarded to it.
+  // A lone instance is simply the owner with no peers: it behaves exactly as
   // before, plus an idle listener.
-  const runLocal = serialize(async (name, args) => {
+  const runLocal: RunLocal = async (name, args) => {
     const tool = tools.find((t) => t.name === name);
     if (!tool) throw new Error(`unknown tool: ${name}`);
     return tool.handler(args);
+  };
+  const coordinator = new Coordinator(runLocal, {
+    build,
+    // The coordinator reports its role on every change, on STDERR (never
+    // stdout — that's the JSON-RPC channel). "Which build will run my next
+    // call" is answered by the last `ipc role=` line; the harnesses match on it.
+    log: (line) => console.error(line),
+    // What stepping down for a newer build has to let go of: the same things a
+    // clean exit does, without the exit. On macOS the control open is
+    // exclusive, so the successor cannot open the camera until this is done.
+    release: async () => {
+      capture.stopAll();
+      await mgr.shutdown();
+    },
   });
-  const coordinator = new Coordinator(runLocal);
   await coordinator.start();
-  // Report the coordination role on STDERR (never stdout — that's the JSON-RPC
-  // channel). Useful for ops ("am I the owner or a client?") and observed by the
-  // ipc-hw-smoke harness to confirm a client really forwards to the owner.
-  console.error(`obsbot-mcp: ipc role=${coordinator.roleName}`);
 
   // Kill any recording/preview child processes when the server exits, so nothing
   // orphans, and drop the IPC endpoint / owner connection.
