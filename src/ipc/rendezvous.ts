@@ -1,5 +1,5 @@
 import net from "node:net";
-import { unlinkSync } from "node:fs";
+import { closeSync, openSync, statSync, unlinkSync } from "node:fs";
 
 // ---------------------------------------------------------------------------
 // Peer election over a well-known local endpoint.
@@ -8,7 +8,8 @@ import { unlinkSync } from "node:fs";
 // bind and becomes the OWNER (it will run the single DeviceManager + native
 // helper and serve everyone else); the rest get EADDRINUSE and attach as
 // CLIENTS that forward their helper ops to the owner. The bind is the lock —
-// there is no check-then-create step to race (see IPC-DESIGN.md).
+// there is no check-then-create step to race (see IPC-DESIGN.md). Clearing a
+// name that nobody holds is the one step that is not atomic; see elect().
 //
 // Transport is a named pipe (Windows) / Unix-domain socket (macOS, Linux),
 // NOT shared memory: it gives atomic election, framing, wakeup, and clean
@@ -56,44 +57,126 @@ export type Role =
 /**
  * Become the owner, or attach as a client.
  *
- * 1. Try to listen on `path` → win the bind → OWNER.
- * 2. EADDRINUSE → someone's there → connect → CLIENT.
- * 3. Connect refused on POSIX → the endpoint file is STALE (owner crashed
- *    without cleaning up); unlink it and retry the listen → OWNER. Windows
- *    named pipes are kernel-refcounted and never go stale, so this branch is
- *    POSIX-only.
+ * The bind is the lock: exactly one process can hold the name. What needs care
+ * is the name that is held by NOBODY — the socket file an owner leaves behind
+ * when it is killed outright (POSIX only; a Windows pipe is kernel-refcounted
+ * and vanishes with its owner).
  *
- * The stale-then-retry can itself lose a race to a concurrent starter that
- * binds first; that just yields EADDRINUSE again, so we bounce back to the
- * client path. A small bounded retry keeps a burst of simultaneous starts
- * from spuriously failing.
+ * Clearing a stale file means unlinking it, and unlink cannot tell a stale
+ * file from a live one. If two callers both find the name taken and the
+ * connection refused, and each unlinks and binds, the second unlinks the
+ * FIRST one's live socket: two owners, and the first never finds out. That is
+ * no longer a corner case — every client of a killed owner re-elects at once.
+ *
+ * So on POSIX the unlink, and every bind, happens under a lock file taken with
+ * an exclusive create:
+ *
+ * 1. Connect. Someone answers → CLIENT.
+ * 2. Nobody answers → take the lock, and look again: another caller may have
+ *    bound while we waited. Someone answers → CLIENT.
+ * 3. Still nobody → unlink whatever is there, bind → OWNER.
+ *
+ * On Windows nothing is ever stale and nothing is unlinked, so there is no
+ * lock: bind → OWNER, else connect → CLIENT. A name that is taken and then
+ * refuses the connection means the owner went away in between, which is a
+ * reason to go round again, not to fail.
  */
-export async function elect(path = rendezvousPath(), attempts = 3): Promise<Role> {
+export async function elect(path = rendezvousPath(), attempts = 5): Promise<Role> {
   let lastErr: unknown;
   for (let i = 0; i < attempts; i++) {
+    const r = process.platform === "win32" ? await electPipe(path) : await electSocket(path);
+    if (r.role !== "retry") return r;
+    lastErr = r.because;
+    await sleep(RETRY_MS);
+  }
+  throw new Error(
+    `elect: could not become owner or client after ${attempts} attempts: ${errno(lastErr) ?? lastErr}`,
+  );
+}
+
+type Attempt = Role | { role: "retry"; because: unknown };
+
+const RETRY_MS = 10;
+/** A lock older than this was left by a holder that died. The lock is held for milliseconds. */
+const LOCK_STALE_MS = 5000;
+/** Longest one caller waits for the lock. */
+const LOCK_WAIT_MS = 3000;
+
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+const nobodyThere = (e: unknown): boolean => {
+  const code = errno(e);
+  return code === "ECONNREFUSED" || code === "ENOENT";
+};
+
+async function electPipe(path: string): Promise<Attempt> {
+  try {
+    return { role: "owner", server: await listen(path) };
+  } catch (e) {
+    if (errno(e) !== "EADDRINUSE") throw e;
+  }
+  try {
+    return { role: "client", socket: await connect(path) };
+  } catch (e) {
+    if (!nobodyThere(e)) throw e;
+    return { role: "retry", because: e };
+  }
+}
+
+async function electSocket(path: string): Promise<Attempt> {
+  try {
+    return { role: "client", socket: await connect(path) };
+  } catch (e) {
+    if (!nobodyThere(e)) throw e;
+  }
+  return withLock(`${path}.lock`, async () => {
+    try {
+      return { role: "client", socket: await connect(path) }; // someone bound while we waited
+    } catch (e) {
+      if (!nobodyThere(e)) throw e;
+    }
+    try {
+      unlinkSync(path);
+    } catch {
+      // nothing there to clear
+    }
     try {
       return { role: "owner", server: await listen(path) };
     } catch (e) {
+      // An instance that predates the lock can still bind between our unlink
+      // and our bind. It is there now; go round and connect to it.
       if (errno(e) !== "EADDRINUSE") throw e;
+      return { role: "retry", because: e };
+    }
+  });
+}
+
+/** Run `fn` holding `lock`, a file taken with an exclusive create and removed afterwards. */
+async function withLock<T>(lock: string, fn: () => Promise<T>): Promise<T> {
+  const deadline = Date.now() + LOCK_WAIT_MS;
+  for (;;) {
+    try {
+      closeSync(openSync(lock, "wx")); // fails if it exists: that is the lock
+      break;
+    } catch (e) {
+      if (errno(e) !== "EEXIST") throw e;
     }
     try {
-      return { role: "client", socket: await connect(path) };
-    } catch (e) {
-      lastErr = e;
-      const code = errno(e);
-      const stale = code === "ECONNREFUSED" || code === "ENOENT";
-      if (stale && process.platform !== "win32") {
-        try {
-          unlinkSync(path);
-        } catch {
-          // already gone, or someone else cleaned it — fine; loop and retry.
-        }
-        continue; // retry listen
-      }
-      throw e; // a real connect failure that isn't a stale endpoint
+      if (Date.now() - statSync(lock).mtimeMs > LOCK_STALE_MS) unlinkSync(lock);
+    } catch {
+      // released, or cleared by someone else, since we looked
+    }
+    if (Date.now() > deadline) throw new Error(`elect: could not take ${lock} in ${LOCK_WAIT_MS} ms`);
+    await sleep(5 + Math.random() * 10);
+  }
+  try {
+    return await fn();
+  } finally {
+    try {
+      unlinkSync(lock);
+    } catch {
+      // already gone
     }
   }
-  throw new Error(`elect: could not become owner or client after ${attempts} attempts: ${errno(lastErr) ?? lastErr}`);
 }
 
 function listen(path: string): Promise<net.Server> {
