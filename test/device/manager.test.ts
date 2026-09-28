@@ -1079,3 +1079,41 @@ test("giving up is reported, so a camera that never came back is not silent", as
 
   expect(log.some((m) => /gave up/i.test(m))).toBe(true);
 });
+
+// ---------------------------------------------------------------------------
+// shutdown() is no longer only a way out. An owner that steps down for a newer
+// build calls it and stays alive (src/mcp/server.ts, the coordinator's
+// `release`), and may be re-elected later — so the same manager has to let go
+// of everything AND still work afterwards.
+// ---------------------------------------------------------------------------
+
+test("shutdown() closes every helper the manager is holding", async () => {
+  const make = fakeHelperFactory([{ serial: "AAA", locationId: 1 }]);
+  const spawned: HelperProcess[] = [];
+  const mgr = new DeviceManager(async () => {
+    const h = await make();
+    spawned.push(h);
+    return h;
+  });
+  await mgr.get(); // binds: a registry helper, and a watcher
+  expect(spawned.length).toBeGreaterThan(0);
+
+  await mgr.shutdown();
+
+  for (const h of spawned) expect(vi.mocked(h.close)).toHaveBeenCalled();
+});
+
+test("a manager that has been shut down binds again on the next call", async () => {
+  const mgr = new DeviceManager(fakeHelperFactory([{ serial: "AAA", locationId: 1 }]));
+  const first = await mgr.get();
+  expect(await first.readSerial()).toBe("AAA");
+
+  await mgr.shutdown();
+  expect(await mgr.listCameras()).toEqual([
+    expect.objectContaining({ serial: "AAA", status: "available" }), // no longer bound
+  ]);
+
+  const second = await mgr.get();
+  expect(second).not.toBe(first);
+  expect(await second.readSerial()).toBe("AAA");
+});
