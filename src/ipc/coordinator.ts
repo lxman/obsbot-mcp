@@ -79,6 +79,8 @@ export class Coordinator {
   private steppingDown = false;
   /** Client of an owner that is older than us and could not be made to hand over. */
   private blocked = false;
+  /** Counts the owners this instance has been a client of. Tells one connection from the next. */
+  private connection = 0;
   private closing = false;
   /** A role change in progress — an election, or stepping down. Never rejects. */
   private pending?: Promise<void>;
@@ -119,35 +121,53 @@ export class Coordinator {
     let failure: unknown;
     // Twice at most: a call that lost its owner is retried exactly once.
     for (let attempt = 0; attempt < 2; attempt++) {
-      await this.ensureRole();
-      if (this.role === "client" && this.blocked) {
-        await this.tryAgain();
-        // Still an older owner, still unable to hand over: do not run the call
-        // on its code. A call that succeeds on code the caller did not expect
-        // is worse than one that fails and says why.
-        if (this.role === "client" && this.blocked) throw new Error(this.blockedMessage());
-      }
-      const client = this.client;
+      const target = await this.settle();
       try {
-        return this.role === "owner"
+        return target === "local"
           ? await this.gate.run(() => this.runLocal(tool, args))
-          : await client!.request({ tool, args });
+          : await target.request({ tool, args });
       } catch (e) {
         if (e instanceof StepDownError) {
           // We were the owner and are handing over; this call had not started.
-          // ensureRole() waits the handover out, and the retry forwards it.
+          // settle() waits the handover out, and the retry forwards it.
           failure = e;
           continue;
         }
-        if (client?.closed) {
+        if (target !== "local" && target.closed) {
           failure = e;
-          this.ownerLost(client);
+          this.ownerLost(target);
           continue;
         }
         throw e; // a genuine owner-side error → surface it unchanged
       }
     }
     throw failure;
+  }
+
+  /**
+   * Wait until this instance has a role it may use, and say where a call goes:
+   * run here, or forward over this connection.
+   *
+   * The answer is taken in the same tick the decision is made and handed to the
+   * caller. Calls arrive in parallel, and one of them may be reconnecting while
+   * another resumes: a caller that re-read `this.client` after an await could
+   * find it gone, or pointing at an owner nobody has checked yet.
+   */
+  private async settle(): Promise<"local" | OwnerClient> {
+    let asked = false;
+    for (let round = 0; round < 8; round++) {
+      await this.ensureRole();
+      if (this.role === "owner") return "local";
+      if (this.role !== "client" || !this.client) continue; // a role change began while we waited
+      if (!this.blocked) return this.client;
+      // An older owner that could not hand over. Ask once more, then give up:
+      // a call that succeeds on code the caller did not expect is worse than
+      // one that fails and says why.
+      if (asked) throw new Error(this.blockedMessage());
+      asked = true;
+      await this.tryAgain(this.connection);
+    }
+    throw new Error(`obsbot-mcp: ipc role did not settle for ${this.path}`);
   }
 
   async close(): Promise<void> {
@@ -233,7 +253,7 @@ export class Coordinator {
       this.log(`obsbot-mcp: ipc takeover requested from pid ${peer.pid}`);
       let granted: boolean;
       try {
-        granted = await client.takeover(this.build, this.pid);
+        granted = await client.takeover(this.build, this.pid, this.t.helloTimeoutMs);
       } catch {
         granted = true; // closed before it could answer: the endpoint is free either way
       }
@@ -273,6 +293,7 @@ export class Coordinator {
     this.client = client;
     this.role = "client";
     this.blocked = blocked;
+    this.connection++;
     // Re-elect when the connection closes, not when we next have something to
     // send: an idle newer build must not sit disconnected while an older one
     // takes the endpoint and runs calls.
@@ -289,12 +310,23 @@ export class Coordinator {
     }
   }
 
-  /** The owner is older and still there. Try once more: a fresh connection, hello, takeover. */
-  private async tryAgain(): Promise<void> {
-    const client = this.client;
-    this.reset(); // first, so closing our own connection is not mistaken for losing the owner
-    client?.close();
-    await this.ensureRole();
+  /**
+   * The owner is older and still there. Try once more: a fresh connection,
+   * hello, takeover.
+   *
+   * Queued like any other role change, so calls that arrive together wait for
+   * it instead of finding the role half torn down. `seen` is the connection the
+   * caller was looking at: if that is no longer the current one, someone has
+   * asked again since, and asking a second time would tell us nothing new.
+   */
+  private tryAgain(seen: number): Promise<void> {
+    return this.begin(async () => {
+      if (this.role !== "client" || !this.blocked || this.connection !== seen) return;
+      const client = this.client;
+      this.reset(); // first, so closing our own connection is not mistaken for losing the owner
+      client?.close();
+      await this.doElect();
+    });
   }
 
   private blockedMessage(): string {

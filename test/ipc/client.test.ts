@@ -287,6 +287,20 @@ describe("owner client", () => {
     expect(await client.takeover(MY_BUILD, 7)).toBe(false);
   });
 
+  test("takeover is false when the owner does not answer in time", async () => {
+    const path = tempPath();
+    const srv = await scriptedOwner(path, () => undefined);
+    const client = await OwnerClient.connect(path);
+    cleanup.push(async () => {
+      client.close();
+      await srv.close();
+    });
+
+    const started = Date.now();
+    expect(await client.takeover(MY_BUILD, 7, 60)).toBe(false);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(55);
+  });
+
   test("takeover is false against an owner that predates the handshake", async () => {
     const path = tempPath();
     const srv = await scriptedOwner(path, legacyAnswer);

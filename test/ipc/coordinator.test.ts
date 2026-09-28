@@ -598,6 +598,78 @@ describe("coordinator", () => {
     expect(squatter.toolCalls).toEqual([]);
   });
 
+  test.each([
+    ["an owner that predates the handshake", {}],
+    [
+      "an older owner that refuses the takeover",
+      {
+        hello: olderPeer(2001),
+        takeover: (send: (result: unknown) => void): void =>
+          send({ ipc: "takeover", granted: false, reason: "not-newer" }),
+      },
+    ],
+  ])("calls made at the same moment against %s are each refused, with the reason", async (_what, script) => {
+    // An MCP client issues tool calls in parallel. Every one of them has to get
+    // the refusal — not just the first, with the rest tripping over its retry.
+    const path = tempPath();
+    const owner = await scriptedOwner(path, script);
+    cleanup.push(() => owner.close());
+    const b = instance("B", NEW, path);
+    await b.c.start();
+
+    const outcomes = await Promise.allSettled([
+      b.c.dispatch("obsbot_status", {}),
+      b.c.dispatch("obsbot_wake", {}),
+      b.c.dispatch("obsbot_gimbal_position", {}),
+    ]);
+
+    expect(
+      outcomes.map((o) => (o.status === "rejected" ? (o.reason as Error).message : "resolved")),
+    ).toEqual([REFUSAL(path), REFUSAL(path), REFUSAL(path)]);
+    expect(owner.toolCalls).toEqual([]);
+  });
+
+  test("calls made at the same moment ask the owner once more between them, not once each", async () => {
+    const path = tempPath();
+    const stubborn = await scriptedOwner(path, {
+      hello: olderPeer(2001),
+      takeover: (send) => send({ ipc: "takeover", granted: false, reason: "not-newer" }),
+    });
+    cleanup.push(() => stubborn.close());
+    const b = instance("B", NEW, path);
+    await b.c.start();
+    expect(stubborn.takeovers()).toBe(1);
+
+    await Promise.allSettled([
+      b.c.dispatch("obsbot_status", {}),
+      b.c.dispatch("obsbot_wake", {}),
+      b.c.dispatch("obsbot_gimbal_position", {}),
+    ]);
+
+    expect(stubborn.takeovers()).toBe(2);
+  });
+
+  test("an owner that answers the hello and never answers the takeover does not hang startup", async () => {
+    const path = tempPath();
+    const silent = await scriptedOwner(path, {
+      hello: olderPeer(2001),
+      takeover: () => {}, // …nothing, ever
+    });
+    cleanup.push(() => silent.close());
+    const b = instance("B", NEW, path);
+
+    const outcome = await Promise.race([
+      b.c.start().then(() => "started"),
+      sleep(FAST.helloTimeoutMs + 400).then(() => "still waiting"),
+    ]);
+
+    expect(outcome).toBe("started");
+    expect(b.c.roleName).toBe("client");
+    expect(b.log).toContain(CANNOT_HAND_OVER);
+    await expect(b.c.dispatch("obsbot_status", {})).rejects.toThrow(REFUSAL(path));
+    expect(silent.toolCalls).toEqual([]);
+  });
+
   test("an older client is still served by a newer owner it cannot take over from", async () => {
     // The refusal is about running on OLDER code. An old client of a new owner
     // is the normal case and must keep working.

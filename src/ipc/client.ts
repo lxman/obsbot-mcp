@@ -102,9 +102,21 @@ export class OwnerClient {
     return { kind: "legacy" };
   }
 
-  /** Ask the owner for the endpoint. True if it agreed to step down. */
-  async takeover(build: BuildId, pid: number): Promise<boolean> {
-    const reply = await this.send({ ipc: "takeover", build, pid });
+  /**
+   * Ask the owner for the endpoint. True if it agreed to step down.
+   *
+   * No answer in `timeoutMs` is a no: an owner that stalls between the hello
+   * and the takeover must not leave the asker waiting for ever. Throws only if
+   * the connection itself closes first.
+   */
+  async takeover(build: BuildId, pid: number, timeoutMs: number): Promise<boolean> {
+    let reply: ReplyBody;
+    try {
+      reply = await this.send({ ipc: "takeover", build, pid }, timeoutMs);
+    } catch (e) {
+      if (e instanceof ReplyTimeout) return false;
+      throw e;
+    }
     if (!reply.ok) return false;
     const r = reply.result as Record<string, unknown> | null;
     return typeof r === "object" && r !== null && r.ipc === "takeover" && r.granted === true;
