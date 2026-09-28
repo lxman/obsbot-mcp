@@ -1117,3 +1117,54 @@ test("a manager that has been shut down binds again on the next call", async () 
   expect(second).not.toBe(first);
   expect(await second.readSerial()).toBe("AAA");
 });
+
+test("a re-bind ladder that was under way when the manager shut down does not re-open the camera", async () => {
+  // The camera is replugged, the arrival ladder starts waiting out its backoff,
+  // and in that window a newer build takes over: shutdown() closes every
+  // helper. If the ladder then carries on, THIS instance re-opens the camera
+  // it has just given up — and on macOS, where the open is exclusive, the new
+  // owner cannot have it and nothing makes the old one let go.
+  const make = fakeHelperFactory([{ serial: "AAA", locationId: 1 }]);
+  const spawned: HelperProcess[] = [];
+  const mgr = new DeviceManager(
+    async () => {
+      const h = await make();
+      spawned.push(h);
+      return h;
+    },
+    { arrivalBackoffMs: [40, 40], log: () => {} },
+  );
+  await mgr.get(); // ours, so an arrival is worth reacting to
+  await mgr.invalidate(); // …and it has gone away, as on an unplug
+  const opensBefore = (): number =>
+    spawned.reduce((n, h) => n + vi.mocked(h.open).mock.calls.length, 0);
+
+  const ladder = mgr.handleCameraArrived({ path: "/dev/fake-AAA" });
+  await new Promise((r) => setTimeout(r, 10)); // inside the first backoff
+  const opened = opensBefore();
+  await mgr.shutdown();
+  await ladder;
+
+  expect(opensBefore()).toBe(opened); // nothing was opened after the shutdown
+  expect(await mgr.listCameras()).toEqual([
+    expect.objectContaining({ serial: "AAA", status: "available" }),
+  ]);
+});
+
+test("a manager that has been shut down still re-binds on a LATER arrival", async () => {
+  // The guard above must end with the ladder it stopped. An instance that is
+  // re-elected owner afterwards has to self-heal like any other.
+  const mgr = new DeviceManager(fakeHelperFactory([{ serial: "AAA", locationId: 1 }]), {
+    arrivalBackoffMs: [0],
+    log: () => {},
+  });
+  await mgr.get();
+  await mgr.shutdown();
+
+  await mgr.handleCameraArrived({ path: "/dev/fake-AAA" });
+
+  expect(await mgr.listCameras()).toEqual([
+    expect.objectContaining({ serial: "AAA", status: "bound" }),
+  ]);
+});
+

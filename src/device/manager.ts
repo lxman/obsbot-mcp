@@ -189,6 +189,14 @@ export class DeviceManager {
    */
   /** True while an arrival re-bind ladder is running (see handleCameraArrived). */
   private rebinding = false;
+  /**
+   * Bumped by shutdown(). shutdown() is no longer only a way out: an owner
+   * that steps down for a newer build calls it and stays alive. Work that was
+   * under way before it — a re-bind ladder waiting out its backoff — must not
+   * open the camera after it, or this instance takes back what it has just
+   * given up.
+   */
+  private epoch = 0;
 
   /**
    * Delays before each arrival re-bind attempt, in order — so four attempts
@@ -683,11 +691,15 @@ export class DeviceManager {
     if (this.rebinding) return;
 
     this.rebinding = true;
+    const epoch = this.epoch;
     const total = this.arrivalBackoffMs.length;
     try {
       for (let i = 0; i < total; i++) {
         const delay = this.arrivalBackoffMs[i]!;
         if (delay > 0) await new Promise((r) => setTimeout(r, delay));
+        // The manager was shut down while we waited: the camera is no longer
+        // ours to restore. See `epoch`.
+        if (this.epoch !== epoch) return;
         // A tool call may have bound it while we waited — it got there first.
         if (this.registry.size > 0) return;
         try {
@@ -727,6 +739,7 @@ export class DeviceManager {
    * itself throw is worse than one that leaves a process for the OS to reap.
    */
   async shutdown(): Promise<void> {
+    this.epoch++;
     const close = async (h: HelperProcess | undefined): Promise<void> => {
       if (!h) return;
       try {
