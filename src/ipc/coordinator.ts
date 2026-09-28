@@ -264,6 +264,10 @@ export class Coordinator {
     }
     this.client = client;
     this.role = "client";
+    // Re-elect when the connection closes, not when we next have something to
+    // send: an idle newer build must not sit disconnected while an older one
+    // takes the endpoint and runs calls.
+    client.onClose(() => this.ownerLost(client));
     const owner =
       peer.kind === "peer"
         ? `owner-pid=${peer.pid} owner-build=${buildLabel(peer.build)}`
@@ -271,13 +275,17 @@ export class Coordinator {
     this.log(`obsbot-mcp: ipc role=client ${owner}`);
   }
 
-  /** The owner has gone. Re-elect — after the grace period if it stepped down for someone. */
+  /**
+   * The owner has gone. Re-elect — after the grace period if it stepped down
+   * for someone, so the successor binds first; after jitter alone if it simply
+   * went, so clients that all lost it at once do not stampede.
+   */
   private ownerLost(client: OwnerClient): void {
     if (this.client !== client || this.closing) return;
-    const delay = client.noticed ? this.t.stepDownGraceMs + this.jitter() : 0;
+    const delay = (client.noticed ? this.t.stepDownGraceMs : 0) + this.jitter();
     this.reset();
     void this.begin(async () => {
-      if (delay > 0) await sleep(delay);
+      await sleep(delay);
       await this.doElect();
     });
   }

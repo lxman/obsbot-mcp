@@ -120,8 +120,9 @@ describe("coordinator", () => {
     expect(b.c.roleName).toBe("client");
 
     await a.c.close(); // owner leaves
-    await sleep(50); // let the drop propagate + the pipe/socket free up
 
+    // No sleep: a call made the instant the owner is lost waits for the
+    // re-election instead of failing.
     expect(await b.c.dispatch("obsbot_wake", {})).toBe("B:obsbot_wake"); // now runs locally on b
     expect(b.c.roleName).toBe("owner");
   });
@@ -311,6 +312,100 @@ describe("coordinator", () => {
     await sleep(SETTLE_MS);
     expect(await x.c.dispatch("after", {})).toBe("B:after");
     expect(await a.c.dispatch("after", {})).toBe("B:after");
+  });
+
+  // -- when the owner goes away ------------------------------------------------
+
+  test("a client takes the endpoint when the owner exits, without a tool call being made", async () => {
+    const path = tempPath();
+    const a = instance("A", OLD, path);
+    await a.c.start();
+    const b = instance("B", OLD, path, { pid: 1002 });
+    await b.c.start();
+
+    await a.c.close();
+    await sleep(SETTLE_MS);
+
+    expect(b.c.roleName).toBe("owner");
+    expect(ran).toEqual([]);
+  });
+
+  test("if the oldest client binds first, a newer one takes over without a tool call being made", async () => {
+    const path = tempPath();
+    const a = instance("A", NEW, path, { pid: 1001 });
+    await a.c.start();
+    const o = instance("O", OLD, path, { pid: 1002 });
+    await o.c.start();
+    // M is slow to re-elect, so O holds the endpoint by the time it tries.
+    let elections = 0;
+    const m = instance("M", MID, path, {
+      pid: 1003,
+      elect: async (p) => {
+        if (++elections === 2) await sleep(50);
+        return elect(p);
+      },
+    });
+    await m.c.start();
+    expect([o.c.roleName, m.c.roleName]).toEqual(["client", "client"]);
+
+    await a.c.close();
+    await sleep(50 + SETTLE_MS * 2);
+
+    expect(m.c.roleName).toBe("owner");
+    expect(o.c.roleName).toBe("client");
+    expect(o.released()).toBe(1); // O owned it briefly, then handed it over
+    expect(m.log).toContain("obsbot-mcp: ipc takeover requested from pid 1002");
+    expect(ran).toEqual([]);
+  });
+
+  test("clients that all lose the same owner settle on exactly one of them", async () => {
+    const path = tempPath();
+    const a = instance("A", OLD, path);
+    await a.c.start();
+    const clients = [1, 2, 3, 4, 5].map((n) => instance(`C${n}`, OLD, path));
+    for (const c of clients) await c.c.start();
+
+    await a.c.close();
+    await sleep(SETTLE_MS);
+
+    const roles = clients.map((c) => c.c.roleName).sort();
+    expect(roles).toEqual(["client", "client", "client", "client", "owner"]);
+  });
+
+  test("after a handover, a bystander becomes the successor's client without making a call", async () => {
+    const path = tempPath();
+    const a = instance("A", OLD, path, { pid: 1001 });
+    await a.c.start();
+    const c = instance("C", OLD, path, { pid: 1002 });
+    await c.c.start();
+
+    const b = instance("B", NEW, path, { pid: 1003 });
+    await b.c.start();
+    await sleep(SETTLE_MS);
+
+    expect(b.c.roleName).toBe("owner");
+    expect(c.c.roleName).toBe("client");
+    expect(c.log.at(-1)).toBe(
+      "obsbot-mcp: ipc role=client owner-pid=1003 owner-build=0.7.0/2026-09-25T01:33:20Z/cccccccc",
+    );
+    expect(ran).toEqual([]);
+  });
+
+  test("a coordinator that has been closed does not take the endpoint back", async () => {
+    const path = tempPath();
+    const a = instance("A", OLD, path);
+    await a.c.start();
+    const b = instance("B", OLD, path);
+    await b.c.start();
+
+    await b.c.close();
+    await a.c.close();
+    await sleep(SETTLE_MS);
+
+    expect(b.c.roleName).toBe("none");
+    const next = await elect(path);
+    cleanup.push(() => void (next.role === "owner" ? next.server.close() : next.socket.destroy()));
+    expect(next.role).toBe("owner"); // nobody was holding it
   });
 
   // -- calls caught in the middle --------------------------------------------
