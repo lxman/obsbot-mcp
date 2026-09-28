@@ -559,8 +559,8 @@ Claude Code keeps the log under `~/Library/Caches/claude-cli-nodejs/<project>/mc
 macOS.
 
 ```bash
-# Linux / macOS — every server process, with its start time
-pgrep -af "obsbot.*dist/index.js"
+# Linux / macOS — every server process, with when it started
+ps -o pid,lstart,command -p $(pgrep -f "obsbot.*dist/index.js" | paste -sd, -)
 ```
 
 ```powershell

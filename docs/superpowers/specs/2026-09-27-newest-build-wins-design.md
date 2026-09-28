@@ -178,8 +178,10 @@ Owner **O**, older. Requester **R**, newer, connected as a client.
 4. **O releases everything that holds the camera:** `capture.stopAll()`, then
    `await mgr.shutdown()`. This is the cleanup the process already does on exit, without the exit.
    On macOS the control open is exclusive, so R could not open the camera until this completes.
-5. O sends `stepping-down` to every client, then closes `OwnerServer`: client sockets are
-   destroyed and the listener is closed.
+5. O closes the listener, which frees the endpoint, then sends `stepping-down` to every client
+   and **ends** their connections. Ended, not destroyed: destroying a socket discards what is
+   still buffered, which would lose the notice and could truncate the reply to the call that
+   has just finished.
 6. **R sees its socket close and binds immediately.** It is now the owner.
 7. Every other client, and O itself, waits `STEP_DOWN_GRACE_MS` plus jitter, then re-elects. They
    find R's endpoint, connect, exchange hellos, and forward.
@@ -216,7 +218,7 @@ instances can never each believe they should take over from the other.
 
 | Name | Value | Why |
 |---|---|---|
-| `HELLO_TIMEOUT_MS` | 2000 | Bounds startup when the owner is a busy legacy instance. |
+| `HELLO_TIMEOUT_MS` | 2000 | Bounds startup when the owner is a busy legacy instance. Also bounds the takeover request: no answer in this time is a refusal. |
 | `STEP_DOWN_GRACE_MS` | 500 | Long enough for R to bind before anyone else tries. |
 | `ELECTION_JITTER_MS` | 0–100, uniform | Spreads clients that all lost the same owner at once. |
 | `STEP_DOWN_TIMEOUT_MS` | 15000 | Longest R waits for O's running call and release. |
@@ -245,6 +247,23 @@ takes over. The endpoint settles on the newest live build without anyone making 
 
 An instance that re-elects and binds does not open the camera. Binding the endpoint and binding a
 camera are separate, and the camera is still opened lazily by the first tool call that needs it.
+
+### 8.1 A stale endpoint, found by several at once
+
+An owner that is killed outright leaves its socket file behind (POSIX only). Clearing it means
+unlinking it, and unlink cannot tell a stale file from a live one. Because clients now re-elect
+together, several find the same stale file in the same moment. If each unlinks and binds, the
+second unlinks the first one's **live** socket: two owners, and the first never finds out. Four
+simultaneous callers produced four owners.
+
+So on POSIX the unlink, and every bind, happens under a lock file (`<endpoint>.lock`, taken with
+an exclusive create): connect; if nobody answers, take the lock and connect again; if still
+nobody, unlink and bind. A lock older than five seconds was left by a holder that died and is
+cleared. Instances that predate this do not take the lock, so the protection is complete only
+once they are gone.
+
+On Windows nothing is stale and nothing is unlinked. A name that is taken and then refuses the
+connection means the owner went away in between, and is retried.
 
 ## 9. When the newer build cannot take over
 
@@ -320,19 +339,25 @@ endpoint, and if not, which process and build does.
 | `package.json` | `postbuild` script. |
 | `.github/workflows/release.yml` | Stamp step after the helpers are staged; pack-list check for the stamp. |
 | `src/ipc/build-id.ts` | New. `BuildId`, `loadBuildId()`, `compareBuilds()`. |
-| `src/ipc/rendezvous.ts` | `rendezvousPath()` reads `OBSBOT_IPC_NAME` and validates it. |
+| `src/ipc/rendezvous.ts` | `rendezvousPath()` reads `OBSBOT_IPC_NAME` and validates it. `elect()` clears a stale endpoint, and binds, under a lock file (§8.1). |
+| `src/ipc/gate.ts` | New. The single-camera lock, with a way to close it. |
+| `src/ipc/protocol.ts` | The control messages of §6. |
 | `src/ipc/owner.ts` | Answers control messages outside the queue. Sends the notice. Leaves calls rejected by the closed gate unanswered. |
 | `src/ipc/client.ts` | `hello()` and `takeover()`. Surfaces the notice to the coordinator. |
 | `src/ipc/coordinator.ts` | Handshake on every connect, the takeover loop, stepping down, re-election on close with the delays in §8, the refusal in §9. Owns the call gate. |
 | `src/mcp/server.ts` | Loads the build identity before the election, passes the coordinator its identity, a logger, and a `release` function that does §7 step 4. |
 | `IPC-DESIGN.md` | The "first instance owns" rule is replaced by a pointer to this document. |
 
-`Coordinator`'s second constructor parameter changes from a path to an options object
-(`path`, `build`, `release`, `log`). The existing coordinator tests pass a path and are updated.
+`Coordinator`'s second constructor parameter changes from a path to an options object: `path`,
+`build`, `release`, `log`, and three that exist for tests — `pid` (instances in one process share
+a real pid), `timing` (tests cannot wait real delays) and `elect` (who binds first is otherwise a
+race). The existing coordinator tests pass a path and are updated.
 
-The single-camera lock moves from a free function in `coordinator.ts` into the coordinator,
-because stepping down needs two things the current `serialize()` cannot do: refuse calls that
-have not started, and report when the running one has finished.
+The single-camera lock moves out of `coordinator.ts` into `src/ipc/gate.ts`, owned by the
+coordinator, because stepping down needs two things the old `serialize()` could not do: refuse
+calls that have not started, and report when the running one has finished.
+
+The coordinator, not `server.ts`, logs the role. It is no longer fixed at startup.
 
 ## 13. Testing
 
@@ -372,6 +397,14 @@ and nobody else. It asserts the role lines of §11 and that a
 call made through the older instance is answered by the newer one. The only tool it calls is
 `obsbot_tail2_devices`, which reads an in-memory registry and touches no hardware.
 
+**Who answered is checked, not only that someone did.** Each server is pointed at a different
+pretend Tail 2 on localhost, so the registry a reply came from names the process that ran the
+call. `--sabotage` breaks the older copy so that it runs forwarded calls itself; the test must
+then fail, and does.
+
+It then kills the owner with `SIGKILL`, which leaves a stale socket file, and requires the
+survivor to take the endpoint without a tool call being made.
+
 Copies inside the repository resolve `node_modules` and `"type": "module"` by walking up to the
 repository root, so they run without an install of their own.
 
@@ -408,6 +441,14 @@ not disturbed.
 - **Camera state in the old owner is not carried over.** The new owner binds on its first call,
   as a freshly started server does.
 - **A hand-copied helper is not stamped** (§5.2).
+- **Nothing here has been run on Windows.** A named pipe's name stays taken while any instance
+  of it is open, which may include the old owner's connections to other clients, so a successor
+  may fail to bind straight after a handover. It would then settle as a client and try again on
+  its next call. CI runs the suite on Linux only.
+- **Only a stamped build counts as newer.** A bare `tsc`, or a helper copied into place by hand,
+  leaves new code under an old stamp, and two instances with different code then compare as the
+  same build. `test/stamp-build.test.ts` fails on the mismatch; the server does not check it at
+  startup.
 - **Build time comes from the clock of the machine that built it.** A release built by CI and a
   local build are ordered by two different clocks. An error of minutes does not matter; a CI clock
   wrong by days would make a release outrank later local builds.
