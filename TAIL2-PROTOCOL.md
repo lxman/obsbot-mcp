@@ -352,8 +352,12 @@ Device with:
 - **MI_04**: "USB Serial Device (COM3)" — gimbal controller telemetry drain
 
 VID/PID is **`0x3564`/`0xFEFC`** in both modes (same composite PID, different
-interface sets). Added to `OBSBOT_MODEL_PIDS` in `src/device/manager.ts` and
-the existing native helper enumerates/binds it normally.
+interface sets). The macOS helper's `OBSBOT_MODEL_PIDS` lists it, so the helper
+can enumerate and open the camera; neither sends it anything. It is deliberately
+**not** in `OBSBOT_MODEL_PIDS` in `src/device/manager.ts`: that table admits a
+camera to the Tiny 2 bind path, which identifies it by writing a V3 frame
+(`UG_GET_SN`) to vendor selector 2. The `obsbot_*` Tiny 2 tools therefore never
+open or write to a Tail 2, and `obsbot_devices` does not list one.
 
 ### Standard UVC controls — Windows, 2026-09-26
 

@@ -51,10 +51,14 @@
 
 // USB vendor ID 0x3564 is registered to Remo Inc. — OBSBOT's manufacturer. Remo
 // ships non-OBSBOT devices under this VID, so gate on VID + a known model PID,
-// never VID alone. Mirror OBSBOT_MODEL_PIDS with OBSBOT_MODEL_PIDS in
-// src/device/manager.ts when a new OBSBOT camera model is verified on hardware.
+// never VID alone.
+//
+// This table decides what the helper can enumerate and open, neither of which
+// sends the camera anything. It is NOT a mirror of OBSBOT_MODEL_PIDS in
+// src/device/manager.ts: that one lists the models the Tiny 2 bind path may
+// write a V3 vendor frame to, and the Tail 2 is deliberately absent from it.
 static const uint16_t REMO_VID = 0x3564;
-static const uint16_t OBSBOT_MODEL_PIDS[] = { 0xFEF8 /* Tiny 2 */ };
+static const uint16_t OBSBOT_MODEL_PIDS[] = { 0xFEF8 /* Tiny 2 */, 0xFEFC /* Tail 2 */ };
 static const size_t OBSBOT_MODEL_COUNT =
     sizeof(OBSBOT_MODEL_PIDS) / sizeof(OBSBOT_MODEL_PIDS[0]);
 

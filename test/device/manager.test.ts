@@ -52,6 +52,13 @@ interface FakeCameraSpec {
    * camera enumerates and opens, but cannot be identified.
    */
   mute?: boolean;
+  /** USB product ID the helper reports. Defaults to the Tiny 2's 0xfef8. */
+  pid?: number;
+  /**
+   * The helper reports no USB vid/pid for this device, as the Linux helper
+   * does for every device (its /dev/videoN paths carry no USB identity).
+   */
+  noUsbId?: boolean;
 }
 
 function fakeHelperFactory(cameras: FakeCameraSpec[]) {
@@ -73,8 +80,8 @@ function fakeHelperFactory(cameras: FakeCameraSpec[]) {
           locationId: c.locationId,
           // Real OBSBOT hardware reports Remo's VID + the model PID; a `virtual`
           // spec models a branded software source that reports neither.
-          vid: c.virtual ? undefined : 0x3564,
-          pid: c.virtual ? undefined : 0xfef8,
+          vid: c.virtual || c.noUsbId ? undefined : 0x3564,
+          pid: c.virtual || c.noUsbId ? undefined : (c.pid ?? 0xfef8),
         })),
       ),
       open: vi.fn(async (path: string) => {
@@ -262,6 +269,116 @@ test("get() ignores a name-matching virtual camera and binds the real hardware",
   } finally {
     Object.defineProperty(process, "platform", { value: orig, configurable: true });
   }
+});
+
+// ---------------------------------------------------------------------------
+// The Tail 2 must never be touched by the Tiny 2 bind path.
+//
+// bind() and listCameras() identify a camera by sending it UG_GET_SN — a Tiny 2
+// V3 frame, written to vendor selector 2. The Tail 2 carries the same vendor
+// Extension Unit GUID but does not speak V3 (TAIL2-PROTOCOL.md §11), so that
+// write is an untested vendor command landing on a $1300 camera. These tests
+// pin what the manager asks the helper to do, not just what it returns: a
+// Tail 2 on the bus must produce no open and no XU write at all.
+// ---------------------------------------------------------------------------
+
+/** A fake fleet that records what every helper the manager spawned was asked to do. */
+function recordingFleet(cameras: FakeCameraSpec[]) {
+  const make = fakeHelperFactory(cameras);
+  const spawned: HelperProcess[] = [];
+  return {
+    factory: async (): Promise<HelperProcess> => {
+      const h = await make();
+      spawned.push(h);
+      return h;
+    },
+    openedPaths: (): string[] =>
+      spawned.flatMap((h) => vi.mocked(h.open).mock.calls.map(([path]) => path)),
+    xuWriteCount: (): number =>
+      spawned.reduce((n, h) => n + vi.mocked(h.xuSet).mock.calls.length, 0),
+  };
+}
+
+async function onPlatform<T>(platform: NodeJS.Platform, run: () => Promise<T>): Promise<T> {
+  const orig = process.platform;
+  Object.defineProperty(process, "platform", { value: platform, configurable: true });
+  try {
+    return await run();
+  } finally {
+    Object.defineProperty(process, "platform", { value: orig, configurable: true });
+  }
+}
+
+const TAIL2_USB = { serial: "TAIL", name: "OBSBOT Tail 2", pid: 0xfefc, locationId: 9 };
+
+for (const platform of ["win32", "darwin"] as const) {
+  test(`get() never opens or writes to a Tail 2 (${platform}, vid/pid gate)`, async () => {
+    await onPlatform(platform, async () => {
+      const fleet = recordingFleet([TAIL2_USB]);
+      const mgr = new DeviceManager(fleet.factory);
+      await expect(mgr.get()).rejects.toThrow();
+      expect(fleet.openedPaths()).toEqual([]);
+      expect(fleet.xuWriteCount()).toBe(0);
+    });
+  });
+
+  test(`listCameras() never opens or writes to a Tail 2 (${platform}, vid/pid gate)`, async () => {
+    await onPlatform(platform, async () => {
+      const fleet = recordingFleet([TAIL2_USB]);
+      const mgr = new DeviceManager(fleet.factory);
+      expect(await mgr.listCameras()).toEqual([]);
+      expect(fleet.openedPaths()).toEqual([]);
+      expect(fleet.xuWriteCount()).toBe(0);
+    });
+  });
+}
+
+// Linux has no vid/pid to gate on, so the name is the only identity. Both
+// spellings occur in the camera's own USB strings ("OBSBOT Tail 2 Camera",
+// "OBSBOT Tail2 Audio").
+for (const name of ["OBSBOT Tail 2", "OBSBOT Tail 2: OBSBOT Tail 2 Camera", "OBSBOT Tail2 Camera"]) {
+  test(`get() never opens or writes to "${name}" (linux, name gate)`, async () => {
+    await onPlatform("linux", async () => {
+      const fleet = recordingFleet([{ serial: "TAIL", name, noUsbId: true }]);
+      const mgr = new DeviceManager(fleet.factory);
+      await expect(mgr.get()).rejects.toThrow();
+      expect(fleet.openedPaths()).toEqual([]);
+      expect(fleet.xuWriteCount()).toBe(0);
+    });
+  });
+
+  test(`listCameras() never opens or writes to "${name}" (linux, name gate)`, async () => {
+    await onPlatform("linux", async () => {
+      const fleet = recordingFleet([{ serial: "TAIL", name, noUsbId: true }]);
+      const mgr = new DeviceManager(fleet.factory);
+      expect(await mgr.listCameras()).toEqual([]);
+      expect(fleet.openedPaths()).toEqual([]);
+      expect(fleet.xuWriteCount()).toBe(0);
+    });
+  });
+}
+
+test("get() binds the Tiny 2 and leaves a Tail 2 on the same bus untouched", async () => {
+  // Without the gate the Tail 2 answers the fake's serial query too, so a
+  // no-selector bind sees two cameras and refuses as ambiguous.
+  await onPlatform("darwin", async () => {
+    const fleet = recordingFleet([{ serial: "AAA", locationId: 1 }, TAIL2_USB]);
+    const mgr = new DeviceManager(fleet.factory);
+    const t = await mgr.get();
+    expect(await t.readSerial()).toBe("AAA");
+    expect(fleet.openedPaths()).toEqual(["/dev/fake-AAA"]);
+  });
+});
+
+test("get() still binds a Tiny 2 by name on linux", async () => {
+  // Guards the name gate's other side: excluding the Tail 2 must not exclude
+  // the camera the fallback exists for.
+  await onPlatform("linux", async () => {
+    const fleet = recordingFleet([{ serial: "AAA", name: "OBSBOT Tiny 2", noUsbId: true }]);
+    const mgr = new DeviceManager(fleet.factory);
+    const t = await mgr.get();
+    expect(await t.readSerial()).toBe("AAA");
+  });
 });
 
 test("listCameras() reports available cameras with their serial", async () => {
