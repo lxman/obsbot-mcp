@@ -48,6 +48,81 @@ interface Instance {
   released: () => number;
 }
 
+/** What an owner that is not a Coordinator does with each kind of message. */
+interface Script {
+  /** Reply to a hello. Default: what a 0.7.0 owner says to any body it takes for a tool call. */
+  hello?: (send: (result: unknown) => void, fail: (error: string) => void) => void;
+  /** Reply to a takeover request. `drop` closes the requester's connection. */
+  takeover?: (send: (result: unknown) => void, drop: () => void) => void;
+}
+
+/**
+ * A raw owner on `path`, for standing in for instances a Coordinator cannot
+ * imitate: one that predates the handshake, one that grants a takeover and
+ * never lets go, one that refuses. It counts what reaches it.
+ */
+async function scriptedOwner(
+  path: string,
+  script: Script = {},
+): Promise<{ toolCalls: string[]; takeovers: () => number; close: () => Promise<void> }> {
+  const server = net.createServer();
+  const socks = new Set<net.Socket>();
+  const toolCalls: string[] = [];
+  let takeovers = 0;
+  server.on("connection", (sock) => {
+    socks.add(sock);
+    sock.on("close", () => socks.delete(sock));
+    sock.on("error", () => socks.delete(sock));
+    const dec = new FrameDecoder();
+    sock.on("data", (chunk: Buffer) => {
+      for (const m of dec.push(chunk)) {
+        const body = m.body as { ipc?: string; tool?: string };
+        const send = (result: unknown): void => {
+          sock.write(encodeFrame({ id: m.id, body: { ok: true, result } }));
+        };
+        const fail = (error: string): void => {
+          sock.write(encodeFrame({ id: m.id, body: { ok: false, error } }));
+        };
+        if (body.ipc === "hello" && script.hello) {
+          script.hello(send, fail);
+        } else if (body.ipc === "takeover" && script.takeover) {
+          takeovers++;
+          script.takeover(send, () => sock.destroy());
+        } else if (body.tool !== undefined) {
+          toolCalls.push(body.tool);
+          send(`scripted:${body.tool}`);
+        } else {
+          // Exactly what 0.7.0 does with a body it cannot read as a tool call.
+          fail(`unknown tool: ${body.tool}`);
+        }
+      }
+    });
+  });
+  await new Promise<void>((r) => server.listen(path, () => r()));
+  return {
+    toolCalls,
+    takeovers: () => takeovers,
+    close: () =>
+      new Promise<void>((r) => {
+        for (const s of socks) s.destroy();
+        server.close(() => r());
+      }),
+  };
+}
+
+const olderPeer =
+  (pid: number) =>
+  (send: (result: unknown) => void): void =>
+    send({ ipc: "hello", build: OLD, pid });
+
+const REFUSAL = (path: string): string =>
+  "obsbot-mcp: an older instance owns the camera endpoint and cannot hand it over. " +
+  "This instance will not run calls on older code. " +
+  `Stop the process listening on ${path}; the next call will take over.`;
+
+const CANNOT_HAND_OVER =
+  "obsbot-mcp: ipc owner is older and cannot hand over; tool calls will fail until it exits";
+
 describe("coordinator", () => {
   const cleanup: Array<() => void | Promise<void>> = [];
   /** `<instance>:<tool>` for every call, in the order they STARTED, across all instances. */
@@ -406,6 +481,153 @@ describe("coordinator", () => {
     const next = await elect(path);
     cleanup.push(() => void (next.role === "owner" ? next.server.close() : next.socket.destroy()));
     expect(next.role).toBe("owner"); // nobody was holding it
+  });
+
+  // -- when the newer build cannot take over -----------------------------------
+
+  test("a client of an owner that predates the handshake refuses to run calls on it", async () => {
+    const path = tempPath();
+    const legacy = await scriptedOwner(path);
+    cleanup.push(() => legacy.close());
+    const b = instance("B", NEW, path);
+    await b.c.start();
+
+    expect(b.c.roleName).toBe("client");
+    expect(b.log).toEqual([
+      "obsbot-mcp: ipc role=client owner-pid=unknown owner-build=legacy",
+      CANNOT_HAND_OVER,
+    ]);
+    await expect(b.c.dispatch("obsbot_status", {})).rejects.toThrow(REFUSAL(path));
+    expect(legacy.toolCalls).toEqual([]); // nothing was forwarded
+    expect(ran).toEqual([]); // and nothing ran here either
+  });
+
+  test("an unstamped build refuses a legacy owner too", async () => {
+    const path = tempPath();
+    const legacy = await scriptedOwner(path);
+    cleanup.push(() => legacy.close());
+    const b = new Coordinator(async () => "B", { path, timing: FAST });
+    cleanup.push(() => b.close());
+    await b.start();
+
+    await expect(b.dispatch("obsbot_status", {})).rejects.toThrow(REFUSAL(path));
+    expect(legacy.toolCalls).toEqual([]);
+  });
+
+  test("once the legacy owner exits, the next call takes over and succeeds", async () => {
+    const path = tempPath();
+    const legacy = await scriptedOwner(path);
+    const b = instance("B", NEW, path);
+    await b.c.start();
+    await expect(b.c.dispatch("obsbot_status", {})).rejects.toThrow(REFUSAL(path));
+
+    await legacy.close();
+
+    expect(await b.c.dispatch("obsbot_status", {})).toBe("B:obsbot_status");
+    expect(b.c.roleName).toBe("owner");
+  });
+
+  test("an owner that does not answer the hello in time is refused the same way", async () => {
+    const path = tempPath();
+    const silent = await scriptedOwner(path, { hello: () => {} });
+    cleanup.push(() => silent.close());
+    const b = instance("B", NEW, path, { timing: { helloTimeoutMs: 40 } });
+    await b.c.start();
+
+    expect(b.log).toContain(CANNOT_HAND_OVER);
+    await expect(b.c.dispatch("obsbot_status", {})).rejects.toThrow(REFUSAL(path));
+    expect(silent.toolCalls).toEqual([]);
+  });
+
+  test("an owner that grants a takeover and never lets go is refused after stepDownTimeoutMs", async () => {
+    const path = tempPath();
+    const stuck = await scriptedOwner(path, {
+      hello: olderPeer(2001),
+      takeover: (send) => send({ ipc: "takeover", granted: true }), // …and then nothing
+    });
+    cleanup.push(() => stuck.close());
+    const b = instance("B", NEW, path, { timing: { stepDownTimeoutMs: 80 } });
+    const started = Date.now();
+    await b.c.start();
+
+    expect(Date.now() - started).toBeGreaterThanOrEqual(75);
+    expect(b.c.roleName).toBe("client");
+    expect(b.log).toContain(CANNOT_HAND_OVER);
+    expect(stuck.takeovers()).toBe(1);
+
+    // Each call asks once more before giving up.
+    await expect(b.c.dispatch("obsbot_status", {})).rejects.toThrow(REFUSAL(path));
+    expect(stuck.takeovers()).toBe(2);
+    expect(stuck.toolCalls).toEqual([]);
+  });
+
+  test("an owner that refuses the takeover is not used", async () => {
+    const path = tempPath();
+    const stubborn = await scriptedOwner(path, {
+      hello: olderPeer(2001),
+      takeover: (send) => send({ ipc: "takeover", granted: false, reason: "not-newer" }),
+    });
+    cleanup.push(() => stubborn.close());
+    const b = instance("B", NEW, path);
+    await b.c.start();
+
+    expect(b.log).toContain(CANNOT_HAND_OVER);
+    await expect(b.c.dispatch("obsbot_status", {})).rejects.toThrow(REFUSAL(path));
+    expect(stubborn.toolCalls).toEqual([]);
+  });
+
+  test("losing the bind maxTakeoverRounds times settles as a client that refuses", async () => {
+    const path = tempPath();
+    // Grants every takeover, drops the requester, and is still listening when
+    // the requester comes back — an older instance winning the bind every time.
+    const squatter = await scriptedOwner(path, {
+      hello: olderPeer(2001),
+      takeover: (send, drop) => {
+        send({ ipc: "takeover", granted: true });
+        setTimeout(drop, 5);
+      },
+    });
+    cleanup.push(() => squatter.close());
+    const b = instance("B", NEW, path);
+    await b.c.start();
+
+    expect(squatter.takeovers()).toBe(FAST.maxTakeoverRounds);
+    expect(b.c.roleName).toBe("client");
+    expect(b.log.at(-1)).toBe(CANNOT_HAND_OVER);
+    await expect(b.c.dispatch("obsbot_status", {})).rejects.toThrow(REFUSAL(path));
+    expect(squatter.toolCalls).toEqual([]);
+  });
+
+  test("an older client is still served by a newer owner it cannot take over from", async () => {
+    // The refusal is about running on OLDER code. An old client of a new owner
+    // is the normal case and must keep working.
+    const path = tempPath();
+    const a = instance("A", NEW, path);
+    await a.c.start();
+    const b = instance("B", OLD, path);
+    await b.c.start();
+
+    expect(b.log).not.toContain(CANNOT_HAND_OVER);
+    expect(await b.c.dispatch("obsbot_status", {})).toBe("A:obsbot_status");
+  });
+
+  test("a client that predates the handshake is served with no hello", async () => {
+    const path = tempPath();
+    const a = instance("A", NEW, path);
+    await a.c.start();
+
+    const sock = net.connect(path);
+    await new Promise<void>((r) => sock.once("connect", () => r()));
+    cleanup.push(() => void sock.destroy());
+    const dec = new FrameDecoder();
+    const reply = new Promise<unknown>((resolve) =>
+      sock.on("data", (chunk: Buffer) => {
+        for (const m of dec.push(chunk)) resolve(m);
+      }),
+    );
+    sock.write(encodeFrame({ id: 1, body: { tool: "obsbot_status", args: {} } }));
+
+    expect(await reply).toEqual({ id: 1, body: { ok: true, result: "A:obsbot_status" } });
   });
 
   // -- calls caught in the middle --------------------------------------------

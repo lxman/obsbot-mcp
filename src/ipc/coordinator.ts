@@ -77,6 +77,8 @@ export class Coordinator {
   private client?: OwnerClient;
   private ownerServer?: OwnerServer;
   private steppingDown = false;
+  /** Client of an owner that is older than us and could not be made to hand over. */
+  private blocked = false;
   private closing = false;
   /** A role change in progress — an election, or stepping down. Never rejects. */
   private pending?: Promise<void>;
@@ -118,6 +120,13 @@ export class Coordinator {
     // Twice at most: a call that lost its owner is retried exactly once.
     for (let attempt = 0; attempt < 2; attempt++) {
       await this.ensureRole();
+      if (this.role === "client" && this.blocked) {
+        await this.tryAgain();
+        // Still an older owner, still unable to hand over: do not run the call
+        // on its code. A call that succeeds on code the caller did not expect
+        // is worse than one that fails and says why.
+        if (this.role === "client" && this.blocked) throw new Error(this.blockedMessage());
+      }
       const client = this.client;
       try {
         return this.role === "owner"
@@ -157,6 +166,7 @@ export class Coordinator {
     this.client = undefined;
     this.ownerServer = undefined;
     this.steppingDown = false;
+    this.blocked = false;
   }
 
   private jitter(): number {
@@ -213,13 +223,11 @@ export class Coordinator {
         continue;
       }
 
-      if (
-        peer.kind !== "peer" ||
-        compareBuilds(this.build, peer.build) <= 0 ||
-        takeovers >= this.t.maxTakeoverRounds
-      ) {
-        return this.becomeClient(client, peer);
-      }
+      // An owner that cannot take part in a handover is older than anything that can.
+      if (peer.kind !== "peer") return this.becomeClient(client, peer, true);
+      if (compareBuilds(this.build, peer.build) <= 0) return this.becomeClient(client, peer, false);
+      // From here on the owner is older than us, so settling as its client means refusing to use it.
+      if (takeovers >= this.t.maxTakeoverRounds) return this.becomeClient(client, peer, true);
 
       takeovers++;
       this.log(`obsbot-mcp: ipc takeover requested from pid ${peer.pid}`);
@@ -230,7 +238,7 @@ export class Coordinator {
         granted = true; // closed before it could answer: the endpoint is free either way
       }
       if (!granted || !(await client.waitClosed(this.t.stepDownTimeoutMs))) {
-        return this.becomeClient(client, peer);
+        return this.becomeClient(client, peer, true);
       }
       // The old owner has let go. Go round again and bind.
     }
@@ -257,13 +265,14 @@ export class Coordinator {
     this.log("obsbot-mcp: ipc role=owner");
   }
 
-  private becomeClient(client: OwnerClient, peer: Peer): void {
+  private becomeClient(client: OwnerClient, peer: Peer, blocked: boolean): void {
     if (this.closing) {
       client.close();
       return;
     }
     this.client = client;
     this.role = "client";
+    this.blocked = blocked;
     // Re-elect when the connection closes, not when we next have something to
     // send: an idle newer build must not sit disconnected while an older one
     // takes the endpoint and runs calls.
@@ -273,6 +282,27 @@ export class Coordinator {
         ? `owner-pid=${peer.pid} owner-build=${buildLabel(peer.build)}`
         : "owner-pid=unknown owner-build=legacy";
     this.log(`obsbot-mcp: ipc role=client ${owner}`);
+    if (blocked) {
+      this.log(
+        "obsbot-mcp: ipc owner is older and cannot hand over; tool calls will fail until it exits",
+      );
+    }
+  }
+
+  /** The owner is older and still there. Try once more: a fresh connection, hello, takeover. */
+  private async tryAgain(): Promise<void> {
+    const client = this.client;
+    this.reset(); // first, so closing our own connection is not mistaken for losing the owner
+    client?.close();
+    await this.ensureRole();
+  }
+
+  private blockedMessage(): string {
+    return (
+      "obsbot-mcp: an older instance owns the camera endpoint and cannot hand it over. " +
+      "This instance will not run calls on older code. " +
+      `Stop the process listening on ${this.path}; the next call will take over.`
+    );
   }
 
   /**
