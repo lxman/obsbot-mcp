@@ -30,6 +30,7 @@
 
 import { spawn } from "node:child_process";
 import { cpSync, existsSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import http from "node:http";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -41,9 +42,36 @@ function endpointFor(ipcName) {
   return process.platform === "win32" ? `\\\\.\\pipe\\${ipcName}` : `/tmp/${ipcName}.sock`;
 }
 
-function launch(label, ipcName, entry = DIST) {
+/**
+ * A pretend Tail 2 on localhost: answers the one request the registry makes
+ * when it is told about a host. Each server is pointed at a different one, so
+ * the registry a reply came from names the process that ran the call. It is a
+ * few lines of HTTP and has nothing to do with any real camera.
+ */
+function pretendTail2(mac) {
+  const server = http.createServer((req, res) => {
+    if (req.url === "/camera/sdk/device_info") {
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({ mac, device_name: `pretend ${mac}` }));
+    } else {
+      res.statusCode = 404;
+      res.end();
+    }
+  });
+  return new Promise((resolve) =>
+    server.listen(0, "127.0.0.1", () =>
+      resolve({ mac, host: `127.0.0.1:${server.address().port}`, close: () => server.close() }),
+    ),
+  );
+}
+
+function launch(label, ipcName, entry = DIST, tail2 = undefined) {
   const proc = spawn(process.execPath, [entry, "--debug"], {
-    env: { ...process.env, OBSBOT_IPC_NAME: ipcName },
+    env: {
+      ...process.env,
+      OBSBOT_IPC_NAME: ipcName,
+      ...(tail2 ? { OBSBOT_TAIL2_HOSTS: tail2.host } : {}),
+    },
     stdio: ["pipe", "pipe", "pipe"],
   });
   const lines = [];
@@ -141,6 +169,27 @@ function launch(label, ipcName, entry = DIST) {
       const text = resp?.result?.content?.[0]?.text ?? "";
       return { raw: resp, text };
     },
+    /** Call through this instance until the reply lists `expected`'s camera; fail at once on another's. */
+    async answeredBy(expected, others, ms = 5000) {
+      const deadline = Date.now() + ms;
+      for (;;) {
+        const resp = await send("tools/call", { name: "obsbot_tail2_devices", arguments: {} });
+        const text = resp?.result?.content?.[0]?.text ?? JSON.stringify(resp);
+        for (const o of others) {
+          if (text.includes(o.mac)) {
+            throw new Error(
+              `a call through ${label} was run by the instance that owns ${o.mac}, ` +
+                `not the one that owns ${expected.mac}: ${text}`,
+            );
+          }
+        }
+        if (text.includes(expected.mac)) return text;
+        if (Date.now() > deadline) {
+          throw new Error(`a call through ${label} never listed ${expected.mac}: ${text}`);
+        }
+        await sleep(100);
+      }
+    },
     kill: () => proc.kill(),
   };
 }
@@ -223,12 +272,14 @@ async function handover() {
   // Inside the repository, so the copies resolve node_modules and
   // "type": "module" by walking up to the root. artifacts/ is already ignored.
   const runDir = join(repoRoot, "artifacts", "ipc-builds", `hw-${process.pid}`);
-  let older, newer;
+  let older, newer, olderCam, newerCam;
   try {
     const olderEntry = stagedBuild(runDir, "older", 1790100000000, "a");
     const newerEntry = stagedBuild(runDir, "newer", 1790300000000, "c");
+    olderCam = await pretendTail2("02:00:00:00:00:0a");
+    newerCam = await pretendTail2("02:00:00:00:00:0c");
 
-    older = launch("older", ipcName, olderEntry);
+    older = launch("older", ipcName, olderEntry, olderCam);
     await older.sees(/ipc role=owner/);
     await older.handshake();
     const before = await older.status(); // the older build now has the camera open
@@ -237,11 +288,15 @@ async function handover() {
       throw new Error(`the older build could not read the camera: ${before.text}`);
     }
 
-    newer = launch("newer", ipcName, newerEntry);
+    newer = launch("newer", ipcName, newerEntry, newerCam);
     await newer.sees(/ipc role=owner/);
     await older.sees(new RegExp(`ipc stepping down for pid ${newer.pid}$`));
     await older.sees(new RegExp(`ipc role=client owner-pid=${newer.pid} `));
     await newer.handshake();
+
+    // WHO answers, before what they answer: a reply through the older
+    // instance must come from the newer one's registry.
+    await older.answeredBy(newerCam, [olderCam]);
 
     const viaNewer = await newer.status();
     const viaOlder = await older.status(); // forwarded to the newer build
@@ -264,6 +319,8 @@ async function handover() {
   } finally {
     older?.kill();
     newer?.kill();
+    olderCam?.close();
+    newerCam?.close();
     rmSync(runDir, { recursive: true, force: true });
     freeEndpoint(ipcName);
   }
