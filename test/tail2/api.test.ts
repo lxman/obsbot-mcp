@@ -33,6 +33,7 @@ interface FakeState {
   recording: "on" | "off";
   focusMode: "afc" | "afs" | "mf";
   focusPosition: number;
+  focusWindow: { x: number; y: number };
   exposureMode: "manual" | "auto";
   exposureAutoMode: "global" | "face";
   evbias: number;
@@ -72,6 +73,7 @@ function makeFakeTail2(): Promise<{ api: Tail2Api; state: FakeState; close: () =
     recording: "off",
     focusMode: "afc",
     focusPosition: 40,
+    focusWindow: { x: 0.452, y: 0.616 },
     exposureMode: "auto",
     exposureAutoMode: "global",
     evbias: 0,
@@ -309,6 +311,22 @@ function makeFakeTail2(): Promise<{ api: Tail2Api; state: FakeState; close: () =
     )
   )
     return;
+  if (req.method === "GET" && url === `${p}/image/af/windowcenter`) {
+    return json(res, 200, { x: state.focusWindow.x, y: state.focusWindow.y });
+  }
+  if (req.method === "PUT" && url === `${p}/image/af/windowcenter`) {
+    if (state.focusMode === "mf") return json(res, 500, {});
+    const b = await readBody(req);
+    state.focusWindow = { x: b.x as number, y: b.y as number };
+    return json(res, 200, { code: 200, err_idx: 0 });
+  }
+  if (req.method === "POST" && url === `${p}/ai/workmode/normaltrack/targetselect`) {
+    const b = await readBody(req);
+    if (typeof b.x !== "number" || typeof b.y !== "number") return json(res, 400, {});
+    // Measured: a tap engages single-human tracking when a subject is there.
+    state.aiMode = "humanTrackingSingleMode";
+    return json(res, 200, { code: 200, err_idx: 0 });
+  }
   if (await pair(`${p}/image/exposure/mode`, "mode", () => state.exposureMode, (v) => (state.exposureMode = v as "auto"))) return;
   if (await pair(`${p}/image/exposure/auto/mode`, "mode", () => state.exposureAutoMode, (v) => (state.exposureAutoMode = v as "global"))) return;
   if (await pair(`${p}/image/exposure/auto/compensation`, "evbias", () => state.evbias, (v) => (state.evbias = v as number))) return;
@@ -624,6 +642,17 @@ describe("Tail2Api", () => {
     const r = await fake.api.focusPositionSet(80);
     expect(r).toMatchObject({ settled: true, position: 80 });
     await fake.api.focusModeSet("afc"); // restore
+  });
+
+  it("tap-to-focus moves the window (afc/afs gated) and tap-to-track engages tracking", async () => {
+    const w = await fake.api.focusWindowSet(0.7, 0.3);
+    expect(w).toMatchObject({ settled: true, x: 0.7, y: 0.3 });
+    await fake.api.focusModeSet("mf");
+    await expect(fake.api.focusWindowSet(0.5, 0.5)).rejects.toMatchObject({ status: 500 });
+    await fake.api.focusModeSet("afc");
+    await fake.api.aiModeSet("none");
+    await fake.api.targetSelect(0.5, 0.5);
+    expect((await fake.api.aiModeGet()).mode).toBe("humanTrackingSingleMode");
   });
 
   it("manual exposure values are gated by exposure mode", async () => {

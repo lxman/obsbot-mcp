@@ -13,13 +13,14 @@ import type { Tail2Api } from "../../src/tail2/api.js";
 
 interface FakeTail2 {
   api: Tail2Api;
-  calls: { zoom?: [number, number]; aiMode?: string; trackSpeed?: string; rollBias?: number; portrait?: boolean; recenter?: boolean; presetSave?: [number, string]; presetCall?: number; presetDelete?: number; presetRename?: [number, string]; srtEnabled?: boolean; ndiEnabled?: boolean; gimbalSpeed?: [number, number, number]; gimbalStop?: boolean; gimbalInvert?: boolean; gimbalPose?: { yaw: number; pitch: number; roll: number; ratio: number } };
+  calls: { zoom?: [number, number]; aiMode?: string; trackSpeed?: string; rollBias?: number; portrait?: boolean; recenter?: boolean; presetSave?: [number, string]; presetCall?: number; presetDelete?: number; presetRename?: [number, string]; srtEnabled?: boolean; ndiEnabled?: boolean; gimbalSpeed?: [number, number, number]; gimbalStop?: boolean; gimbalInvert?: boolean; gimbalPose?: { yaw: number; pitch: number; roll: number; ratio: number }; tapTarget?: [number, number] };
   /** State for the 2026-09-30 vendor-doc surface (record/focus/exposure/image/stream/audio). */
   st: {
     recording: boolean;
     captures: number;
     focusMode: "afc" | "afs" | "mf";
     focusPosition: number;
+    focusWindow: { x: number; y: number };
     exposureMode: "manual" | "auto";
     exposureAutoMode: "global" | "face";
     evbias: number;
@@ -47,8 +48,9 @@ const makeFake = (): FakeTail2 => {
     st: {
       recording: false,
       captures: 0,
-      focusMode: "afc",
-      focusPosition: 40,
+    focusMode: "afc",
+    focusPosition: 40,
+    focusWindow: { x: 0.452, y: 0.616 },
       exposureMode: "auto",
       exposureAutoMode: "global",
       evbias: 0,
@@ -160,6 +162,16 @@ const makeFake = (): FakeTail2 => {
     focusModeSet: async (mode: "afc" | "afs" | "mf") => {
       f.st.focusMode = mode;
       return landed({ settled: true, mode });
+    },
+    focusWindowGet: async () => landed({ ...f.st.focusWindow }),
+    focusWindowSet: async (x: number, y: number) => {
+      if (f.st.focusMode === "mf") throw new Error("HTTP 500 (mode-gated)");
+      f.st.focusWindow = { x, y };
+      return landed({ settled: true, x, y });
+    },
+    targetSelect: async (x: number, y: number) => {
+      f.calls.tapTarget = [x, y];
+      f.calls.aiMode = "humanTrackingSingleMode";
     },
     focusPositionGet: async () => {
       if (f.st.focusMode !== "mf") throw new Error("HTTP 500 (mode-gated)");
@@ -299,6 +311,8 @@ describe("tail2 tools", () => {
       "obsbot_tail2_stream",
       "obsbot_tail2_only_me",
       "obsbot_tail2_audio",
+      "obsbot_tail2_track_target",
+      "obsbot_tail2_focus_point",
     ]) {
       expect(names).toContain(expected);
     }
@@ -475,6 +489,32 @@ describe("tail2 tools", () => {
     expect(r.recording).toBe("on");
     await tool(tools, "obsbot_tail2_capture_photo").handler({});
     expect(f.st.captures).toBe(1);
+  });
+
+  it("track_target taps and reports the engaged mode; focus_point reads, refuses mf and mismatched args", async () => {
+    const f = makeFake();
+    const tools = createTail2Tools(await seededRegistry(f));
+    const r = (await tool(tools, "obsbot_tail2_track_target").handler({ x: 0.5, y: 0.5 })) as {
+      aiMode: string;
+    };
+    expect(r.aiMode).toBe("humanTrackingSingleMode");
+    expect(f.calls.tapTarget).toEqual([0.5, 0.5]);
+
+    expect(await tool(tools, "obsbot_tail2_focus_point").handler({})).toEqual({
+      x: 0.452,
+      y: 0.616,
+    });
+    await expect(
+      tool(tools, "obsbot_tail2_focus_point").handler({ x: 0.5 }),
+    ).rejects.toThrow(/x and y go together/);
+    const set = (await tool(tools, "obsbot_tail2_focus_point").handler({ x: 0.7, y: 0.3 })) as {
+      pointFocusStarted: boolean;
+    };
+    expect(set.pointFocusStarted).toBe(true);
+    f.st.focusMode = "mf";
+    await expect(
+      tool(tools, "obsbot_tail2_focus_point").handler({ x: 0.5, y: 0.5 }),
+    ).rejects.toThrow(/afc\/afs only/);
   });
 
   it("focus: position refused outside mf, works after mode switch, bare read reports in mf", async () => {

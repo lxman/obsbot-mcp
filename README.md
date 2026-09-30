@@ -63,7 +63,7 @@ With the installed binary, use `"command": "obsbot-mcp"` and `"args": ["--debug"
 
 35 tools on Windows and macOS, 34 on Linux (`obsbot_gimbal_move_speed` is unavailable there — see
 [limitations](#linux-gimbal-position-feedback-is-not-live)). `--debug` adds `obsbot_debug_probe` for
-one more. Every Tail 2 camera on the network adds the 30 `obsbot_tail2_*` tools in
+one more. Every Tail 2 camera on the network adds the 32 `obsbot_tail2_*` tools in
 [OBSBOT Tail 2](#obsbot-tail-2-network-cameras) below (all platforms — they are pure TypeScript).
 All names below are current as of v0.4.0 — **every tool was renamed in this
 release and there is no backward-compatible alias**; see [CHANGELOG.md](./CHANGELOG.md) for the
@@ -303,6 +303,8 @@ resolves to that one.
 | `obsbot_tail2_stream` | `output`? (`ndi`/`rtsp`/`srt`/`off`), `camera`? | Read/set the ONE active network output. The programmatic way to arm SRT for `obsbot_tail2_snapshot` — no Center needed. |
 | `obsbot_tail2_only_me` | `enabled`?, `camera`? | Read/set OnlyMe human-tracking (track one person, not everyone). |
 | `obsbot_tail2_audio` | `volume`?, `mute`?, `camera`? | Read/set audio input. |
+| `obsbot_tail2_track_target` | `x`, `y` (0.01–0.99), `camera`? | **Tap-to-track**: engage AI tracking on the subject at a normalized frame coordinate (snapshot pixel ÷ frame size). Undocumented endpoint, hardware-measured. |
+| `obsbot_tail2_focus_point` | `x`?, `y`? (0.01–0.99), `camera`? | **Tap-to-focus**: move the focus window to a normalized frame coordinate and start a point focus (afc/afs only). Bare call reads the window. |
 | `obsbot_tail2_portrait` | `enable`, `camera`? | Motorized 90° barrel rotation for portrait framing — no Tiny 2 equivalent. Verified on orientation feedback; retry if `settled:false` (writes can be silently dropped *while the motor is in motion* — measured). |
 | `obsbot_tail2_roll_bias` | `angle` (±90), `camera`? | Roll trim in degrees (horizon correction / deliberate tilt). |
 | `obsbot_tail2_ai_track` | `enabled`, `mode` (default `"humanTrackingSingleMode"`), `camera`? | Enable/disable AI tracking. Modes are the camera's own enum: human (single/group), animal (normal/close-up), object tracking (`objectTracking`/`objectTrackingNormal`/`objectTrackingCloseUp`). While active, tracking owns the gimbal. |

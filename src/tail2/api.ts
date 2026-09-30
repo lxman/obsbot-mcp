@@ -529,6 +529,42 @@ export class Tail2Api {
     return { settled: v.settled, position: v.value.position };
   }
 
+  // ---- tap-to-focus / tap-to-track ------------------------------------------------
+  //
+  // Both take NORMALIZED frame coordinates (0.01-0.99, top-left 0.01/0.01),
+  // so a pixel from obsbot_tail2_snapshot divides by frameWidth/frameHeight
+  // and lands directly — the geometry-free aiming loop.
+
+  focusWindowGet(): Promise<{ x: number; y: number }> {
+    return this.req("GET", "/camera/sdk/image/af/windowcenter");
+  }
+
+  /** Move the focus window AND start a point focus (per the vendor doc). AFC/AFS only. */
+  async focusWindowSet(
+    x: number,
+    y: number,
+    verify: VerifyOpts = {},
+  ): Promise<{ settled: boolean; x: number; y: number }> {
+    await this.send("PUT", "/camera/sdk/image/af/windowcenter", { x, y });
+    const v = await this.verified(
+      () => this.focusWindowGet(),
+      (r) => Math.abs(r.x - x) <= 0.01 && Math.abs(r.y - y) <= 0.01,
+      verify,
+    );
+    return { settled: v.settled, x: v.value.x, y: v.value.y };
+  }
+
+  /**
+   * Tap-to-track (MEASURED 2026-09-30, undocumented in the Tail 2's own doc):
+   * POST a normalized coordinate and the camera engages tracking on the
+   * subject there — from mode none it armed humanTrackingSingleMode on its
+   * own. Fire-and-ack; which mode engages depends on what (if anything) is
+   * at the coordinate, so the caller reads ai mode back when it matters.
+   */
+  async targetSelect(x: number, y: number): Promise<void> {
+    await this.send("POST", "/camera/sdk/ai/workmode/normaltrack/targetselect", { x, y });
+  }
+
   // ---- exposure --------------------------------------------------------------------
   //
   // mode manual|auto. In AUTO: auto/mode global|face (face-priority AE) and

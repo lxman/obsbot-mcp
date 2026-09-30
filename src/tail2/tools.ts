@@ -331,6 +331,64 @@ export function createTail2Tools(
       },
     },
     {
+      name: "obsbot_tail2_track_target",
+      description:
+        "Tap-to-track: give a normalized frame coordinate (x/y 0.01-0.99, top-left ~0,0) and the " +
+        "camera engages AI tracking on the subject there — measured to arm humanTrackingSingleMode " +
+        "on its own from mode none. Divide a snapshot pixel by frameWidth/frameHeight and pass it " +
+        "straight in. The mode that engages depends on what is at the point, so read it back " +
+        "(obsbot_tail2_status ai_mode) when it matters; objectTracking cannot be entered this way " +
+        "(it demands a bounding box the API grammar for which is not yet decoded).",
+      schema: withCamera({
+        x: num().pipe(z.number().min(0.01).max(0.99)),
+        y: num().pipe(z.number().min(0.01).max(0.99)),
+      }),
+      handler: async (args: unknown) => {
+        const schema = withCamera({
+          x: num().pipe(z.number().min(0.01).max(0.99)),
+          y: num().pipe(z.number().min(0.01).max(0.99)),
+        });
+        const { camera, x, y } = schema.parse(args);
+        const { api } = await registry.resolve(camera);
+        await api.targetSelect(x, y);
+        const { mode } = await api.aiModeGet();
+        return { ok: true, x, y, aiMode: mode };
+      },
+    },
+    {
+      name: "obsbot_tail2_focus_point",
+      description:
+        "Tap-to-focus: move the focus window to a normalized frame coordinate (x/y 0.01-0.99, " +
+        "top-left ~0,0) AND start a point focus there. Effective in afc/afs focus modes only — " +
+        "in mf the motor position is the tool (obsbot_tail2_focus). Bare call reads the current " +
+        "window. Divide a snapshot pixel by frameWidth/frameHeight and pass it straight in.",
+      schema: withCamera({
+        x: num().pipe(z.number().min(0.01).max(0.99)).optional(),
+        y: num().pipe(z.number().min(0.01).max(0.99)).optional(),
+      }),
+      handler: async (args: unknown) => {
+        const schema = withCamera({
+          x: num().pipe(z.number().min(0.01).max(0.99)).optional(),
+          y: num().pipe(z.number().min(0.01).max(0.99)).optional(),
+        });
+        const { camera, x, y } = schema.parse(args);
+        const { api } = await registry.resolve(camera);
+        if (x === undefined && y === undefined) return await api.focusWindowGet();
+        if (x === undefined || y === undefined) {
+          throw new Error("x and y go together — give both or neither");
+        }
+        const { mode } = await api.focusModeGet();
+        if (mode === "mf") {
+          throw new Error(
+            `focus window applies in afc/afs only (current: ${mode}). ` +
+              `In mf, drive the motor with obsbot_tail2_focus position instead.`,
+          );
+        }
+        const r = await api.focusWindowSet(x, y);
+        return { ok: true, ...r, pointFocusStarted: true };
+      },
+    },
+    {
       name: "obsbot_tail2_focus",
       description:
         "Read (bare call) or set the Tail 2's focus: mode afc|afs|mf, and position (0-100, the " +
