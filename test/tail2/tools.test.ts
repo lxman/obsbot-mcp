@@ -14,6 +14,27 @@ import type { Tail2Api } from "../../src/tail2/api.js";
 interface FakeTail2 {
   api: Tail2Api;
   calls: { zoom?: [number, number]; aiMode?: string; trackSpeed?: string; rollBias?: number; portrait?: boolean; recenter?: boolean; presetSave?: [number, string]; presetCall?: number; presetDelete?: number; presetRename?: [number, string]; srtEnabled?: boolean; ndiEnabled?: boolean; gimbalSpeed?: [number, number, number]; gimbalStop?: boolean; gimbalInvert?: boolean; gimbalPose?: { yaw: number; pitch: number; roll: number; ratio: number } };
+  /** State for the 2026-09-30 vendor-doc surface (record/focus/exposure/image/stream/audio). */
+  st: {
+    recording: boolean;
+    captures: number;
+    focusMode: "afc" | "afs" | "mf";
+    focusPosition: number;
+    exposureMode: "manual" | "auto";
+    exposureAutoMode: "global" | "face";
+    evbias: number;
+    iso: number;
+    shutter: string;
+    styleMode: string;
+    style: Record<string, number>;
+    hdr: boolean;
+    wbMode: string;
+    wbTemp: number;
+    stream: "ndi" | "rtsp" | "srt" | "off";
+    onlyMe: boolean;
+    volume: number;
+    audioMute: boolean;
+  };
   /** When false, readbacks never reflect writes - everything settles:false. */
   letWritesLand: boolean;
 }
@@ -23,6 +44,26 @@ const makeFake = (): FakeTail2 => {
     calls: {},
     letWritesLand: true,
     api: {} as Tail2Api,
+    st: {
+      recording: false,
+      captures: 0,
+      focusMode: "afc",
+      focusPosition: 40,
+      exposureMode: "auto",
+      exposureAutoMode: "global",
+      evbias: 0,
+      iso: 894,
+      shutter: "1/100",
+      styleMode: "standard",
+      style: { brightness: 50, contrast: 50, hue: 50, saturation: 50, sharpness: 50 },
+      hdr: false,
+      wbMode: "auto",
+      wbTemp: 3000,
+      stream: "ndi",
+      onlyMe: true,
+      volume: 50,
+      audioMute: true,
+    },
   };
   const landed = <T>(v: T): T => {
     if (!f.letWritesLand) throw new Error("readback frozen");
@@ -105,6 +146,103 @@ const makeFake = (): FakeTail2 => {
       f.calls.gimbalInvert = enable;
       return landed({ settled: true, enable });
     },
+    // The 2026-09-30 vendor-doc surface: uniform get/set pairs over a state
+    // object; capture counts triggers.
+    recordGet: async () => landed({ recording: f.st.recording ? "on" : "off" }),
+    recordSet: async (on: boolean) => {
+      f.st.recording = on;
+      return landed({ settled: true, recording: on ? "on" : "off" });
+    },
+    captureTrigger: async () => {
+      f.st.captures++;
+    },
+    focusModeGet: async () => landed({ mode: f.st.focusMode }),
+    focusModeSet: async (mode: "afc" | "afs" | "mf") => {
+      f.st.focusMode = mode;
+      return landed({ settled: true, mode });
+    },
+    focusPositionGet: async () => {
+      if (f.st.focusMode !== "mf") throw new Error("HTTP 500 (mode-gated)");
+      return landed({ position: f.st.focusPosition });
+    },
+    focusPositionSet: async (position: number) => {
+      if (f.st.focusMode !== "mf") throw new Error("HTTP 500 (mode-gated)");
+      f.st.focusPosition = position;
+      return landed({ settled: true, position });
+    },
+    exposureModeGet: async () => landed({ mode: f.st.exposureMode }),
+    exposureModeSet: async (mode: "manual" | "auto") => {
+      f.st.exposureMode = mode;
+      return landed({ settled: true, mode });
+    },
+    exposureAutoModeGet: async () => landed({ mode: f.st.exposureAutoMode }),
+    exposureAutoModeSet: async (mode: "global" | "face") => {
+      f.st.exposureAutoMode = mode;
+      return landed({ settled: true, mode });
+    },
+    exposureEvbiasGet: async () => landed({ evbias: f.st.evbias }),
+    exposureEvbiasSet: async (evbias: number) => {
+      f.st.evbias = evbias;
+      return landed({ settled: true, evbias });
+    },
+    exposureIsoGet: async () => {
+      if (f.st.exposureMode !== "manual") throw new Error("HTTP 500 (mode-gated)");
+      return landed({ iso: f.st.iso });
+    },
+    exposureIsoSet: async (iso: number) => {
+      if (f.st.exposureMode !== "manual") throw new Error("HTTP 500 (mode-gated)");
+      f.st.iso = iso;
+      return landed({ settled: true, iso });
+    },
+    exposureShutterGet: async () => {
+      if (f.st.exposureMode !== "manual") throw new Error("HTTP 500 (mode-gated)");
+      return landed({ shutter: f.st.shutter });
+    },
+    exposureShutterSet: async (shutter: string) => {
+      if (f.st.exposureMode !== "manual") throw new Error("HTTP 500 (mode-gated)");
+      f.st.shutter = shutter;
+      return landed({ settled: true, shutter });
+    },
+    styleGet: async () => landed({ mode: f.st.styleMode, ...f.st.style }),
+    styleSet: async (control: string, value: number) => {
+      f.st.style[control] = value;
+      return landed({ settled: true, value, mode: f.st.styleMode });
+    },
+    styleModeSet: async (mode: "standard" | "outdoor" | "pastel" | "manual") => {
+      f.st.styleMode = mode;
+      return landed({ settled: true, mode });
+    },
+    hdrGet: async () => landed({ control: f.st.hdr ? "on" : "off" }),
+    hdrSet: async (on: boolean) => {
+      f.st.hdr = on;
+      return landed({ settled: true, control: on ? "on" : "off" });
+    },
+    wbConfigGet: async () => landed({ mode: f.st.wbMode, temperature: f.st.wbTemp }),
+    wbConfigSet: async (mode: string, temperature: number | undefined) => {
+      f.st.wbMode = mode;
+      if (temperature !== undefined) f.st.wbTemp = temperature;
+      return landed({ settled: true, mode, temperature: f.st.wbTemp });
+    },
+    streamControlGet: async () => landed({ control: f.st.stream }),
+    streamControlSet: async (control: "ndi" | "rtsp" | "srt" | "off") => {
+      f.st.stream = control;
+      return landed({ settled: true, control });
+    },
+    onlyMeGet: async () => landed({ enable: f.st.onlyMe }),
+    onlyMeSet: async (enable: boolean) => {
+      f.st.onlyMe = enable;
+      return landed({ settled: true, enable });
+    },
+    audioVolumeGet: async () => landed({ volume: f.st.volume }),
+    audioVolumeSet: async (volume: number) => {
+      f.st.volume = volume;
+      return landed({ settled: true, volume });
+    },
+    audioMuteGet: async () => landed({ enable: f.st.audioMute }),
+    audioMuteSet: async (enable: boolean) => {
+      f.st.audioMute = enable;
+      return landed({ settled: true, enable });
+    },
   } as unknown as Tail2Api;
   return f;
 };
@@ -151,6 +289,16 @@ describe("tail2 tools", () => {
       "obsbot_tail2_gimbal_speed",
       "obsbot_tail2_gimbal_move",
       "obsbot_tail2_gimbal_invert",
+      "obsbot_tail2_record",
+      "obsbot_tail2_capture_photo",
+      "obsbot_tail2_focus",
+      "obsbot_tail2_exposure",
+      "obsbot_tail2_image_adjust",
+      "obsbot_tail2_hdr",
+      "obsbot_tail2_wb",
+      "obsbot_tail2_stream",
+      "obsbot_tail2_only_me",
+      "obsbot_tail2_audio",
     ]) {
       expect(names).toContain(expected);
     }
@@ -315,6 +463,96 @@ describe("tail2 tools", () => {
     const r = await tool(tools, "obsbot_tail2_gimbal_invert").handler({ enable: true });
     expect(r).toEqual({ ok: true, settled: true, enable: true });
     expect(f.calls.gimbalInvert).toBe(true);
+  });
+
+  it("record reads bare, writes on/off; capture_photo triggers", async () => {
+    const f = makeFake();
+    const tools = createTail2Tools(await seededRegistry(f));
+    expect(await tool(tools, "obsbot_tail2_record").handler({})).toEqual({ recording: "off" });
+    const r = (await tool(tools, "obsbot_tail2_record").handler({ enable: true })) as {
+      recording: string;
+    };
+    expect(r.recording).toBe("on");
+    await tool(tools, "obsbot_tail2_capture_photo").handler({});
+    expect(f.st.captures).toBe(1);
+  });
+
+  it("focus: position refused outside mf, works after mode switch, bare read reports in mf", async () => {
+    const f = makeFake();
+    const tools = createTail2Tools(await seededRegistry(f));
+    await expect(tool(tools, "obsbot_tail2_focus").handler({ position: 80 })).rejects.toThrow(
+      /only valid in mf/,
+    );
+    const r = (await tool(tools, "obsbot_tail2_focus").handler({ mode: "mf", position: 80 })) as {
+      mode: string;
+      position: number;
+    };
+    expect(r).toMatchObject({ mode: "mf", position: 80 });
+    const bare = (await tool(tools, "obsbot_tail2_focus").handler({})) as { position: number };
+    expect(bare.position).toBe(80);
+  });
+
+  it("exposure reads mode-appropriate values and writes manual settings", async () => {
+    const f = makeFake();
+    const tools = createTail2Tools(await seededRegistry(f));
+    const auto = (await tool(tools, "obsbot_tail2_exposure").handler({})) as Record<string, unknown>;
+    expect(auto).toMatchObject({ mode: "auto", autoMode: "global", evbias: 0 });
+    const manual = (await tool(tools, "obsbot_tail2_exposure").handler({
+      mode: "manual",
+      iso: 800,
+      shutter: "1/60",
+    })) as Record<string, unknown>;
+    expect(manual).toMatchObject({ mode: "manual", iso: 800, shutter: "1/60" });
+  });
+
+  it("image_adjust: control+value together, gated to manual style mode, values survive a mode switch", async () => {
+    const f = makeFake();
+    const tools = createTail2Tools(await seededRegistry(f));
+    await expect(
+      tool(tools, "obsbot_tail2_image_adjust").handler({ control: "brightness" }),
+    ).rejects.toThrow(/control and value go together/);
+    await expect(
+      tool(tools, "obsbot_tail2_image_adjust").handler({ control: "brightness", value: 70 }),
+    ).rejects.toThrow(/styleMode manual/);
+    const r = (await tool(tools, "obsbot_tail2_image_adjust").handler({
+      control: "brightness",
+      value: 70,
+      styleMode: "manual",
+    })) as Record<string, unknown>;
+    expect(r).toMatchObject({ mode: "manual", brightness: 70 });
+    const switched = (await tool(tools, "obsbot_tail2_image_adjust").handler({
+      styleMode: "outdoor",
+    })) as Record<string, unknown>;
+    expect(switched).toMatchObject({ mode: "outdoor", brightness: 70 });
+  });
+
+  it("stream reads ndi and arms srt; wb, hdr, only_me, audio round-trip", async () => {
+    const f = makeFake();
+    const tools = createTail2Tools(await seededRegistry(f));
+    expect(await tool(tools, "obsbot_tail2_stream").handler({})).toEqual({ control: "ndi" });
+    const srt = (await tool(tools, "obsbot_tail2_stream").handler({ output: "srt" })) as {
+      control: string;
+    };
+    expect(srt.control).toBe("srt");
+    expect(f.st.stream).toBe("srt");
+    expect(await tool(tools, "obsbot_tail2_wb").handler({})).toEqual({
+      mode: "auto",
+      temperature: 3000,
+    });
+    expect(
+      await tool(tools, "obsbot_tail2_wb").handler({ mode: "manual", temperature: 5600 }),
+    ).toMatchObject({ mode: "manual", temperature: 5600 });
+    expect(await tool(tools, "obsbot_tail2_hdr").handler({ enabled: true })).toMatchObject({
+      control: "on",
+    });
+    expect(await tool(tools, "obsbot_tail2_only_me").handler({ enabled: false })).toMatchObject({
+      enable: false,
+    });
+    const audio = (await tool(tools, "obsbot_tail2_audio").handler({ volume: 30, mute: false })) as {
+      volume: number;
+      enable: boolean;
+    };
+    expect(audio).toMatchObject({ volume: 30, enable: false });
   });
 
   it("scan reports what the sweep found", async () => {

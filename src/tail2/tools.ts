@@ -302,6 +302,248 @@ export function createTail2Tools(
       },
     },
     {
+      name: "obsbot_tail2_record",
+      description:
+        "Read (bare call) or control (enable) the Tail 2's recording switch over REST. Recording " +
+        "needs storage — with no SD card the state still reads (\"off\") but starting will not " +
+        "succeed; check obsbot_tail2_status's sdcard field first.",
+      schema: withCamera({ enable: bool().optional() }),
+      handler: async (args: unknown) => {
+        const { camera, enable } = withCamera({ enable: bool().optional() }).parse(args);
+        const { api } = await registry.resolve(camera);
+        if (enable === undefined) return await api.recordGet();
+        const r = await api.recordSet(enable);
+        return { ok: true, ...r };
+      },
+    },
+    {
+      name: "obsbot_tail2_capture_photo",
+      description:
+        "Trigger a still-photo capture on the Tail 2 (POST capture/trigger). Needs storage (SD " +
+        "card — check obsbot_tail2_status's sdcard field). The ack means the camera accepted the " +
+        "trigger; the photo lands on the card (see obsbot_tail2_status / album).",
+      schema: withCamera({}),
+      handler: async (args: unknown) => {
+        const { camera } = withCamera({}).parse(args);
+        const { api } = await registry.resolve(camera);
+        await api.captureTrigger();
+        return { ok: true };
+      },
+    },
+    {
+      name: "obsbot_tail2_focus",
+      description:
+        "Read (bare call) or set the Tail 2's focus: mode afc|afs|mf, and position (0-100, the " +
+        "focus motor) which is only valid in mf — the camera errors on it in afc/afs and this " +
+        "tool refuses rather than trigger that. Bare call reports the mode, and the position " +
+        "when in mf.",
+      schema: withCamera({
+        mode: z.enum(["afc", "afs", "mf"]).optional(),
+        position: num().pipe(z.number().min(0).max(100)).optional(),
+      }),
+      handler: async (args: unknown) => {
+        const { camera, mode, position } = withCamera({
+          mode: z.enum(["afc", "afs", "mf"]).optional(),
+          position: num().pipe(z.number().min(0).max(100)).optional(),
+        }).parse(args);
+        const { api } = await registry.resolve(camera);
+        const out: Record<string, unknown> = {};
+        if (mode !== undefined) Object.assign(out, await api.focusModeSet(mode));
+        const current = await api.focusModeGet();
+        if (position !== undefined) {
+          if (current.mode !== "mf") {
+            throw new Error(
+              `focus position is only valid in mf (current: ${current.mode}). Set mode:"mf" first.`,
+            );
+          }
+          Object.assign(out, await api.focusPositionSet(position));
+        } else if (current.mode === "mf") {
+          // Readable only in mf (HTTP 500 otherwise — measured).
+          out.position = (await api.focusPositionGet()).position;
+        }
+        return { mode: current.mode, ...out };
+      },
+    },
+    {
+      name: "obsbot_tail2_exposure",
+      description:
+        "Read (bare call) or set the Tail 2's exposure. mode manual|auto; in AUTO: face " +
+        "(face-priority AE, global|face) and evbias (-3.0..3.0, ~0.3 steps); in MANUAL: iso " +
+        "(100-6400) and shutter (\"1/N\", 1/6400..1/30). Manual values only exist in manual mode " +
+        "and face/evbias only in auto — a bare call reports whichever set the current mode " +
+        "exposes. Note: the camera's manual ISO granularity is finer than the doc claims " +
+        "(a live-AE value like 894 reads back).",
+      schema: withCamera({
+        mode: z.enum(["manual", "auto"]).optional(),
+        face: bool().optional(),
+        evbias: num().pipe(z.number().min(-3).max(3)).optional(),
+        iso: num().pipe(z.number().min(100).max(6400)).optional(),
+        shutter: z.string().regex(/^1\/\d+$/).optional(),
+      }),
+      handler: async (args: unknown) => {
+        const schema = withCamera({
+          mode: z.enum(["manual", "auto"]).optional(),
+          face: bool().optional(),
+          evbias: num().pipe(z.number().min(-3).max(3)).optional(),
+          iso: num().pipe(z.number().min(100).max(6400)).optional(),
+          shutter: z.string().regex(/^1\/\d+$/).optional(),
+        });
+        const { camera, mode, face, evbias, iso, shutter } = schema.parse(args);
+        const { api } = await registry.resolve(camera);
+        const out: Record<string, unknown> = {};
+        if (mode !== undefined) Object.assign(out, await api.exposureModeSet(mode));
+        if (face !== undefined) Object.assign(out, await api.exposureAutoModeSet(face ? "face" : "global"));
+        if (evbias !== undefined) Object.assign(out, await api.exposureEvbiasSet(evbias));
+        if (iso !== undefined) Object.assign(out, await api.exposureIsoSet(iso));
+        if (shutter !== undefined) Object.assign(out, await api.exposureShutterSet(shutter));
+        // Mode-appropriate reads (the other mode's values are gated off —
+        // HTTP 500 — so only what exists now is reported). The AE sub-mode's
+        // key is also "mode" — renamed so it cannot clobber the exposure mode.
+        const { mode: current } = await api.exposureModeGet();
+        const read: Record<string, unknown> = { mode: current };
+        if (current === "auto") {
+          read.autoMode = (await api.exposureAutoModeGet()).mode;
+          Object.assign(read, await api.exposureEvbiasGet());
+        } else {
+          Object.assign(read, await api.exposureIsoGet());
+          Object.assign(read, await api.exposureShutterGet());
+        }
+        return { ...read, ...(Object.keys(out).length ? { applied: out } : {}) };
+      },
+    },
+    {
+      name: "obsbot_tail2_image_adjust",
+      description:
+        "Read (bare call) or set the Tail 2's image style: brightness/contrast/hue/saturation/" +
+        "sharpness, each an absolute 0-100, plus styleMode standard|outdoor|pastel|manual. " +
+        "Individual control writes are MODE-GATED (measured): they apply only in styleMode " +
+        "manual — HTTP 500 \"style mode is not manual\" otherwise — so this tool applies a " +
+        "given styleMode FIRST and refuses a control write in a preset mode. A styleMode switch " +
+        "preserves the current values. Bare call returns the full style bundle.",
+      schema: withCamera({
+        control: z.enum(["brightness", "contrast", "hue", "saturation", "sharpness"]).optional(),
+        value: num().pipe(z.number().min(0).max(100)).optional(),
+        styleMode: z.enum(["standard", "outdoor", "pastel", "manual"]).optional(),
+      }),
+      handler: async (args: unknown) => {
+        const schema = withCamera({
+          control: z.enum(["brightness", "contrast", "hue", "saturation", "sharpness"]).optional(),
+          value: num().pipe(z.number().min(0).max(100)).optional(),
+          styleMode: z.enum(["standard", "outdoor", "pastel", "manual"]).optional(),
+        });
+        const { camera, control, value, styleMode } = schema.parse(args);
+        if ((control === undefined) !== (value === undefined)) {
+          throw new Error("control and value go together — give both or neither");
+        }
+        const { api } = await registry.resolve(camera);
+        const out: Record<string, unknown> = {};
+        if (styleMode !== undefined) Object.assign(out, await api.styleModeSet(styleMode));
+        if (control !== undefined && value !== undefined) {
+          const { mode } = await api.styleGet();
+          if (mode !== "manual") {
+            throw new Error(
+              `style writes apply only in styleMode manual (current: ${mode}). ` +
+                `Pass styleMode:"manual" alongside, or switch first.`,
+            );
+          }
+          Object.assign(out, await api.styleSet(control, value));
+        }
+        return { ...await api.styleGet(), ...(Object.keys(out).length ? { applied: out } : {}) };
+      },
+    },
+    {
+      name: "obsbot_tail2_hdr",
+      description: "Read (bare call) or set (enabled) the Tail 2's HDR.",
+      schema: withCamera({ enabled: bool().optional() }),
+      handler: async (args: unknown) => {
+        const { camera, enabled } = withCamera({ enabled: bool().optional() }).parse(args);
+        const { api } = await registry.resolve(camera);
+        if (enabled === undefined) return await api.hdrGet();
+        const r = await api.hdrSet(enabled);
+        return { ok: true, ...r };
+      },
+    },
+    {
+      name: "obsbot_tail2_wb",
+      description:
+        "Read (bare call) or set the Tail 2's white balance: mode auto|daylight|fluorescent|" +
+        "tungsten|cloudy|manual, plus temperature in Kelvin (2000-10000) which applies in " +
+        "manual mode.",
+      schema: withCamera({
+        mode: z.enum(["auto", "daylight", "fluorescent", "tungsten", "cloudy", "manual"]).optional(),
+        temperature: num().pipe(z.number().min(2000).max(10000)).optional(),
+      }),
+      handler: async (args: unknown) => {
+        const schema = withCamera({
+          mode: z.enum(["auto", "daylight", "fluorescent", "tungsten", "cloudy", "manual"]).optional(),
+          temperature: num().pipe(z.number().min(2000).max(10000)).optional(),
+        });
+        const { camera, mode, temperature } = schema.parse(args);
+        const { api } = await registry.resolve(camera);
+        if (mode === undefined && temperature === undefined) return await api.wbConfigGet();
+        const r = await api.wbConfigSet(mode ?? "manual", temperature);
+        return { ok: true, ...r };
+      },
+    },
+    {
+      name: "obsbot_tail2_stream",
+      description:
+        "Read (bare call) or set the Tail 2's active network output: ndi|rtsp|srt|off — exactly " +
+        "ONE is active at a time (setting srt displaces ndi, and a camera reboot resets to off). " +
+        "This is the programmatic way to arm SRT for obsbot_tail2_snapshot without touching " +
+        "OBSBOT Center.",
+      schema: withCamera({ output: z.enum(["ndi", "rtsp", "srt", "off"]).optional() }),
+      handler: async (args: unknown) => {
+        const { camera, output } = withCamera({
+          output: z.enum(["ndi", "rtsp", "srt", "off"]).optional(),
+        }).parse(args);
+        const { api } = await registry.resolve(camera);
+        if (output === undefined) return await api.streamControlGet();
+        const r = await api.streamControlSet(output);
+        return { ok: true, ...r };
+      },
+    },
+    {
+      name: "obsbot_tail2_only_me",
+      description:
+        "Read (bare call) or set (enabled) the Tail 2's OnlyMe human-tracking switch — track " +
+        "only the nearest/locked person rather than reframing for everyone.",
+      schema: withCamera({ enabled: bool().optional() }),
+      handler: async (args: unknown) => {
+        const { camera, enabled } = withCamera({ enabled: bool().optional() }).parse(args);
+        const { api } = await registry.resolve(camera);
+        if (enabled === undefined) return await api.onlyMeGet();
+        const r = await api.onlyMeSet(enabled);
+        return { ok: true, ...r };
+      },
+    },
+    {
+      name: "obsbot_tail2_audio",
+      description:
+        "Read (bare call) or set the Tail 2's audio input: volume 0-100 and mute. Changes apply " +
+        "to the encoded/recorded audio stream.",
+      schema: withCamera({
+        volume: num().pipe(z.number().min(0).max(100)).optional(),
+        mute: bool().optional(),
+      }),
+      handler: async (args: unknown) => {
+        const schema = withCamera({
+          volume: num().pipe(z.number().min(0).max(100)).optional(),
+          mute: bool().optional(),
+        });
+        const { camera, volume, mute } = schema.parse(args);
+        const { api } = await registry.resolve(camera);
+        const out: Record<string, unknown> = {};
+        if (volume !== undefined) Object.assign(out, await api.audioVolumeSet(volume));
+        if (mute !== undefined) Object.assign(out, await api.audioMuteSet(mute));
+        return {
+          ...(await api.audioVolumeGet()),
+          ...(await api.audioMuteGet()),
+          ...(Object.keys(out).length ? { applied: out } : {}),
+        };
+      },
+    },
+    {
       name: "obsbot_tail2_portrait",
       description:
         "Rotate a Tail 2's barrel 90° for portrait framing (enable) or back to landscape " +

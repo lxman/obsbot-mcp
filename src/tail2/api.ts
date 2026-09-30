@@ -126,13 +126,15 @@ export class Tail2Api {
     this.wsUrl = `${this.baseUrl.replace(/^http/, "ws")}/ws/`;
   }
 
-  private async req<T>(method: string, path: string, body?: object): Promise<T> {
+  private async req<T>(method: string, path: string, body?: object | string): Promise<T> {
     let res: Response;
     try {
       res = await fetch(this.baseUrl + path, {
         method,
         headers: body !== undefined ? { "Content-Type": "application/json" } : undefined,
-        body: body !== undefined ? JSON.stringify(body) : undefined,
+        // A string body is used as-is: one endpoint (evbias) needs an exact
+        // JSON float literal that JSON.stringify cannot produce from a number.
+        body: body === undefined ? undefined : typeof body === "string" ? body : JSON.stringify(body),
         signal: AbortSignal.timeout(this.timeoutMs),
       });
     } catch (e) {
@@ -159,7 +161,13 @@ export class Tail2Api {
     }
   }
 
-  private async send(method: "PUT" | "POST", path: string, body: object): Promise<void> {
+  /**
+   * PUT/POST with ack checking. `body` may be an object (JSON.stringify'd)
+   * or a pre-built JSON string — evbias needs a float literal like `0.0`
+   * that stringifying a number cannot produce (measured 2026-09-30: JSON
+   * integers 0 and -1 get 400 "Invalid value type"; 0.0 and -1.0 apply).
+   */
+  private async send(method: "PUT" | "POST", path: string, body: object | string): Promise<void> {
     const ack = await this.req<Ack>(method, path, body);
     // Every confirmed endpoint replies {"code":200,"err_idx":0}; a non-200
     // code with HTTP 200 has not been observed, but checking it is free and
@@ -460,6 +468,291 @@ export class Tail2Api {
     await this.send("PUT", "/camera/sdk/ai/trackspeed", { speed });
     const v = await this.verified(() => this.trackSpeedGet(), (r) => r.speed === speed, verify);
     return { settled: v.settled, speed: v.value.speed };
+  }
+
+  // ---- record / capture --------------------------------------------------------
+  //
+  // From the vendor REST doc, hardware-verified 2026-09-30: record is a
+  // {"recording":"on"|"off"} switch (GET read back "off" with no SD card —
+  // state is readable regardless; starting without media will fail), and
+  // capture is a body-less POST trigger.
+
+  recordGet(): Promise<{ recording: "on" | "off" }> {
+    return this.req("GET", "/camera/sdk/record/control");
+  }
+
+  async recordSet(on: boolean, verify: VerifyOpts = {}): Promise<{ settled: boolean; recording: "on" | "off" }> {
+    const want: "on" | "off" = on ? "on" : "off";
+    await this.send("PUT", "/camera/sdk/record/control", { recording: want });
+    const v = await this.verified(() => this.recordGet(), (r) => r.recording === want, verify);
+    return { settled: v.settled, recording: v.value.recording };
+  }
+
+  /** Still-photo trigger. Needs storage; the ack says the camera accepted it. */
+  captureTrigger(): Promise<void> {
+    return this.send("POST", "/camera/sdk/capture/trigger", {});
+  }
+
+  // ---- focus ---------------------------------------------------------------------
+  //
+  // af/mode is {"mode":"afc"|"afs"|"mf"}; af/motorposition is 0-100 and is
+  // MODE-GATED: HTTP 500 while the mode is not mf (measured — the value does
+  // not exist outside manual focus).
+
+  focusModeGet(): Promise<{ mode: "afc" | "afs" | "mf" }> {
+    return this.req("GET", "/camera/sdk/image/af/mode");
+  }
+
+  async focusModeSet(
+    mode: "afc" | "afs" | "mf",
+    verify: VerifyOpts = {},
+  ): Promise<{ settled: boolean; mode: "afc" | "afs" | "mf" }> {
+    await this.send("PUT", "/camera/sdk/image/af/mode", { mode });
+    const v = await this.verified(() => this.focusModeGet(), (r) => r.mode === mode, verify);
+    return { settled: v.settled, mode: v.value.mode };
+  }
+
+  focusPositionGet(): Promise<{ position: number }> {
+    return this.req("GET", "/camera/sdk/image/af/motorposition");
+  }
+
+  async focusPositionSet(
+    position: number,
+    verify: VerifyOpts = {},
+  ): Promise<{ settled: boolean; position: number }> {
+    await this.send("PUT", "/camera/sdk/image/af/motorposition", { position });
+    const v = await this.verified(
+      () => this.focusPositionGet(),
+      (r) => Math.abs(r.position - position) <= 1,
+      verify,
+    );
+    return { settled: v.settled, position: v.value.position };
+  }
+
+  // ---- exposure --------------------------------------------------------------------
+  //
+  // mode manual|auto. In AUTO: auto/mode global|face (face-priority AE) and
+  // evbias (-3.0..3.0 in 0.3-ish steps). In MANUAL: iso and shutter ("1/N"
+  // string). The manual values are MODE-GATED: HTTP 500 while exposure is
+  // auto (measured). Manual ISO read back 894 on first switch — a live-AE
+  // inherited value, NOT the doc's "increment of 100"; the range is real but
+  // the granularity claim is not.
+
+  exposureModeGet(): Promise<{ mode: "manual" | "auto" }> {
+    return this.req("GET", "/camera/sdk/image/exposure/mode");
+  }
+
+  async exposureModeSet(
+    mode: "manual" | "auto",
+    verify: VerifyOpts = {},
+  ): Promise<{ settled: boolean; mode: "manual" | "auto" }> {
+    await this.send("PUT", "/camera/sdk/image/exposure/mode", { mode });
+    const v = await this.verified(() => this.exposureModeGet(), (r) => r.mode === mode, verify);
+    return { settled: v.settled, mode: v.value.mode };
+  }
+
+  exposureAutoModeGet(): Promise<{ mode: "global" | "face" }> {
+    return this.req("GET", "/camera/sdk/image/exposure/auto/mode");
+  }
+
+  async exposureAutoModeSet(
+    mode: "global" | "face",
+    verify: VerifyOpts = {},
+  ): Promise<{ settled: boolean; mode: "global" | "face" }> {
+    await this.send("PUT", "/camera/sdk/image/exposure/auto/mode", { mode });
+    const v = await this.verified(() => this.exposureAutoModeGet(), (r) => r.mode === mode, verify);
+    return { settled: v.settled, mode: v.value.mode };
+  }
+
+  exposureEvbiasGet(): Promise<{ evbias: number }> {
+    return this.req("GET", "/camera/sdk/image/exposure/auto/compensation");
+  }
+
+  async exposureEvbiasSet(
+    evbias: number,
+    verify: VerifyOpts = {},
+  ): Promise<{ settled: boolean; evbias: number }> {
+    // The firmware rejects JSON integers here (400 "Invalid value type" —
+    // measured: 0 and -1 rejected, 0.0 and -1.0 applied), and some integer
+    // bodies ACK without ever applying. Always send a decimal-point float.
+    await this.send("PUT", "/camera/sdk/image/exposure/auto/compensation", `{"evbias":${evbias.toFixed(1)}}`);
+    const v = await this.verified(
+      () => this.exposureEvbiasGet(),
+      (r) => Math.abs(r.evbias - evbias) < 0.05,
+      verify,
+    );
+    return { settled: v.settled, evbias: v.value.evbias };
+  }
+
+  exposureIsoGet(): Promise<{ iso: number }> {
+    return this.req("GET", "/camera/sdk/image/exposure/manual/iso");
+  }
+
+  async exposureIsoSet(
+    iso: number,
+    verify: VerifyOpts = {},
+  ): Promise<{ settled: boolean; iso: number }> {
+    await this.send("PUT", "/camera/sdk/image/exposure/manual/iso", { iso });
+    const v = await this.verified(
+      () => this.exposureIsoGet(),
+      (r) => Math.abs(r.iso - iso) < 1,
+      verify,
+    );
+    return { settled: v.settled, iso: v.value.iso };
+  }
+
+  exposureShutterGet(): Promise<{ shutter: string }> {
+    return this.req("GET", "/camera/sdk/image/exposure/manual/shuttertime");
+  }
+
+  async exposureShutterSet(
+    shutter: string,
+    verify: VerifyOpts = {},
+  ): Promise<{ settled: boolean; shutter: string }> {
+    await this.send("PUT", "/camera/sdk/image/exposure/manual/shuttertime", { shutter });
+    const v = await this.verified(() => this.exposureShutterGet(), (r) => r.shutter === shutter, verify);
+    return { settled: v.settled, shutter: v.value.shutter };
+  }
+
+  // ---- image style / hdr / white balance ---------------------------------------------
+  //
+  // style/<control> GETs return {mode, <control>} (the mode rides along);
+  // style/mode GET returns the whole bundle. Values are absolute 0-100.
+
+  styleGet(): Promise<{
+    mode: string;
+    brightness: number;
+    contrast: number;
+    hue: number;
+    saturation: number;
+    sharpness: number;
+  }> {
+    return this.req("GET", "/camera/sdk/image/style/mode");
+  }
+
+  async styleSet(
+    control: "brightness" | "contrast" | "hue" | "saturation" | "sharpness",
+    value: number,
+    verify: VerifyOpts = {},
+  ): Promise<{ settled: boolean; value: number; mode: string }> {
+    await this.send("PUT", `/camera/sdk/image/style/${control}`, { [control]: value });
+    const v = await this.verified(
+      () => this.req<Record<string, number | string>>("GET", `/camera/sdk/image/style/${control}`),
+      (r) => r[control] === value,
+      verify,
+    );
+    return { settled: v.settled, value: v.value[control] as number, mode: v.value.mode as string };
+  }
+
+  async styleModeSet(
+    mode: "standard" | "outdoor" | "pastel" | "manual",
+    verify: VerifyOpts = {},
+  ): Promise<{ settled: boolean; mode: string }> {
+    // The PUT takes the mode with the full value bundle — send the current
+    // values alongside so a mode switch never stomps the adjustments.
+    const current = await this.styleGet();
+    await this.send("PUT", "/camera/sdk/image/style/mode", { ...current, mode });
+    const v = await this.verified(() => this.styleGet(), (r) => r.mode === mode, verify);
+    return { settled: v.settled, mode: v.value.mode };
+  }
+
+  hdrGet(): Promise<{ control: "on" | "off" }> {
+    return this.req("GET", "/camera/sdk/image/hdr/control");
+  }
+
+  async hdrSet(on: boolean, verify: VerifyOpts = {}): Promise<{ settled: boolean; control: "on" | "off" }> {
+    const want: "on" | "off" = on ? "on" : "off";
+    await this.send("PUT", "/camera/sdk/image/hdr/control", { control: want });
+    const v = await this.verified(() => this.hdrGet(), (r) => r.control === want, verify);
+    return { settled: v.settled, control: v.value.control };
+  }
+
+  wbConfigGet(): Promise<{ mode: string; temperature: number }> {
+    return this.req("GET", "/camera/sdk/image/whitebalance/config");
+  }
+
+  async wbConfigSet(
+    mode: "auto" | "daylight" | "fluorescent" | "tungsten" | "cloudy" | "manual",
+    temperature: number | undefined,
+    verify: VerifyOpts = {},
+  ): Promise<{ settled: boolean; mode: string; temperature: number }> {
+    // Temperature only matters in manual mode (doc), but sending the current
+    // one alongside is harmless and keeps the readback honest.
+    const current = await this.wbConfigGet();
+    await this.send("PUT", "/camera/sdk/image/whitebalance/config", {
+      mode,
+      temperature: temperature ?? current.temperature,
+    });
+    const v = await this.verified(
+      () => this.wbConfigGet(),
+      (r) => r.mode === mode && (temperature === undefined || Math.abs(r.temperature - temperature) <= 1),
+      verify,
+    );
+    return { settled: v.settled, mode: v.value.mode, temperature: v.value.temperature };
+  }
+
+  // ---- streaming output select ---------------------------------------------------
+  //
+  // {"control":"ndi"|"rtsp"|"srt"|"off"} — exactly ONE active output. Setting
+  // srt displaces ndi (the exclusivity TAIL2-PROTOCOL §7a/§8 already
+  // measured); this is the programmatic way to arm SRT for snapshots.
+
+  streamControlGet(): Promise<{ control: "ndi" | "rtsp" | "srt" | "off" }> {
+    return this.req("GET", "/camera/sdk/ndi-rtsp-srt/control");
+  }
+
+  async streamControlSet(
+    control: "ndi" | "rtsp" | "srt" | "off",
+    verify: VerifyOpts = {},
+  ): Promise<{ settled: boolean; control: "ndi" | "rtsp" | "srt" | "off" }> {
+    await this.send("PUT", "/camera/sdk/ndi-rtsp-srt/control", { control });
+    const v = await this.verified(() => this.streamControlGet(), (r) => r.control === control, verify);
+    return { settled: v.settled, control: v.value.control };
+  }
+
+  // ---- tracking extra / audio ------------------------------------------------------
+
+  onlyMeGet(): Promise<{ enable: boolean }> {
+    return this.req("GET", "/camera/sdk/ai/human/onlyme");
+  }
+
+  async onlyMeSet(
+    enable: boolean,
+    verify: VerifyOpts = {},
+  ): Promise<{ settled: boolean; enable: boolean }> {
+    await this.send("PUT", "/camera/sdk/ai/human/onlyme", { enable });
+    const v = await this.verified(() => this.onlyMeGet(), (r) => r.enable === enable, verify);
+    return { settled: v.settled, enable: v.value.enable };
+  }
+
+  audioVolumeGet(): Promise<{ volume: number }> {
+    return this.req("GET", "/camera/sdk/audio/input/volume");
+  }
+
+  async audioVolumeSet(
+    volume: number,
+    verify: VerifyOpts = {},
+  ): Promise<{ settled: boolean; volume: number }> {
+    await this.send("PUT", "/camera/sdk/audio/input/volume", { volume });
+    const v = await this.verified(
+      () => this.audioVolumeGet(),
+      (r) => Math.abs(r.volume - volume) <= 1,
+      verify,
+    );
+    return { settled: v.settled, volume: v.value.volume };
+  }
+
+  audioMuteGet(): Promise<{ enable: boolean }> {
+    return this.req("GET", "/camera/sdk/audio/input/mute");
+  }
+
+  async audioMuteSet(
+    enable: boolean,
+    verify: VerifyOpts = {},
+  ): Promise<{ settled: boolean; enable: boolean }> {
+    await this.send("PUT", "/camera/sdk/audio/input/mute", { enable });
+    const v = await this.verified(() => this.audioMuteGet(), (r) => r.enable === enable, verify);
+    return { settled: v.settled, enable: v.value.enable };
   }
 
   // ---- presets ----------------------------------------------------------------

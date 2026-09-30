@@ -29,6 +29,25 @@ interface FakeState {
   /** gimbalcontrol telemetry: non-stop speed POSTs seen, stops seen. */
   speedJogs: number;
   stopCount: number;
+  /** The 2026-09-30 vendor-doc surface: record/capture, focus, exposure, image, stream, audio. */
+  recording: "on" | "off";
+  focusMode: "afc" | "afs" | "mf";
+  focusPosition: number;
+  exposureMode: "manual" | "auto";
+  exposureAutoMode: "global" | "face";
+  evbias: number;
+  iso: number;
+  shutter: string;
+  styleMode: string;
+  style: Record<string, number>;
+  hdr: "on" | "off";
+  wbMode: string;
+  wbTemp: number;
+  stream: "ndi" | "rtsp" | "srt" | "off";
+  onlyMe: boolean;
+  volume: number;
+  audioMute: boolean;
+  captures: number;
   /** Actuation delays in ms - how long an acked write takes to land. */
   delays: { zoom: number; portrait: number; preset: number };
   /** When true, zoom writes NEVER land: the swallowed-write hazard, frozen. */
@@ -50,6 +69,24 @@ function makeFakeTail2(): Promise<{ api: Tail2Api; state: FakeState; close: () =
     gimbalInvert: false,
     speedJogs: 0,
     stopCount: 0,
+    recording: "off",
+    focusMode: "afc",
+    focusPosition: 40,
+    exposureMode: "auto",
+    exposureAutoMode: "global",
+    evbias: 0,
+    iso: 894, // the live-AE-inherited value the real camera reported
+    shutter: "1/100",
+    styleMode: "standard",
+    style: { brightness: 50, contrast: 50, hue: 50, saturation: 50, sharpness: 50 },
+    hdr: "off",
+    wbMode: "auto",
+    wbTemp: 3000,
+    stream: "ndi",
+    onlyMe: true,
+    volume: 50,
+    audioMute: true,
+    captures: 0,
     delays: { zoom: 120, portrait: 250, preset: 100 },
     swallowZoom: false,
   };
@@ -223,6 +260,113 @@ function makeFakeTail2(): Promise<{ api: Tail2Api; state: FakeState; close: () =
       }
       return json(res, 400, {});
     }
+  // ---- the 2026-09-30 vendor-doc surface ----------------------------------
+  // Uniform shape: GET returns {key: value}, PUT {key: value} mutates.
+  // Mode-gated endpoints 500 while their mode is wrong (measured on hardware:
+  // motorposition outside mf, manual iso/shutter outside manual exposure).
+  const pair = async (
+    path: string,
+    key: string,
+    get: () => unknown,
+    set: (v: unknown) => void,
+    gate?: () => boolean,
+  ): Promise<boolean> => {
+    if (req.method === "GET" && url === path) {
+      if (gate?.()) {
+        json(res, 500, {});
+        return true;
+      }
+      json(res, 200, typeof get() === "object" ? get() : { [key]: get() });
+      return true;
+    }
+    if (req.method === "PUT" && url === path) {
+      if (gate?.()) {
+        json(res, 500, {});
+        return true;
+      }
+      const b = await readBody(req);
+      if (b[key] === undefined) {
+        json(res, 400, {});
+        return true;
+      }
+      set(b[key]);
+      json(res, 200, { code: 200, err_idx: 0 });
+      return true;
+    }
+    return false;
+  };
+  const p = "/camera/sdk";
+  if (await pair(`${p}/record/control`, "recording", () => state.recording, (v) => (state.recording = v as "on" | "off"))) return;
+  if (req.method === "POST" && url === `${p}/capture/trigger`) {
+    state.captures++;
+    return json(res, 200, { code: 200, err_idx: 0 });
+  }
+  if (await pair(`${p}/image/af/mode`, "mode", () => state.focusMode, (v) => (state.focusMode = v as "afc"))) return;
+  if (
+    await pair(
+      `${p}/image/af/motorposition`, "position", () => state.focusPosition,
+      (v) => (state.focusPosition = v as number), () => state.focusMode !== "mf",
+    )
+  )
+    return;
+  if (await pair(`${p}/image/exposure/mode`, "mode", () => state.exposureMode, (v) => (state.exposureMode = v as "auto"))) return;
+  if (await pair(`${p}/image/exposure/auto/mode`, "mode", () => state.exposureAutoMode, (v) => (state.exposureAutoMode = v as "global"))) return;
+  if (await pair(`${p}/image/exposure/auto/compensation`, "evbias", () => state.evbias, (v) => (state.evbias = v as number))) return;
+  if (
+    await pair(
+      `${p}/image/exposure/manual/iso`, "iso", () => state.iso,
+      (v) => (state.iso = v as number), () => state.exposureMode !== "manual",
+    )
+  )
+    return;
+  if (
+    await pair(
+      `${p}/image/exposure/manual/shuttertime`, "shutter", () => state.shutter,
+      (v) => (state.shutter = v as string), () => state.exposureMode !== "manual",
+    )
+  )
+    return;
+  // style/<control> GETs carry the mode alongside (measured); PUTs are gated
+  // to manual style mode (measured: HTTP 500 "style mode is not manual").
+  for (const c of ["brightness", "contrast", "hue", "saturation", "sharpness"] as const) {
+    if (req.method === "GET" && url === `${p}/image/style/${c}`) {
+      return json(res, 200, { mode: state.styleMode, [c]: state.style[c] });
+    }
+    if (req.method === "PUT" && url === `${p}/image/style/${c}`) {
+      if (state.styleMode !== "manual") {
+        return json(res, 500, { code: 500, err_idx: 0, detail: "style mode is not manual" });
+      }
+      const b = await readBody(req);
+      state.style[c] = b[c] as number;
+      return json(res, 200, { code: 200, err_idx: 0 });
+    }
+  }
+  if (req.method === "GET" && url === `${p}/image/style/mode`) {
+    return json(res, 200, { mode: state.styleMode, ...state.style });
+  }
+  if (req.method === "PUT" && url === `${p}/image/style/mode`) {
+    const b = await readBody(req);
+    state.styleMode = b.mode as string;
+    for (const c of Object.keys(state.style)) {
+      if (typeof b[c] === "number") state.style[c] = b[c] as number;
+    }
+    return json(res, 200, { code: 200, err_idx: 0 });
+  }
+  if (await pair(`${p}/image/hdr/control`, "control", () => state.hdr, (v) => (state.hdr = v as "on" | "off"))) return;
+  if (req.method === "GET" && url === `${p}/image/whitebalance/config`) {
+    return json(res, 200, { mode: state.wbMode, temperature: state.wbTemp });
+  }
+  if (req.method === "PUT" && url === `${p}/image/whitebalance/config`) {
+    const b = await readBody(req);
+    state.wbMode = b.mode as string;
+    state.wbTemp = b.temperature as number;
+    return json(res, 200, { code: 200, err_idx: 0 });
+  }
+  if (await pair(`${p}/ndi-rtsp-srt/control`, "control", () => state.stream, (v) => (state.stream = v as "ndi"))) return;
+  if (await pair(`${p}/ai/human/onlyme`, "enable", () => state.onlyMe, (v) => (state.onlyMe = v as boolean))) return;
+  if (await pair(`${p}/audio/input/volume`, "volume", () => state.volume, (v) => (state.volume = v as number))) return;
+  if (await pair(`${p}/audio/input/mute`, "enable", () => state.audioMute, (v) => (state.audioMute = v as boolean))) return;
+
     json(res, 404, {});
   });
 
@@ -463,8 +607,55 @@ describe("Tail2Api", () => {
     await expect(fake.api.readPose()).rejects.toThrow(/all three preset slots are occupied/);
   });
 
-  it("moveAbsolute closes the loop end to end through the HTTP client", async () => {
-    // Small move so the loop converges in one or two rounds of REAL time.
+  // ---- the 2026-09-30 vendor-doc surface -----------------------------------
+
+  it("recordSet writes and verifies; captureTrigger lands", async () => {
+    const r = await fake.api.recordSet(true);
+    expect(r).toMatchObject({ settled: true, recording: "on" });
+    await fake.api.captureTrigger();
+    expect(fake.state.captures).toBe(1);
+    await fake.api.recordSet(false);
+  });
+
+  it("focus position is mode-gated: 500 outside mf, readable and writable in mf", async () => {
+    await expect(fake.api.focusPositionGet()).rejects.toMatchObject({ status: 500 });
+    await fake.api.focusModeSet("mf");
+    expect(await fake.api.focusPositionGet()).toEqual({ position: 40 });
+    const r = await fake.api.focusPositionSet(80);
+    expect(r).toMatchObject({ settled: true, position: 80 });
+    await fake.api.focusModeSet("afc"); // restore
+  });
+
+  it("manual exposure values are gated by exposure mode", async () => {
+    await expect(fake.api.exposureIsoGet()).rejects.toMatchObject({ status: 500 });
+    await fake.api.exposureModeSet("manual");
+    expect(await fake.api.exposureIsoGet()).toEqual({ iso: 894 });
+    const r = await fake.api.exposureIsoSet(800);
+    expect(r).toMatchObject({ settled: true, iso: 800 });
+    await fake.api.exposureModeSet("auto"); // restore
+  });
+
+  it("stream control, style, wb, hdr, onlyme, audio all round-trip verified", async () => {
+    expect(await fake.api.streamControlSet("srt")).toMatchObject({ settled: true, control: "srt" });
+    expect(fake.state.stream).toBe("srt");
+    // Style control writes are gated to manual mode (measured on hardware).
+    await fake.api.styleModeSet("manual");
+    expect(await fake.api.styleSet("brightness", 70)).toMatchObject({ settled: true, value: 70 });
+    await expect(fake.api.styleSet("contrast", 80)).resolves.toBeDefined();
+    await fake.api.styleModeSet("standard");
+    await expect(fake.api.styleSet("contrast", 80)).rejects.toMatchObject({ status: 500 });
+    expect(await fake.api.wbConfigSet("manual", 5600)).toMatchObject({
+      settled: true,
+      mode: "manual",
+      temperature: 5600,
+    });
+    expect(await fake.api.hdrSet(true)).toMatchObject({ settled: true, control: "on" });
+    expect(await fake.api.onlyMeSet(false)).toMatchObject({ settled: true, enable: false });
+    expect(await fake.api.audioVolumeSet(30)).toMatchObject({ settled: true, volume: 30 });
+    expect(await fake.api.audioMuteSet(false)).toMatchObject({ settled: true, enable: false });
+  });
+
+  it("moveAbsolute closes the loop end to end through the HTTP client", async () => {    // Small move so the loop converges in one or two rounds of REAL time.
     fake.state.pose = { yaw: 0.4, pitch: 1.6, roll: 0 };
     const { moveAbsolute } = await import("../../src/tail2/move.js");
     const r = await moveAbsolute(

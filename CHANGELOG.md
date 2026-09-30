@@ -2,6 +2,39 @@
 
 ## [Unreleased]
 
+### Added: the Tail 2's whole image/exposure/audio/record surface — 10 tools from the vendor's own doc
+
+The vendor REST doc (`SDKs/obsbot_tail_2_res_tful.zip`) sat unopened in `SDKs/` through the entire
+September reverse-engineering session; auditing it against the decoded surface on 2026-09-30
+turned up ~45 endpoints, most mapping exactly onto §9's "not yet decoded" list. Every endpoint
+below was then hardware-verified against firmware 7.2.13.1 before getting a tool — and the
+verification measured three firmware behaviors the doc does not mention:
+
+- **Mode-gated values read/write as HTTP 500** outside their mode: focus `motorposition` unless
+  `af/mode` is `mf`; manual `iso`/`shuttertime` unless exposure is manual; and every
+  `style/<control>` write unless `style/mode` is `manual` (a useful 500 — `"style mode is not
+  manual"`). The tools refuse these up front with guidance instead of triggering the 500.
+- **`evbias` rejects JSON integers**: `{"evbias":0}` → 400 "Invalid value type", and some
+  integer bodies ACK *without ever applying*; `0.0`/`-1.0` land. `JSON.stringify` cannot
+  produce a decimal-point float from a whole number, so the client sends this one endpoint a
+  raw body. 
+- **Manual ISO granularity is a lie**: the doc says "increment of 100"; the camera reported
+  894 — a live-AE-inherited value — on first switch to manual.
+
+New tools (tool surface now 30 `obsbot_tail2_*`): **`record`** (start/stop + state), **`capture_photo`**
+(still-photo trigger; both need storage), **`focus`** (afc/afs/mf + manual motor position 0–100),
+**`exposure`** (auto: face-priority AE + evbias; manual: ISO + shutter — mode-appropriate reads),
+**`image_adjust`** (5 controls 0–100 + style modes, values preserved across mode switches),
+**`hdr`**, **`wb`** (6 modes + Kelvin), **`stream`** (select ndi/rtsp/srt/off — the programmatic
+way to arm SRT for `obsbot_tail2_snapshot`, no OBSBOT Center needed), **`only_me`**, **`audio`**
+(volume + mute). Live-verified as a sweep: every write round-tripped readback-verified and the
+camera's original state restored afterwards (focus afc, style standard/50s, evbias 0, HDR off,
+WB auto, NDI back on).
+
+Also recorded in TAIL2-PROTOCOL.md: the full endpoint census with exercised/unexercised status,
+so the remaining vendor-documented-but-unprobed endpoints (gesture control, streaming encoder
+config, USB mode, AF window/track) have a checklist to work from.
+
 ### Added: the Tail 2 can be aimed — speed moves, a pose sensor, and absolute positioning
 
 The Tail 2's HTTP API has no move-to-angle endpoint, so until now the only gimbal actions

@@ -105,6 +105,36 @@ PUT /camera/sdk/ptz/preset {"operation":"rename", "id":N, "name":<base64>}      
   zoom ratio (verified: recall drove zoom 1.5 → saved 3.0).
 
 ### Rotation (no Tiny 2 equivalent)
+
+### The 2026-09-30 vendor-doc surface (all MEASURED against firmware 7.2.13.1)
+
+Found in the vendor's own REST doc (`SDKs/obsbot_tail_2_res_tful.zip`, unopened until 2026-09-30),
+then hardware-verified endpoint by endpoint. Every write below is readback-verified by the client.
+Uniform GET/PUT shape `{key: value}` unless noted:
+
+| Endpoint | Shape | Notes |
+|---|---|---|
+| `GET/PUT /record/control` | `{"recording":"on"\|"off"}` | state readable with no SD card; starting needs one |
+| `POST /capture/trigger` | empty body | still photo to storage |
+| `GET/PUT /image/af/mode` | `{"mode":"afc"\|"afs"\|"mf"}` | |
+| `GET/PUT /image/af/motorposition` | `{"position":0-100}` | **mode-gated: HTTP 500 unless mf** |
+| `GET/PUT /image/af/{trackmode,windowcenter}` | per vendor doc | not yet exercised |
+| `GET/PUT /image/exposure/mode` | `{"mode":"manual"\|"auto"}` | |
+| `GET/PUT /image/exposure/auto/mode` | `{"mode":"global"\|"face"}` | face-priority AE |
+| `GET/PUT /image/exposure/auto/compensation` | `{"evbias":float}` | **rejects JSON integers** (400 "Invalid value type"; `0`/`-1` rejected, `0.0`/`-1.0` applied — and some integer bodies ACK without applying). Client always emits a decimal-point float |
+| `GET/PUT /image/exposure/manual/{iso,shuttertime}` | `{"iso":100-6400}` / `{"shutter":"1/N"}` | **mode-gated: HTTP 500 unless exposure manual**. Manual ISO read back 894 on first switch — a live-AE-inherited value; the doc's "increment of 100" claim is false |
+| `GET/PUT /image/style/{brightness,contrast,hue,saturation,sharpness}` | `{"<c>":0-100}` | GET also returns `{mode}`; **PUT mode-gated: HTTP 500 "style mode is not manual" unless style/mode is manual** |
+| `GET/PUT /image/style/mode` | `{mode + all five values}` | PUT takes the full bundle; the client sends current values so a mode switch never stomps adjustments |
+| `GET/PUT /image/hdr/control` | `{"control":"on"\|"off"}` | |
+| `GET/PUT /image/whitebalance/config` | `{"mode":auto\|daylight\|fluorescent\|tungsten\|cloudy\|manual,"temperature":2000-10000}` | temperature writes observed not to stick outside manual mode (readback lags/ignores) |
+| `GET/PUT /ndi-rtsp-srt/control` | `{"control":"ndi"\|"rtsp"\|"srt"\|"off"}` | exactly ONE active output; setting srt displaces ndi (the exclusivity §7a measured); the programmatic way to arm SRT for snapshots |
+| `GET/PUT /ndi-rtsp-srt/{encoder,resolution,bitrate,rtspurl}` | per vendor doc | not yet exercised |
+| `GET/PUT /ai/human/onlyme` | `{"enable":bool}` | |
+| `GET/PUT /ai/human/zoomtype`, `/ai/gesturecontrol/*` | per vendor doc | not yet exercised |
+| `GET/PUT /audio/input/{volume,mute,agc,enc,aux}` | `{"volume":0-100}` / `{"enable":bool}` / … | volume+mute exercised |
+| `GET/PUT /usb/mode`, `/record/{encoder,resolution,bitrate}`, `/album/filelist` | per vendor doc | not yet exercised (usb mode deliberately untouched — it re-enumerates the device) |
+
+### Rotation (no Tiny 2 equivalent)
 | Endpoint | Payload | Status |
 |---|---|---|
 | `POST /camera/sdk/switch_portrait` | `{"enable": <bool>}` | **MEASURED working** — motorized 90° barrel rotation, verified both directions |

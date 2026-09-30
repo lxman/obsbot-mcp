@@ -63,7 +63,7 @@ With the installed binary, use `"command": "obsbot-mcp"` and `"args": ["--debug"
 
 35 tools on Windows and macOS, 34 on Linux (`obsbot_gimbal_move_speed` is unavailable there — see
 [limitations](#linux-gimbal-position-feedback-is-not-live)). `--debug` adds `obsbot_debug_probe` for
-one more. Every Tail 2 camera on the network adds the 20 `obsbot_tail2_*` tools in
+one more. Every Tail 2 camera on the network adds the 30 `obsbot_tail2_*` tools in
 [OBSBOT Tail 2](#obsbot-tail-2-network-cameras) below (all platforms — they are pure TypeScript).
 All names below are current as of v0.4.0 — **every tool was renamed in this
 release and there is no backward-compatible alias**; see [CHANGELOG.md](./CHANGELOG.md) for the
@@ -293,6 +293,16 @@ resolves to that one.
 | `obsbot_tail2_gimbal_speed` | `yaw`? `pitch`? `roll`? (±150 speed), `durationMs`? (100–5000, default 500), `camera`? | Jog the gimbal (the joystick primitive) with automatic stop. Measured: command 20 ≈ 7.9°/s; positive yaw command DECREASES recorded yaw. Disable AI tracking first. |
 | `obsbot_tail2_gimbal_move` | `yaw`? `pitch`? (±178°), `camera`? | Absolute move via closed loop (jog → pose read → correct, ≤5 rounds, ±1.5° tolerance). Slow by design (~1 s per small move, more for large). Refuses while AI tracking is active. Hardware-verified 2026-09-30: 4° move converged in one iteration. |
 | `obsbot_tail2_gimbal_invert` | `enable`?, `camera`? | Read (bare call) or set (verified) control-direction inversion. |
+| `obsbot_tail2_record` | `enable`?, `camera`? | Read/control the recording switch. Needs storage — check `obsbot_tail2_status`'s sdcard field. |
+| `obsbot_tail2_capture_photo` | `camera`? | Trigger a still photo (to storage). |
+| `obsbot_tail2_focus` | `mode`? (`afc`/`afs`/`mf`), `position`? (0–100), `camera`? | Read or set focus. Position only in `mf` (mode-gated; the tool refuses otherwise). |
+| `obsbot_tail2_exposure` | `mode`?, `face`?, `evbias`?, `iso`?, `shutter`?, `camera`? | Read (mode-appropriate) or set exposure: auto (face-priority AE + EV bias) or manual (ISO 100–6400, shutter `1/N`). Note: the firmware rejects JSON-integer evbias — the client always sends `0.0`-style floats. |
+| `obsbot_tail2_image_adjust` | `control`?, `value`? (0–100), `styleMode`?, `camera`? | Read or set image style (brightness/contrast/hue/saturation/sharpness). Control writes are gated to `styleMode: manual` — the tool applies a given styleMode first and refuses otherwise. |
+| `obsbot_tail2_hdr` | `enabled`?, `camera`? | Read/set HDR. |
+| `obsbot_tail2_wb` | `mode`?, `temperature`? (2000–10000 K), `camera`? | Read/set white balance (6 modes + Kelvin in manual). |
+| `obsbot_tail2_stream` | `output`? (`ndi`/`rtsp`/`srt`/`off`), `camera`? | Read/set the ONE active network output. The programmatic way to arm SRT for `obsbot_tail2_snapshot` — no Center needed. |
+| `obsbot_tail2_only_me` | `enabled`?, `camera`? | Read/set OnlyMe human-tracking (track one person, not everyone). |
+| `obsbot_tail2_audio` | `volume`?, `mute`?, `camera`? | Read/set audio input. |
 | `obsbot_tail2_portrait` | `enable`, `camera`? | Motorized 90° barrel rotation for portrait framing — no Tiny 2 equivalent. Verified on orientation feedback; retry if `settled:false` (writes can be silently dropped *while the motor is in motion* — measured). |
 | `obsbot_tail2_roll_bias` | `angle` (±90), `camera`? | Roll trim in degrees (horizon correction / deliberate tilt). |
 | `obsbot_tail2_ai_track` | `enabled`, `mode` (default `"humanTrackingSingleMode"`), `camera`? | Enable/disable AI tracking. Modes are the camera's own enum: human (single/group), animal (normal/close-up), object tracking (`objectTracking`/`objectTrackingNormal`/`objectTrackingCloseUp`). While active, tracking owns the gimbal. |
