@@ -271,9 +271,11 @@ for what was measured.
 Getting started:
 
 1. Put the Tail 2 on your network (it defaults to DHCP on ethernet).
-2. Call `obsbot_tail2_scan` once — it sweeps the local subnet with the same probe OBSBOT Center
-   uses and registers what answers. Or set `OBSBOT_TAIL2_HOSTS` (comma-separated addresses) in the
-   server's environment, or just pass any Tail 2 tool a `camera` parameter holding the camera's IP.
+2. Call `obsbot_tail2_scan` once — it listens ~5 s for the camera's own mDNS announcements (it
+   multicasts its MAC, name and IPs every few seconds, the same channel OBSBOT Center discovers
+   by) and falls back to an HTTP subnet sweep only on multicast-filtered networks. Or set
+   `OBSBOT_TAIL2_HOSTS` (comma-separated addresses) in the server's environment, or just pass any
+   Tail 2 tool a `camera` parameter holding the camera's IP.
 
 The `camera` selector for these tools is the camera's **MAC** (its stable identity), or its
 `device_name`, or its host address — case-insensitive. Omitted with one Tail 2 registered it
@@ -282,7 +284,7 @@ resolves to that one.
 | Tool | Parameters | Description |
 |------|------------|-------------|
 | `obsbot_tail2_devices` | — | List registered Tail 2 cameras (mac, name, host(s)). Registration is not liveness. |
-| `obsbot_tail2_scan` | — | Sweep the local subnet(s) for Tail 2 cameras and register them (~20 s on a full /24). |
+| `obsbot_tail2_scan` | — | Discover Tail 2 cameras: ~5 s mDNS listen (the camera's own announcements), HTTP subnet sweep fallback. Registers what it found. |
 | `obsbot_tail2_status` | `camera`? | One WebSocket status push: the full live block — power, rec, portrait, AI mode + tracking settings, zoom ratio, roll bias, focus modes, NDI/RTSP/SRT/RTMP flags, SD card, presets with poses, and per-subsystem health. No live yaw/pitch — Tail 2 gimbal moves are open-loop. |
 | `obsbot_tail2_info` | `camera`? | Identity + static config in one call: device_info, range (zoom **1.0–12.0**, focus 1–100, WB 2000–10000 K), networkconfig (NDI/stream settings). |
 | `obsbot_tail2_zoom` | `ratio` (`1.0`–`12.0`), `speed` (`1`–`10`, default `5`), `camera`? | Absolute zoom on the camera's own ratio scale. `speed` is required by the firmware. Returns `settled` (readback-verified) — see below. |

@@ -111,14 +111,15 @@ export function createTail2Tools(
     {
       name: "obsbot_tail2_scan",
       description:
-        "Sweep the local IPv4 subnet(s) for OBSBOT Tail 2 cameras and register what answers " +
-        "(one HTTP probe per address, the same discovery OBSBOT Center uses). Returns the " +
-        "cameras that answered; they stay registered afterwards. Run this once to onboard a " +
-        "Tail 2 whose IP you don't know. Can take ~20s on a full /24 where most addresses " +
-        "are silent.",
+        "Discover OBSBOT Tail 2 cameras on the network and register them. Listens for the " +
+        "camera's own mDNS announcements (~5s — it multicasts its MAC, name and IPs every " +
+        "few seconds, the same channel OBSBOT Center discovers by) and falls back to an HTTP " +
+        "subnet sweep only when nothing was heard (multicast-filtered networks; ~20s on a " +
+        "full /24). Returns the cameras found; they stay registered afterwards. Run this " +
+        "once to onboard a Tail 2 whose IP you don't know.",
       schema: scanSchema,
       handler: async () => {
-        const found = await registry.scanSubnet();
+        const found = await registry.scan();
         return {
           found: found.map((e) => ({ mac: e.mac, name: e.name, hosts: e.hosts })),
           registered: registry.list().length,
@@ -136,8 +137,8 @@ export function createTail2Tools(
         "open-loop (same limitation as the Tiny 2 on Linux).",
       schema: statusSchema,
       handler: async (args: unknown) => {
-        statusSchema.parse(args);
-        const { api } = await registry.resolve();
+        const { camera } = statusSchema.parse(args);
+        const { api } = await registry.resolve(camera);
         return { camera: (await api.info()).mac, ...(await api.status()) };
       },
     },
@@ -150,8 +151,8 @@ export function createTail2Tools(
         "settings). Read-only.",
       schema: infoSchema,
       handler: async (args: unknown) => {
-        infoSchema.parse(args);
-        const { api } = await registry.resolve();
+        const { camera } = infoSchema.parse(args);
+        const { api } = await registry.resolve(camera);
         return {
           device: await api.info(),
           ranges: await api.ranges(),
@@ -185,8 +186,8 @@ export function createTail2Tools(
         "obsbot_tail2_ai_track if that matters). Hardware-verified 2026-09-26.",
       schema: recenterSchema,
       handler: async (args: unknown) => {
-        recenterSchema.parse(args);
-        const { api } = await registry.resolve();
+        const { camera } = recenterSchema.parse(args);
+        const { api } = await registry.resolve(camera);
         await api.recenter();
         return { ok: true };
       },
@@ -266,8 +267,8 @@ export function createTail2Tools(
         "own ids are 0-based; mapped for consistency with the Tiny 2 preset tools).",
       schema: presetListSchema,
       handler: async (args: unknown) => {
-        presetListSchema.parse(args);
-        const { api } = await registry.resolve();
+        const { camera } = presetListSchema.parse(args);
+        const { api } = await registry.resolve(camera);
         const presets = await api.presetsGet();
         return {
           slots: [0, 1, 2].map((id) => {

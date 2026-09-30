@@ -133,4 +133,60 @@ describe("Tail2Registry", () => {
     expect(found.map((e) => e.mac).sort()).toEqual(["aa:aa:aa:aa:aa:aa", "bb:bb:bb:bb:bb:bb"]);
     expect(reg.list()).toHaveLength(2);
   });
+
+  it("addAnnouncement registers without probing, name from the digest, API on the wired host", async () => {
+    let made: string[] = [];
+    const reg = new Tail2Registry({
+      makeApi: (host) => {
+        made.push(host);
+        return ({}) as unknown as Tail2Api;
+      },
+    });
+    const e = reg.addAnnouncement({
+      mac: "10:A5:62:BC:3C:BC",
+      name: "Tail 2_bc3cbc",
+      hosts: ["192.168.0.132", "192.168.55.222"],
+    });
+    expect(e.mac).toBe("10:a5:62:bc:3c:bc"); // lowercased
+    expect(e.hosts).toEqual(["192.168.0.132", "192.168.55.222"]);
+    expect(made).toEqual(["192.168.0.132"]); // wired first; wireless is the camera's own AP subnet
+    // A later announcement only merges hosts — no new API, no probe.
+    reg.addAnnouncement({ mac: "10:a5:62:bc:3c:bc", name: "Tail 2_bc3cbc", hosts: ["192.168.0.132", "10.0.0.9"] });
+    expect(made).toEqual(["192.168.0.132"]);
+    expect(reg.list()[0]!.hosts).toEqual(["192.168.0.132", "192.168.55.222", "10.0.0.9"]);
+  });
+
+  it("scan() prefers mDNS announcements and does not sweep when it heard any", async () => {
+    let made: string[] = [];
+    const reg = new Tail2Registry({
+      makeApi: (host) => {
+        made.push(host);
+        return ({}) as unknown as Tail2Api;
+      },
+    });
+    const found = await reg.scan({
+      mdnsMs: 1,
+      listen: async () => [{ mac: "10:a5:62:bc:3c:bc", name: "Tail 2_bc3cbc", hosts: ["192.168.0.132"] }],
+    });
+    expect(found.map((e) => e.mac)).toEqual(["10:a5:62:bc:3c:bc"]);
+    expect(made).toEqual(["192.168.0.132"]); // the announcement's API only — no sweep probes
+  });
+
+  it("scan() falls back to the subnet sweep when mDNS hears nothing", async () => {
+    const reg = registryWith({ "192.168.77.5": INFO_A });
+    const found = await reg.scan({
+      mdnsMs: 1,
+      listen: async () => [],
+      subnets: ["192.168.77"],
+      concurrency: 64,
+    });
+    expect(found.map((e) => e.mac)).toEqual(["aa:aa:aa:aa:aa:aa"]);
+  });
+
+  it("scan() with sweep disabled and nothing heard registers nothing, quietly", async () => {
+    const reg = registryWith({});
+    const found = await reg.scan({ mdnsMs: 1, listen: async () => [], sweep: false });
+    expect(found).toEqual([]);
+    expect(reg.list()).toEqual([]);
+  });
 });

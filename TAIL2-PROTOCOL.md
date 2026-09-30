@@ -29,7 +29,7 @@ documented in §11 and is not used by the `obsbot_tail2_*` tools.
 | 9002/tcp | TLS + HTTP | Same 403 page over TLS. Unknown gate. |
 | 10086/tcp | HTTP | HTTP/1.1 400 plain-text to everything. Unknown (different server signature than lighttpd). |
 | 23/tcp | Telnet | **Linux login prompt** (`Tail 2_bc3cbc login:`). Factory credential pairs rejected 2026-09-26 (§9). |
-| 5353/udp | mDNS | Confirmed open by UDP scan (a legacy-uniccast query from Windows went unanswered — local firewall artifact, not absence). |
+| 5353/udp | mDNS | **The discovery channel** — the camera ANNOUNCES here every few seconds and answers no queries; see §7a. |
 | 67/udp | open\|filtered | DHCP — plausibly the camera's own WiFi-AP-mode server. |
 | (USB-C) | MTP or UVC | `usb_mode` enum in the web bundle: `0=UNKNOWN, 1=UVC, 4=MTP`; this unit reported **4** when scanned, i.e. file offload (MTP) for SD footage. The port can be switched to a UVC webcam mode with its own control surface (§11). It is *not* USB-ethernet in either mode: on Linux the CDC interfaces bind no driver and no network interface appears. |
 
@@ -193,13 +193,55 @@ not yet decoded (likely `PUT networkconfig` or a sibling). **Enabling RTSP is th
 Tail 2 snapshot/record support in obsbot-mcp**: stock ffmpeg speaks RTSP (it does not speak
 NDI), so `obsbot_capture_snapshot`/`record` gain a Tail 2 path with zero extra dependencies.
 
-## 7. Discovery model (INFERRED from bundle, consistent with probes)
+## 7. Discovery model (INFERRED from bundle, consistent with probes; mDNS MEASURED 2026-09-30)
 
 OBSBOT Center identifies a Tail 2 by **MAC** (the Tiny 2 path uses the USB serial). Each
 device carries candidate addresses `[{type:"wired", ip}, {type:"wireless", ip}]`; discovery
 probes candidates in parallel with the device_info + WS hello handshake and races them with a
 short timeout. For obsbot-mcp, a Tail 2 registry can therefore be keyed by MAC, with the
 camera selector accepting either MAC or `device_name`.
+
+### 7a. mDNS: the camera announces; it does not answer (MEASURED 2026-09-30)
+
+Captured OBSBOT Center discovering this camera (tshark, `host 192.168.0.132 or udp port
+5353`): Center sent **zero** mDNS queries. Every query frame on the wire came from the camera
+itself (both its IPv4 and its IPv6 link-local addresses), asking `_remo_mdns._tcp.local` PTR —
+probing for its Remo remote. Discovery is a **listen**: the camera multicasts
+response-framed announcements every few seconds, and everything on the LAN that wants to find
+it just hears one. This is why direct queries (multicast `_services._dns-sd._udp.local`,
+`_ndi._tcp.local`, hostname ANY — tried 2026-09-30; and September's legacy-unicast query) all
+went unanswered: there is no query responder. The 2026-09-26 port-table note guessed "local
+firewall artifact" — wrong; it was the absence of a responder.
+
+What one announcement carries (names verbatim from the capture; hostname format is
+`Tail2bc3cbc.local` — the MAC's last three octets run together, **no** separators):
+
+| Record | Content |
+|---|---|
+| A `Tail2bc3cbc.local` | `192.168.0.132` (wired) |
+| AAAA | `fe80::12a5:62ff:febc:3cbb` (MAC-derived link-local) |
+| PTR `_remo_mdns._tcp.local` → `Remo_mDNS._remo_mdns._tcp.local` | SRV → `Tail2bc3cbc.local:12345` |
+| TXT on that instance | the device digest, below |
+| PTR `_ndi._tcp.local` → `TAIL 2_BC3CBC (OBSBOT)._ndi._tcp.local` | SRV port 5961; TXT `groups=Public`, `discovery=5960` (NDI discovery port) |
+
+The digest is a set of JSON objects as separate TXT strings (merged here):
+
+- `wifi_mac` (`…:3c:ba`), `wifi_mode`, `wireless_ip` (`192.168.55.222` — the camera's **own
+  AP subnet**, typically unroutable from the LAN), `wired_ip`, `ssid`, connection counts
+- `device_name` (**hex-encoded UTF-8**: `5461696c20325f626333636263` = `Tail 2_bc3cbc`),
+  `ble_mac` (`…:3c:bc` — the MAC the registry keys on, and the one `/camera/sdk/device_info`
+  reports), battery level/flags, sleep/charging state
+- `device_type`/`product_type` (6), base64 `device_sn`, `permission_check`
+
+So one packet = full registration: MAC, name, both IPs, liveness (it arrived seconds ago).
+obsbot-mcp's `obsbot_tail2_scan` listens ~5 s for these (pure TypeScript, `dgram` +
+`SO_REUSEADDR` on 5353, which all three OSes allow alongside their own responders) and falls
+back to the HTTP sweep only when nothing was heard. Verified against the live camera
+2026-09-30: listen → register → `device_info` over HTTP, no probe sent during discovery.
+
+Ports seen here but not elsewhere in this document: **12345/tcp** (the SRV target of
+`_remo_mdns` — the Remo mDNS channel, not the UDP 9999 file-transfer channel of §10) and
+**5960/5961** (NDI discovery/instance).
 
 ## 8. Behaviors that shape the client (MEASURED 2026-09-26)
 

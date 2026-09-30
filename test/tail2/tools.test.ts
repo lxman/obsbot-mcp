@@ -259,6 +259,47 @@ describe("tail2 tools", () => {
     expect(r.registered).toBe(1);
   });
 
+  it("status, info, recenter and preset_list honour the camera selector (regression: it was parsed and dropped)", async () => {
+    // Two cameras registered: without the selector every one of these is
+    // AmbiguousTail2Error — which is exactly how the dropped `camera` bug
+    // surfaced (a selector was supplied and still hit "multiple cameras").
+    const fakeA = makeFake();
+    const fakeB = makeFake();
+    fakeB.api = {
+      ...fakeB.api,
+      info: async () => ({ device_name: "Tail 2_bbbb", wired_ip: "h", wireless_ip: "0.0.0.0", mac: "bb:bb:bb:bb:bb:bb" }),
+    } as unknown as Tail2Api;
+    const reg = new Tail2Registry({
+      makeApi: (host) => (host === "192.168.0.10" ? fakeA.api : fakeB.api),
+      probeTimeoutMs: 500,
+    });
+    await reg.addHost("192.168.0.10");
+    await reg.addHost("192.168.0.20");
+    const tools = createTail2Tools(reg);
+
+    const status = (await tool(tools, "obsbot_tail2_status").handler({ camera: "bb:bb:bb:bb:bb:bb" })) as {
+      camera: string;
+    };
+    expect(status.camera).toBe("bb:bb:bb:bb:bb:bb");
+
+    const info = (await tool(tools, "obsbot_tail2_info").handler({ camera: "192.168.0.20" })) as {
+      device: { mac: string };
+    };
+    expect(info.device.mac).toBe("bb:bb:bb:bb:bb:bb");
+
+    await expect(
+      tool(tools, "obsbot_tail2_recenter").handler({ camera: "tail 2_bbbb" }),
+    ).resolves.toEqual({ ok: true });
+
+    const presets = (await tool(tools, "obsbot_tail2_preset_list").handler({ camera: "bb:bb:bb:bb:bb:bb" })) as {
+      slots: unknown[];
+    };
+    expect(presets.slots).toHaveLength(3);
+
+    // And without a selector, ambiguity still names both — the hint is load-bearing.
+    await expect(tool(tools, "obsbot_tail2_status").handler({})).rejects.toThrow(/bb:bb:bb:bb:bb:bb/);
+  });
+
   it("tools on an empty registry tell the caller how to add a camera", async () => {
     const reg = new Tail2Registry();
     const tools = createTail2Tools(reg);

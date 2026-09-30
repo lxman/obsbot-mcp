@@ -1,5 +1,6 @@
 import { networkInterfaces } from "node:os";
 import { Tail2Api, Tail2DeviceInfo } from "./api.js";
+import { listenForTail2Announcements, type Tail2Announcement } from "./mdns.js";
 
 /**
  * MAC-keyed registry of attached OBSBOT Tail 2 cameras.
@@ -10,11 +11,14 @@ import { Tail2Api, Tail2DeviceInfo } from "./api.js";
  * 2's identity is its MAC, exactly as OBSBOT Center treats it. Entries are
  * created by probing a host with the discovery handshake (GET device_info,
  * then WS hello — this module only needs the first half) and can be added
- * three ways:
+ * four ways:
  *
  *   - the OBSBOT_TAIL2_HOSTS environment variable (comma-separated hosts),
  *     for a stable, known network;
- *   - the obsbot_tail2_scan tool, which sweeps the local /24(s);
+ *   - the obsbot_tail2_scan tool, which listens for the camera's mDNS
+ *     announcements (~5s) and falls back to sweeping the local /24(s);
+ *   - the camera's own periodic mDNS announcement, which names its MAC, its
+ *     name and both its IPs — no probe needed, the camera just said so;
  *   - resolve()/get() with an explicit host, which registers on first use.
  *
  * "Registered" does NOT mean "verified reachable right now" — entries persist
@@ -135,12 +139,76 @@ export class Tail2Registry {
   }
 
   /**
+   * Register straight from the camera's own mDNS announcement — no probe.
+   * The digest carries the MAC, the name and both IPs, and the packet arrived
+   * seconds ago, so it is better evidence than a probe that has not run. The
+   * API binds to the wired IP first (the wireless IP is often the camera's
+   * own AP subnet, 192.168.55.x, unroutable from here).
+   */
+  addAnnouncement(a: Tail2Announcement): Tail2Entry {
+    const mac = a.mac.toLowerCase();
+    const existing = this.byMac.get(mac);
+    if (existing) {
+      for (const h of a.hosts) if (!existing.hosts.includes(h)) existing.hosts.push(h);
+      return existing;
+    }
+    const entry: Tail2Entry = {
+      mac,
+      name: a.name,
+      hosts: [...a.hosts],
+      api: this.makeApi(a.hosts[0] ?? mac),
+    };
+    this.byMac.set(mac, entry);
+    return entry;
+  }
+
+  /**
+   * Discovery: listen for the camera's mDNS announcements (its own control
+   * channel — it multicasts a device digest every few seconds), and fall back
+   * to the HTTP subnet sweep only when nothing was heard, for networks where
+   * multicast is filtered. `OBSBOT_TAIL2_MDNS=0` skips the listen.
+   */
+  async scan(
+    opts: {
+      mdnsMs?: number;
+      listen?: (ms: number) => Promise<Tail2Announcement[]>;
+      sweep?: boolean;
+      subnets?: string[];
+      concurrency?: number;
+    } = {},
+  ): Promise<Tail2Entry[]> {
+    let heard: Tail2Announcement[] = [];
+    // An injected listener (tests) always runs; the env kill-switch governs
+    // only the default one.
+    const listen =
+      opts.listen ?? (process.env.OBSBOT_TAIL2_MDNS === "0" ? null : listenForTail2Announcements);
+    if (listen) {
+      try {
+        heard = await listen(opts.mdnsMs ?? 5000);
+      } catch {
+        heard = []; // listening is best-effort; the sweep still covers it
+      }
+    }
+    const found = new Map<string, Tail2Entry>();
+    for (const a of heard) {
+      const e = this.addAnnouncement(a);
+      found.set(e.mac, e);
+    }
+    if (heard.length > 0 || opts.sweep === false) return [...found.values()];
+    const swept = await this.scanSubnet({ subnets: opts.subnets, concurrency: opts.concurrency });
+    for (const e of swept) found.set(e.mac, e);
+    return [...found.values()];
+  }
+
+  /**
    * Sweep every IPv4 /24 this machine belongs to (excluding loopback) for
-   * Tail 2 cameras, registering what answers. This is exactly what OBSBOT
-   * Center's own discovery does — an HTTP GET of /camera/sdk/device_info per
-   * candidate address — so the traffic pattern is one the camera expects to
-   * see. Bounded concurrency keeps the sweep from socket-bombing the host;
-   * per-address timeouts keep one slow device from stretching the scan.
+   * Tail 2 cameras, registering what answers. The mDNS listen in scan()
+   * covers every network the camera's announcements can reach; this sweep is
+   * the fallback for the rest — an HTTP GET of /camera/sdk/device_info per
+   * candidate address, the same probe OBSBOT Center's discovery uses, so the
+   * traffic pattern is one the camera expects to see. Bounded concurrency
+   * keeps the sweep from socket-bombing the host; per-address timeouts keep
+   * one slow device from stretching the scan.
    */
   async scanSubnet(
     opts: { concurrency?: number; subnets?: string[] } = {},
