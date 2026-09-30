@@ -118,7 +118,18 @@ Uniform GET/PUT shape `{key: value}` unless noted:
 | `POST /capture/trigger` | empty body | still photo to storage |
 | `GET/PUT /image/af/mode` | `{"mode":"afc"\|"afs"\|"mf"}` | |
 | `GET/PUT /image/af/motorposition` | `{"position":0-100}` | **mode-gated: HTTP 500 unless mf** |
-| `GET/PUT /image/af/{trackmode,windowcenter}` | per vendor doc | not yet exercised |
+| `GET/PUT /image/af/trackmode` | `{"mode":global\|face\|foreground}` | AFC-only. MEASURED 2026-09-30: reads `face` |
+| `GET/PUT /image/af/windowcenter` | `{"x":0.01-0.99,"y":0.01-0.99}` | **tap-to-focus**: setting it moves the focus window AND starts a point focus. AFC/AFS only. MEASURED: reads `{0.452,0.616}` |
+| `GET/PUT /ndi-rtsp-srt/encoder` | `{"encoder":h264\|h265}` | MEASURED: h264 |
+| `GET/PUT /ndi-rtsp-srt/resolution` | `{"resolution":"1920X1080P30"…}` | >4K30 unifies record/NDI/RTSP/SRT media params (doc). MEASURED: 1080P30 |
+| `GET/PUT /ndi-rtsp-srt/bitrate` | `{"bitrate":mbps}` — range per resolution (doc table: 0.7–160) | MEASURED: 20.0 |
+| `GET /ndi-rtsp-srt/rtspurl` | `{wiredNetwork:{mainStreamUrl,subStreamUrl},wirelessNetwork:{…}}` | MEASURED: `rtsp://192.168.0.132/stream1`/`stream2` (URLs are served even while control=ndi) |
+| `GET/PUT /record/{encoder,resolution,bitrate}` | same shapes as streaming | MEASURED: h264, 3840X2160P30, 60.0 Mbps |
+| `GET/PUT /usb/mode` | `{"mode":uvc\|mtp}` | MEASURED: mtp (the camera's USB-C state while network-controlled) |
+| `GET/PUT /audio/input/{agc,enc,aux}` | `{"enable":bool}` / `{"enable":bool,"level":weak…}` / `{"source":micIn\|LineIn}` | MEASURED: agc off, enc off/weak, aux LineIn. (The Tail Air's `audio/input/source` buildIn\|aux does NOT exist here — 404) |
+| **`POST /ai/workmode/normaltrack/targetselect`** | `{"x":0.01-0.99,"y":0.01-0.99}` | **UNDOCUMENTED in the Tail 2 doc** (it is in the Tail Air's). LIVE on the Tail 2 (MEASURED 2026-09-30): POST-only (GET 404); `{}` → 400; a valid coordinate from mode `none` returned 200 and **engaged humanTrackingSingleMode on the subject there** — tap-to-track. `PUT ai/workmode {"mode":"objectTracking"}` bare → 400 `err_idx:32 "no xmin"`: object tracking demands a bounding box (grammar unknown — web bundle) |
+| `GET/PUT /ai/gesturecontrol/{dynamiczoom,dynamiczoomdirection}` | `{"enable":bool}` / direction | **Undocumented in the Tail 2 doc** (Tail Air's); routes LIVE (GET 400s; shapes unverified) |
+| `GET /album/filelist?seek=newest\|oldest&offset=N&count=N&filter=none` | paged file list | doc; not yet exercised |
 | `GET/PUT /image/exposure/mode` | `{"mode":"manual"\|"auto"}` | |
 | `GET/PUT /image/exposure/auto/mode` | `{"mode":"global"\|"face"}` | face-priority AE |
 | `GET/PUT /image/exposure/auto/compensation` | `{"evbias":float}` | **rejects JSON integers** (400 "Invalid value type"; `0`/`-1` rejected, `0.0`/`-1.0` applied — and some integer bodies ACK without applying). Client always emits a decimal-point float |
@@ -130,9 +141,9 @@ Uniform GET/PUT shape `{key: value}` unless noted:
 | `GET/PUT /ndi-rtsp-srt/control` | `{"control":"ndi"\|"rtsp"\|"srt"\|"off"}` | exactly ONE active output; setting srt displaces ndi (the exclusivity §7a measured); the programmatic way to arm SRT for snapshots |
 | `GET/PUT /ndi-rtsp-srt/{encoder,resolution,bitrate,rtspurl}` | per vendor doc | not yet exercised |
 | `GET/PUT /ai/human/onlyme` | `{"enable":bool}` | |
-| `GET/PUT /ai/human/zoomtype`, `/ai/gesturecontrol/*` | per vendor doc | not yet exercised |
+| `GET/PUT /ai/human/zoomtype` | `normal\|shot\|halfBody\|fullBody\|P7\|P9\|P16\|P24` — Auto-Zoom framing patterns (portrait-only for some) | doc enum, richer than the status block's bare `zoom_type` |
 | `GET/PUT /audio/input/{volume,mute,agc,enc,aux}` | `{"volume":0-100}` / `{"enable":bool}` / … | volume+mute exercised |
-| `GET/PUT /usb/mode`, `/record/{encoder,resolution,bitrate}`, `/album/filelist` | per vendor doc | not yet exercised (usb mode deliberately untouched — it re-enumerates the device) |
+| `GET/PUT /usb/mode`, `/record/{encoder,resolution,bitrate}`, `/album/filelist` | per vendor doc | now MEASURED — see rows above |
 
 ### Rotation (no Tiny 2 equivalent)
 | Endpoint | Payload | Status |
