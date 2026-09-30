@@ -130,6 +130,14 @@ Uniform GET/PUT shape `{key: value}` unless noted:
 | **`POST /ai/workmode/normaltrack/targetselect`** | `{"x":0.01-0.99,"y":0.01-0.99}` | **UNDOCUMENTED in the Tail 2 doc** (it is in the Tail Air's). LIVE on the Tail 2 (MEASURED 2026-09-30): POST-only (GET 404); `{}` → 400; a valid coordinate from mode `none` returned 200 and **engaged humanTrackingSingleMode on the subject there** — tap-to-track. `PUT ai/workmode {"mode":"objectTracking"}` bare → 400 `err_idx:32 "no xmin"`: object tracking demands a bounding box (grammar unknown — web bundle) |
 | `GET/PUT /ai/gesturecontrol/{dynamiczoom,dynamiczoomdirection}` | `{"enable":bool}` / direction | **Undocumented in the Tail 2 doc** (Tail Air's); routes LIVE (GET 400s; shapes unverified) |
 | `GET /album/filelist?seek=newest\|oldest&offset=N&count=N&filter=none` | paged file list | doc; not yet exercised |
+
+**HDMI (state 2026-09-30):** the Tail 2 HAS an HDMI output port — the status push senses it
+(`device_status.is_hdmi_attached`, `false` on this unit) — but the Tail Air's REST control
+(`/hdmi/output/resolution` et al.) is **not served** by firmware 7.2.13.1: every path shape
+probed 404s (`hdmi`, `hdmi/output`, `hdmi/output/resolution`, `hdmi/resolution`, `hdmi/control`,
+`video/hdmi`, `output/hdmi`). The port works as an output; it is not network-controllable on
+this firmware. The Tail 2 doc's own >4K30 media-unification note omits HDMI (the Tail Air's
+includes it), consistent with the endpoints simply being absent here.
 | `GET/PUT /image/exposure/mode` | `{"mode":"manual"\|"auto"}` | |
 | `GET/PUT /image/exposure/auto/mode` | `{"mode":"global"\|"face"}` | face-priority AE |
 | `GET/PUT /image/exposure/auto/compensation` | `{"evbias":float}` | **rejects JSON integers** (400 "Invalid value type"; `0`/`-1` rejected, `0.0`/`-1.0` applied — and some integer bodies ACK without applying). Client always emits a decimal-point float |
