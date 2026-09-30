@@ -23,8 +23,14 @@ interface FakeState {
   portrait: boolean;
   /** Saved presets, wire shape (name stays base64). */
   presets: Array<{ id: number; pitch: number; yaw: number; roll: number; ratio: number; name: string }>;
-  /** Actuation delays in ms — how long an acked write takes to land. */
-  delays: { zoom: number; portrait: number };
+  /** Live gimbal pose — preset `set` snapshots it, gimbalcontrol drives it. */
+  pose: { yaw: number; pitch: number; roll: number };
+  gimbalInvert: boolean;
+  /** gimbalcontrol telemetry: non-stop speed POSTs seen, stops seen. */
+  speedJogs: number;
+  stopCount: number;
+  /** Actuation delays in ms - how long an acked write takes to land. */
+  delays: { zoom: number; portrait: number; preset: number };
   /** When true, zoom writes NEVER land: the swallowed-write hazard, frozen. */
   swallowZoom: boolean;
 }
@@ -38,10 +44,34 @@ function makeFakeTail2(): Promise<{ api: Tail2Api; state: FakeState; close: () =
     portrait: false,
     presets: [
       // Factory default, matching the real camera's slot 0.
-      { id: 0, pitch: -0.96, yaw: 2.57, roll: 0.88, ratio: 1.4, name: Buffer.from("Default").toString("base64") },
+      { id: 0, pitch: 1.6, yaw: 0.4, roll: 0, ratio: 1.4, name: Buffer.from("Default").toString("base64") },
     ],
-    delays: { zoom: 120, portrait: 250 },
+    pose: { yaw: 0.4, pitch: 1.6, roll: 0 },
+    gimbalInvert: false,
+    speedJogs: 0,
+    stopCount: 0,
+    delays: { zoom: 120, portrait: 250, preset: 100 },
     swallowZoom: false,
+  };
+
+  // gimbalcontrol: speeds integrate into the pose at the MEASURED rate
+  // (0.39 °/s per unit) and the MEASURED sign (positive command yaw DECREASES
+  // recorded yaw) until a stop:true arrives — the joystick primitive.
+  let driveTimer: ReturnType<typeof setInterval> | null = null;
+  let speeds = { yaw: 0, pitch: 0, roll: 0 };
+  const stopDrive = (): void => {
+    if (driveTimer) clearInterval(driveTimer);
+    driveTimer = null;
+    speeds = { yaw: 0, pitch: 0, roll: 0 };
+  };
+  const startDrive = (): void => {
+    if (driveTimer) clearInterval(driveTimer);
+    driveTimer = setInterval(() => {
+      const dt = 0.05;
+      state.pose.yaw -= speeds.yaw * 0.39 * dt;
+      state.pose.pitch -= speeds.pitch * 0.39 * dt;
+      state.pose.roll -= speeds.roll * 0.39 * dt;
+    }, 50);
   };
 
   const json = (res: ServerResponse, code: number, body: unknown): void => {
@@ -82,6 +112,33 @@ function makeFakeTail2(): Promise<{ api: Tail2Api; state: FakeState; close: () =
       return json(res, 200, { code: 200, err_idx: 0 });
     }
     if (req.method === "POST" && url === "/camera/sdk/ptz/reset") {
+      return json(res, 200, { code: 200, err_idx: 0 });
+    }
+    if (req.method === "POST" && url === "/camera/sdk/ptz/gimbalcontrol") {
+      const b = await readBody(req);
+      if (typeof b.stop !== "boolean") return json(res, 400, {});
+      if (b.stop) {
+        stopDrive();
+        state.stopCount++;
+        return json(res, 200, { code: 200, err_idx: 0 });
+      }
+      if (
+        typeof b.yaw !== "number" || typeof b.pitch !== "number" || typeof b.roll !== "number"
+      ) {
+        return json(res, 400, {});
+      }
+      speeds = { yaw: b.yaw, pitch: b.pitch, roll: b.roll };
+      startDrive();
+      state.speedJogs++;
+      return json(res, 200, { code: 200, err_idx: 0 });
+    }
+    if (req.method === "GET" && url === "/camera/sdk/ptz/gimbalinvert") {
+      return json(res, 200, { enable: state.gimbalInvert });
+    }
+    if (req.method === "PUT" && url === "/camera/sdk/ptz/gimbalinvert") {
+      const b = await readBody(req);
+      if (typeof b.enable !== "boolean") return json(res, 400, {});
+      state.gimbalInvert = b.enable;
       return json(res, 200, { code: 200, err_idx: 0 });
     }
     if (req.method === "GET" && url === "/camera/sdk/ptz/rollbias") {
@@ -133,14 +190,18 @@ function makeFakeTail2(): Promise<{ api: Tail2Api; state: FakeState; close: () =
         if (typeof b.name !== "string") return json(res, 400, {});
         const entry = {
           id: b.id,
-          // "current live pose": fixed pose + zoom AT SAVE TIME.
-          pitch: 1.6,
-          yaw: 0.4,
-          roll: 0,
+          // "current live pose": the pose + zoom AT SAVE TIME, after the
+          // preset-list lag the real camera exhibits.
+          pitch: state.pose.pitch,
+          yaw: state.pose.yaw,
+          roll: state.pose.roll,
           ratio: state.zoom,
           name: b.name,
         };
-        state.presets = state.presets.filter((p) => p.id !== b.id).concat(entry);
+        setTimeout(
+          () => (state.presets = state.presets.filter((p) => p.id !== b.id).concat(entry)),
+          state.delays.preset,
+        );
         return json(res, 200, { code: 200, err_idx: 0 });
       }
       if (b.operation === "call") {
@@ -197,6 +258,7 @@ function makeFakeTail2(): Promise<{ api: Tail2Api; state: FakeState; close: () =
         close: () =>
           new Promise<void>((done) => {
             clearInterval(timer);
+            stopDrive();
             for (const ws of sockets) ws.terminate();
             wss.close(() => server.close(() => done()));
           }),
@@ -342,6 +404,83 @@ describe("Tail2Api", () => {
   it("unreachable cameras fail with the scan hint", async () => {
     const dead = new Tail2Api({ baseUrl: "http://127.0.0.1:1", timeoutMs: 500 });
     await expect(dead.info()).rejects.toThrow(/obsbot_tail2_scan/);
+  });
+
+  // ---- gimbal speed control + pose probe (the 2026-09-30 primitives) ------
+
+  it("gimbalSpeed posts the vendor shape and gimbalStop halts the drive", async () => {
+    await fake.api.gimbalSpeed(20, 0, 0);
+    await new Promise((r) => setTimeout(r, 250));
+    await fake.api.gimbalStop();
+    expect(fake.state.speedJogs).toBe(1);
+    expect(fake.state.stopCount).toBe(1);
+    // Measured convention: positive yaw command DECREASES recorded yaw.
+    expect(fake.state.pose.yaw).toBeLessThan(0.4);
+    expect(fake.state.pose.pitch).toBe(1.6);
+  });
+
+  it("gimbalInvertSet writes and verifies by readback", async () => {
+    const r = await fake.api.gimbalInvertSet(true);
+    expect(r).toMatchObject({ settled: true, enable: true });
+    expect(fake.state.gimbalInvert).toBe(true);
+    expect(await fake.api.gimbalInvertGet()).toEqual({ enable: true });
+  });
+
+  it("readPose snapshots the live pose and leaves the preset bank clean", async () => {
+    fake.state.pose = { yaw: 12.5, pitch: -3.25, roll: 0.5 };
+    const pose = await fake.api.readPose();
+    expect(pose).toEqual({ yaw: 12.5, pitch: -3.25, roll: 0.5, ratio: fake.state.zoom });
+    // The scratch slot is gone afterwards — only the factory preset remains.
+    expect(fake.state.presets.map((p) => p.id)).toEqual([0]);
+  });
+
+  it("readPose reuses a leftover probe slot instead of duplicating or clobbering", async () => {
+    // A crashed probe left its slot behind.
+    fake.state.presets.push({
+      id: 1,
+      pitch: 0,
+      yaw: 0,
+      roll: 0,
+      ratio: 1,
+      name: Buffer.from("pose-probe").toString("base64"),
+    });
+    fake.state.pose = { yaw: -8, pitch: 2, roll: 0 };
+    const pose = await fake.api.readPose();
+    expect(pose.yaw).toBe(-8);
+    const names = fake.state.presets.map((p) => p.id);
+    expect(names).toEqual([0]); // probe slot consumed and deleted again
+  });
+
+  it("readPose refuses when every slot holds a user preset", async () => {
+    fake.state.presets = [0, 1, 2].map((id) => ({
+      id,
+      pitch: 0,
+      yaw: 0,
+      roll: 0,
+      ratio: 1,
+      name: Buffer.from(`user-${id}`).toString("base64"),
+    }));
+    await expect(fake.api.readPose()).rejects.toThrow(/all three preset slots are occupied/);
+  });
+
+  it("moveAbsolute closes the loop end to end through the HTTP client", async () => {
+    // Small move so the loop converges in one or two rounds of REAL time.
+    fake.state.pose = { yaw: 0.4, pitch: 1.6, roll: 0 };
+    const { moveAbsolute } = await import("../../src/tail2/move.js");
+    const r = await moveAbsolute(
+      {
+        readPose: () => fake.api.readPose(),
+        speedCmd: (y, p) => fake.api.gimbalSpeed(y, p, 0),
+        stop: () => fake.api.gimbalStop(),
+        sleep: (ms) => new Promise<void>((res) => setTimeout(res, ms)),
+      },
+      { yaw: 4.5 }, // ~4° away: one undershooting jog + one correction at most
+    );
+    expect(r.converged).toBe(true);
+    expect(Math.abs(r.pose.yaw - 4.5)).toBeLessThanOrEqual(1.5);
+    // Never left running: every jog was stopped.
+    expect(fake.state.stopCount).toBeGreaterThanOrEqual(r.iterations);
+    expect(fake.state.presets.map((p) => p.id)).toEqual([0]);
   });
 
   it("a non-JSON reply (some other device on that IP) fails loudly", async () => {

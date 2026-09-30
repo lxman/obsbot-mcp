@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { ToolDef } from "../mcp/tools.js";
 import type { Tail2Registry } from "./registry.js";
 import { srtSnapshot, ndiToolsInstalled, type SrtSnapshot } from "./snapshot.js";
+import { moveAbsolute } from "./move.js";
 
 /**
  * MCP tools for the OBSBOT Tail 2 (network camera — HTTP/WS control; its USB
@@ -58,6 +59,17 @@ const zoomSchema = withCamera({
   speed: num().pipe(z.number().int().min(1).max(10)).default(5),
 });
 const recenterSchema = withCamera({});
+const gimbalSpeedSchema = withCamera({
+  yaw: num().pipe(z.number().min(-150).max(150)).optional(),
+  pitch: num().pipe(z.number().min(-150).max(150)).optional(),
+  roll: num().pipe(z.number().min(-150).max(150)).optional(),
+  durationMs: num().pipe(z.number().int().min(100).max(5000)).optional(),
+});
+const gimbalMoveSchema = withCamera({
+  yaw: num().pipe(z.number().min(-178).max(178)).optional(),
+  pitch: num().pipe(z.number().min(-178).max(178)).optional(),
+});
+const gimbalInvertSchema = withCamera({ enable: bool().optional() });
 const portraitSchema = withCamera({ enable: bool() });
 const rollBiasSchema = withCamera({ angle: num().pipe(z.number().min(-90).max(90)) });
 const aiTrackSchema = withCamera({
@@ -190,6 +202,103 @@ export function createTail2Tools(
         const { api } = await registry.resolve(camera);
         await api.recenter();
         return { ok: true };
+      },
+    },
+    {
+      name: "obsbot_tail2_gimbal_position",
+      description:
+        "Read the Tail 2's live gimbal pose in degrees (yaw/pitch/roll) plus the zoom ratio. " +
+        "The API has no direct pose read — this works by saving the current pose into an empty " +
+        "preset slot, reading it back, and deleting the slot (takes ~2s). Requires at least one " +
+        "empty preset slot: overwriting a preset is irreversible (no pose-by-value write exists " +
+        "to restore it). Leftover 'pose-probe' slots from crashed reads are deleted, not trusted.",
+      schema: withCamera({}),
+      handler: async (args: unknown) => {
+        const { camera } = withCamera({}).parse(args);
+        const { api } = await registry.resolve(camera);
+        return await api.readPose();
+      },
+    },
+    {
+      name: "obsbot_tail2_gimbal_speed",
+      description:
+        "Jog the Tail 2's gimbal: per-axis SPEED (sign = direction, magnitude = speed, ±150 of " +
+        "the firmware's ±178 range) with an automatic stop after durationMs (default 500, max " +
+        "5000). This is the joystick primitive (POST ptz/gimbalcontrol) — there is no absolute " +
+        "move endpoint, so the camera moves continuously until stopped; this tool always stops " +
+        "it. Measured: command 20 ≈ 7.9°/s, and a POSITIVE yaw command DECREASES the recorded " +
+        "yaw (obsbot_tail2_gimbal_position's convention). Disable AI tracking first or it will " +
+        "fight the move.",
+      schema: gimbalSpeedSchema,
+      handler: async (args: unknown) => {
+        const { camera, yaw, pitch, roll, durationMs } = gimbalSpeedSchema.parse(args);
+        if (yaw === undefined && pitch === undefined && roll === undefined) {
+          throw new Error("give at least one of yaw, pitch, roll (a speed to drive)");
+        }
+        const { api } = await registry.resolve(camera);
+        const t0 = Date.now();
+        try {
+          await api.gimbalSpeed(yaw ?? 0, pitch ?? 0, roll ?? 0);
+          await new Promise((r) => setTimeout(r, durationMs ?? 500));
+        } finally {
+          await api.gimbalStop();
+        }
+        return { ok: true, droveMs: Date.now() - t0, stopped: true };
+      },
+    },
+    {
+      name: "obsbot_tail2_gimbal_move",
+      description:
+        "Move the Tail 2's gimbal to an absolute yaw/pitch in degrees — the Tail 2's pose-record " +
+        "convention (obsbot_tail2_gimbal_position reports the same axes). There is no move-to-" +
+        "angle endpoint in the API, so this is a closed loop over the speed primitive: jog, read " +
+        "the pose (each read ~2s), correct, up to 5 rounds, tolerance ±1.5°. Slow by design — " +
+        "expect ~5-15s. REFUSES while AI tracking is active (tracking drives the gimbal itself " +
+        "and would fight the loop); obsbot_tail2_ai_track enabled:false first.",
+      schema: gimbalMoveSchema,
+      handler: async (args: unknown) => {
+        const { camera, yaw, pitch } = gimbalMoveSchema.parse(args);
+        if (yaw === undefined && pitch === undefined) {
+          throw new Error("give at least one of yaw, pitch to move to");
+        }
+        const { api } = await registry.resolve(camera);
+        const { mode } = await api.aiModeGet();
+        if (mode !== "none") {
+          throw new Error(
+            `AI tracking is active (${mode}) and drives the gimbal itself — it would fight the move. ` +
+              `Call obsbot_tail2_ai_track with enabled:false first.`,
+          );
+        }
+        const result = await moveAbsolute(
+          {
+            readPose: () => api.readPose(),
+            speedCmd: (y, p) => api.gimbalSpeed(y, p, 0),
+            stop: () => api.gimbalStop(),
+            sleep: (ms) => new Promise<void>((r) => setTimeout(r, ms)),
+          },
+          { yaw, pitch },
+        );
+        return {
+          ok: true,
+          ...result,
+          note: result.converged
+            ? undefined
+            : "did not converge within the iteration budget — the pose is as close as it got; retry or jog with obsbot_tail2_gimbal_speed",
+        };
+      },
+    },
+    {
+      name: "obsbot_tail2_gimbal_invert",
+      description:
+        "Read or set the Tail 2's control-direction inversion (gimbalinvert). Call with no " +
+        "arguments to read; pass enable to write (verified by readback).",
+      schema: gimbalInvertSchema,
+      handler: async (args: unknown) => {
+        const { camera, enable } = gimbalInvertSchema.parse(args);
+        const { api } = await registry.resolve(camera);
+        if (enable === undefined) return await api.gimbalInvertGet();
+        const r = await api.gimbalInvertSet(enable);
+        return { ok: true, ...r };
       },
     },
     {

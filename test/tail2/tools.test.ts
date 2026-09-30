@@ -13,8 +13,8 @@ import type { Tail2Api } from "../../src/tail2/api.js";
 
 interface FakeTail2 {
   api: Tail2Api;
-  calls: { zoom?: [number, number]; aiMode?: string; trackSpeed?: string; rollBias?: number; portrait?: boolean; recenter?: boolean; presetSave?: [number, string]; presetCall?: number; presetDelete?: number; presetRename?: [number, string]; srtEnabled?: boolean; ndiEnabled?: boolean };
-  /** When false, readbacks never reflect writes — everything settles:false. */
+  calls: { zoom?: [number, number]; aiMode?: string; trackSpeed?: string; rollBias?: number; portrait?: boolean; recenter?: boolean; presetSave?: [number, string]; presetCall?: number; presetDelete?: number; presetRename?: [number, string]; srtEnabled?: boolean; ndiEnabled?: boolean; gimbalSpeed?: [number, number, number]; gimbalStop?: boolean; gimbalInvert?: boolean; gimbalPose?: { yaw: number; pitch: number; roll: number; ratio: number } };
+  /** When false, readbacks never reflect writes - everything settles:false. */
   letWritesLand: boolean;
 }
 
@@ -92,6 +92,19 @@ const makeFake = (): FakeTail2 => {
       f.calls.presetRename = [id, name];
       return landed({ settled: true, presets: saved() });
     },
+    readPose: async () =>
+      landed(f.calls.gimbalPose ?? { yaw: 0.4, pitch: 1.6, roll: 0, ratio: 2 }),
+    gimbalSpeed: async (yaw: number, pitch: number, roll: number) => {
+      f.calls.gimbalSpeed = [yaw, pitch, roll];
+    },
+    gimbalStop: async () => {
+      f.calls.gimbalStop = true;
+    },
+    gimbalInvertGet: async () => landed({ enable: f.calls.gimbalInvert ?? false }),
+    gimbalInvertSet: async (enable: boolean) => {
+      f.calls.gimbalInvert = enable;
+      return landed({ settled: true, enable });
+    },
   } as unknown as Tail2Api;
   return f;
 };
@@ -134,6 +147,10 @@ describe("tail2 tools", () => {
       "obsbot_tail2_preset_recall",
       "obsbot_tail2_preset_delete",
       "obsbot_tail2_preset_rename",
+      "obsbot_tail2_gimbal_position",
+      "obsbot_tail2_gimbal_speed",
+      "obsbot_tail2_gimbal_move",
+      "obsbot_tail2_gimbal_invert",
     ]) {
       expect(names).toContain(expected);
     }
@@ -243,6 +260,61 @@ describe("tail2 tools", () => {
     await expect(
       tool(tools, "obsbot_tail2_track_speed").handler({ speed: "sport" }),
     ).rejects.toThrow(); // Tiny 2 speed names are NOT Tail 2 speeds
+  });
+
+  it("gimbal_position reports the pose from the probe", async () => {
+    const f = makeFake();
+    f.calls.gimbalPose = { yaw: 10.4, pitch: -21.3, roll: 0.39, ratio: 4 };
+    const tools = createTail2Tools(await seededRegistry(f));
+    const r = await tool(tools, "obsbot_tail2_gimbal_position").handler({});
+    expect(r).toEqual({ yaw: 10.4, pitch: -21.3, roll: 0.39, ratio: 4 });
+  });
+
+  it("gimbal_speed drives the given axes and always stops", async () => {
+    const f = makeFake();
+    const tools = createTail2Tools(await seededRegistry(f));
+    const r = (await tool(tools, "obsbot_tail2_gimbal_speed").handler({
+      yaw: -20,
+      durationMs: 120,
+    })) as { ok: boolean; stopped: boolean };
+    expect(r.ok).toBe(true);
+    expect(r.stopped).toBe(true);
+    expect(f.calls.gimbalSpeed).toEqual([-20, 0, 0]);
+    expect(f.calls.gimbalStop).toBe(true);
+    await expect(tool(tools, "obsbot_tail2_gimbal_speed").handler({})).rejects.toThrow(
+      /at least one of yaw, pitch, roll/,
+    );
+  });
+
+  it("gimbal_move refuses while AI tracking is active and moves when it is not", async () => {
+    const f = makeFake();
+    f.calls.aiMode = "humanTrackingSingleMode"; // default fake state
+    const tools = createTail2Tools(await seededRegistry(f));
+    await expect(tool(tools, "obsbot_tail2_gimbal_move").handler({ yaw: 0 })).rejects.toThrow(
+      /ai_track with enabled:false/,
+    );
+
+    f.calls.aiMode = "none";
+    // Pose already within tolerance of the target: zero iterations, converged.
+    f.calls.gimbalPose = { yaw: 1.0, pitch: 0, roll: 0, ratio: 2 };
+    const r = (await tool(tools, "obsbot_tail2_gimbal_move").handler({ yaw: 0 })) as {
+      converged: boolean;
+      iterations: number;
+    };
+    expect(r.converged).toBe(true);
+    expect(r.iterations).toBe(0);
+    await expect(tool(tools, "obsbot_tail2_gimbal_move").handler({})).rejects.toThrow(
+      /at least one of yaw, pitch/,
+    );
+  });
+
+  it("gimbal_invert reads bare and writes verified", async () => {
+    const f = makeFake();
+    const tools = createTail2Tools(await seededRegistry(f));
+    expect(await tool(tools, "obsbot_tail2_gimbal_invert").handler({})).toEqual({ enable: false });
+    const r = await tool(tools, "obsbot_tail2_gimbal_invert").handler({ enable: true });
+    expect(r).toEqual({ ok: true, settled: true, enable: true });
+    expect(f.calls.gimbalInvert).toBe(true);
   });
 
   it("scan reports what the sweep found", async () => {

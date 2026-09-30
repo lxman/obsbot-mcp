@@ -1,5 +1,35 @@
 # Changelog
 
+## [Unreleased]
+
+### Added: the Tail 2 can be aimed — speed moves, a pose sensor, and absolute positioning
+
+The Tail 2's HTTP API has no move-to-angle endpoint, so until now the only gimbal actions
+were recenter and preset recall. Two primitives from the vendor REST doc
+(`SDKs/obsbot_tail_2_res_tful.zip`, never opened before 2026-09-30) change that:
+
+- **`obsbot_tail2_gimbal_speed`** — the joystick primitive, `POST ptz/gimbalcontrol`:
+  per-axis speed (sign = direction, ±150 of the firmware's ±178 range), auto-stop after
+  `durationMs`. Measured: command 20 ≈ 7.9°/s, and a **positive yaw command DECREASES the
+  recorded yaw**.
+- **`obsbot_tail2_gimbal_position`** — a pose sensor the API never admits to: save the live
+  pose into an empty preset slot, read it back in degrees, delete the slot (~2 s per read).
+  Requires one empty slot — save overwrites and there is no pose-by-value write to restore a
+  clobbered preset. Leftover `pose-probe` slots from crashed reads are deleted, never trusted
+  (their stale contents would otherwise satisfy the freshness check instantly).
+- **`obsbot_tail2_gimbal_move`** — absolute positioning composed from the two above: a
+  closed loop that jogs, reads the pose, and corrects (≤5 rounds, ±1.5° tolerance), with
+  per-axis self-calibration — if a jog moves an axis *away* from its target, the assumed
+  command sign flips and the loop continues. Refuses while AI tracking is active.
+  **Hardware-verified first try 2026-09-30: a 4° move converged in one iteration, 0.9 s**,
+  preset bank left clean. The loop's stop is in a `finally`: a failed jog never leaves the
+  camera slewing.
+- **`obsbot_tail2_gimbal_invert`** — read/set control-direction inversion, readback-verified.
+
+Tool surface: 20 `obsbot_tail2_*` tools. With a move primitive and a pose read, the Tiny 2's
+aim-at-pixel geometry program becomes transferable — the preset records (pitch/yaw in
+degrees) can serve as the rotation ruler for the FOV measurement, no tape measure.
+
 ## [0.8.0] — 2026-09-29
 
 ### Added: OBSBOT Tail 2 support (network cameras)

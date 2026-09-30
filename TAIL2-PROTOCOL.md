@@ -72,6 +72,8 @@ Base: `http://<ip>`.
 ### PTZ
 | Endpoint | Payload | Status |
 |---|---|---|
+| `POST /camera/sdk/ptz/gimbalcontrol` | `{stop, pitch, roll, yaw}` — each axis −178..178, sign = direction, **magnitude = speed**; `stop:true` (zeros) halts | **MEASURED working 2026-09-30** — from the vendor REST doc (`SDKs/obsbot_tail_2_res_tful.zip`). Command 20 ≈ 7.9°/s; a POSITIVE yaw command DECREASES the recorded yaw. Continuous: the camera moves until stopped. |
+| `GET/PUT /camera/sdk/ptz/gimbalinvert` | `{enable: boolean}` | GET measured 200; PUT per vendor doc (readback-verified in the client) |
 | `POST /camera/sdk/ptz/reset` | `{}` | **MEASURED working** — gimbal recenter, `{"code":200,"err_idx":0}` |
 | `PUT /camera/sdk/ptz/zoom` | `{"ratio": <float>, "speed": <int>}` — **both fields required** (400 with either missing) | **MEASURED working** |
 | `GET /camera/sdk/ptz/zoom` | → `{"ratio": <float>}` | MEASURED |
@@ -262,9 +264,11 @@ Ports seen here but not elsewhere in this document: **12345/tcp** (the SRV targe
    `humanTrackingSingleMode` before and `none` after. Restoring via `PUT ai/workmode`
    round-trips cleanly. Pin down which command owns the drop before relying on it.
 3. **Preset records carry absolute pose in degrees + zoom ratio** (`{pitch, yaw, roll,
-   ratio}`) — the Tiny 2's tool-facing units exactly. Absolute gimbal positioning over HTTP
-   is therefore available as *write-preset-pose → recall*, even with no direct move endpoint
-   decoded yet.
+   ratio}`) — the Tiny 2's tool-facing units exactly. Combined with `gimbalcontrol`, this
+   yields both halves of absolute positioning: save-scratch-slot → GET (a pose SENSOR,
+   ~2s/read, hardware-verified 2026-09-30 catching a 7.9° move exactly) and jog-speed →
+   poll → stop (a closed-loop ACTUATOR, converged 4° in one iteration / 0.9s on first
+   hardware try). There is still no single move-to-angle endpoint: the loop composes it.
 4. **Preset `name` is base64 in the API** (`RGVmYXVsdA==` = "Default"), unlike the Tiny 2's
    selector-13 base64-in-ASCII quirk — plain base64 here.
 

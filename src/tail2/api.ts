@@ -74,6 +74,14 @@ export interface Preset {
   name: string;
 }
 
+/** A live gimbal pose in degrees, plus the zoom ratio the pose read carries. */
+export interface Pose {
+  yaw: number;
+  pitch: number;
+  roll: number;
+  ratio: number;
+}
+
 // The camera stores preset names as base64 of UTF-8 (decoded from the web
 // bundle's own btoa-encoder, hardware-round-tripped 2026-09-26).
 const b64encode = (s: string): string => Buffer.from(s, "utf8").toString("base64");
@@ -277,6 +285,105 @@ export class Tail2Api {
   /** Gimbal recenter (`POST ptz/reset`). Open-loop: the Tail 2 reports no live pose. */
   async recenter(): Promise<void> {
     await this.send("POST", "/camera/sdk/ptz/reset", {});
+  }
+
+  // ---- gimbal speed control (the joystick primitive) -------------------------
+  //
+  // POST /camera/sdk/ptz/gimbalcontrol {stop, pitch, roll, yaw} — from the
+  // vendor REST doc (SDKs/obsbot_tail_2_res_tful.zip), hardware-verified
+  // 2026-09-30: each axis −178..178, sign = direction, magnitude = SPEED.
+  // stop:true halts. This is a continuous speed command with no endpoint of
+  // its own — the camera keeps moving until stopped.
+
+  gimbalSpeed(yaw: number, pitch: number, roll: number): Promise<void> {
+    return this.send("POST", "/camera/sdk/ptz/gimbalcontrol", {
+      stop: false,
+      pitch,
+      roll,
+      yaw,
+    });
+  }
+
+  gimbalStop(): Promise<void> {
+    return this.send("POST", "/camera/sdk/ptz/gimbalcontrol", {
+      stop: true,
+      pitch: 0,
+      roll: 0,
+      yaw: 0,
+    });
+  }
+
+  gimbalInvertGet(): Promise<{ enable: boolean }> {
+    return this.req<{ enable: boolean }>("GET", "/camera/sdk/ptz/gimbalinvert");
+  }
+
+  /** Reverse (invert) control directions. Readback-verified like every write. */
+  async gimbalInvertSet(
+    enable: boolean,
+    verify: VerifyOpts = {},
+  ): Promise<{ settled: boolean; enable: boolean }> {
+    await this.send("PUT", "/camera/sdk/ptz/gimbalinvert", { enable });
+    const v = await this.verified(
+      () => this.gimbalInvertGet(),
+      (r) => r.enable === enable,
+      verify,
+    );
+    return { settled: v.settled, enable: v.value.enable };
+  }
+
+  // ---- pose readback via the preset API ----------------------------------------
+  //
+  // The API reports no live pose directly, but `preset set` captures the LIVE
+  // pose into a slot and `GET preset` returns it in degrees. Save-to-scratch
+  // → read → delete is therefore a pose sensor (measured 2026-09-30: it
+  // caught a 7.9° yaw move exactly). The scratch slot must be EMPTY — save
+  // overwrites and there is no pose-by-value write to restore a clobbered
+  // preset, so a full preset bank is a hard error, not a guess.
+
+  /** Marker name for pose-probe scratch slots, so crashed probes are reusable. */
+  static readonly POSE_PROBE_NAME = "pose-probe";
+
+  async readPose(verify: VerifyOpts = {}): Promise<Pose> {
+    let scratch: number | undefined;
+    const list = await this.presetsGet();
+    // A leftover probe slot from a crashed run is ours by name — delete it
+    // first and wait for it to be GONE, so the freshness check below (slot
+    // APPEARS after our save) cannot match its stale contents.
+    const leftover = list.find((p) => p.name === Tail2Api.POSE_PROBE_NAME);
+    if (leftover) {
+      await this.presetOp("delete", leftover.id);
+      await this.verified(
+        () => this.presetsGet(),
+        (l) => !l.some((x) => x.id === leftover.id),
+        { attempts: 6, delayMs: 350, ...verify },
+      );
+    }
+    const fresh = await this.presetsGet();
+    const used = new Set(fresh.map((p) => p.id));
+    scratch = [0, 1, 2].find((id) => !used.has(id));
+    if (scratch === undefined) {
+      throw new Error(
+        "all three preset slots are occupied — the pose read needs an empty scratch slot. " +
+          "Delete one preset (obsbot_tail2_preset_delete) and retry.",
+      );
+    }
+    try {
+      await this.presetOp("set", scratch, Tail2Api.POSE_PROBE_NAME);
+      const v = await this.verified(
+        () => this.presetsGet(),
+        (l) => {
+          const p = l.find((x) => x.id === scratch);
+          return p !== undefined && p.name === Tail2Api.POSE_PROBE_NAME;
+        },
+        { attempts: 8, delayMs: 350, ...verify },
+      );
+      const p = v.value.find((x) => x.id === scratch);
+      if (!p) throw new Error("pose probe: the scratch slot vanished before it could be read");
+      return { yaw: p.yaw, pitch: p.pitch, roll: p.roll, ratio: p.ratio };
+    } finally {
+      // Best-effort cleanup; must not mask the pose result.
+      await this.presetOp("delete", scratch).catch(() => {});
+    }
   }
 
   // ---- rotation (no Tiny 2 equivalent) --------------------------------------
