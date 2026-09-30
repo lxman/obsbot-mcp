@@ -1,6 +1,6 @@
 import { test, expect } from "vitest";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -20,9 +20,26 @@ const compiler = ["cc", "clang", "gcc"].find(
   (c) => spawnSync(c, ["--version"], { stdio: "ignore" }).status === 0,
 );
 
-// Reported as SKIPPED where there is no compiler, rather than passing without
-// having run. CI has one.
-test.skipIf(!compiler)("a uniqueID names the device it belongs to, and no other", () => {
+// A compiler can exist and still be unusable: clang on Windows finds no Visual
+// Studio installation unless it is run from a developer prompt, and then it
+// cannot find <stdio.h>. Prove the toolchain can build a trivial program
+// before trusting it with the real one.
+function toolchainWorks(): boolean {
+  if (!compiler) return false;
+  const dir = mkdtempSync(join(tmpdir(), "obsbot-c-canary-"));
+  try {
+    const src = join(dir, "canary.c");
+    writeFileSync(src, "int main(void) { return 0; }\n");
+    const out = join(dir, process.platform === "win32" ? "canary.exe" : "canary");
+    return spawnSync(compiler, ["-o", out, src], { stdio: "ignore" }).status === 0;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// Reported as SKIPPED where there is no usable compiler, rather than passing
+// without having run. CI has one.
+test.skipIf(!toolchainWorks())("a uniqueID names the device it belongs to, and no other", () => {
   const dir = mkdtempSync(join(tmpdir(), "obsbot-unique-id-"));
   try {
     const exe = join(dir, process.platform === "win32" ? "t.exe" : "t");

@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 // Stamp the build with an identity: dist/build-info.json.
 //
 // Every obsbot-mcp instance on a machine shares one camera owner, and the owner

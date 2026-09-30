@@ -253,6 +253,13 @@ describe("owner server", () => {
     cleanup.push(() => c1.close());
     cleanup.push(() => c2.close());
 
+    // One round-trip each, so both connections are registered on the owner
+    // before it steps down. On Windows a named-pipe client's 'connect' can
+    // fire before the server's 'connection' does; without this, stepDown()
+    // may find an empty socket set and send no notices. The real protocol
+    // always handshakes (hello) first, so it cannot hit that window.
+    await Promise.all([c1.call({ probe: 1 }), c2.call({ probe: 2 })]);
+
     await srv.stepDown({ ipc: "stepping-down", successorPid: 99 });
     await Promise.all([c1.ended, c2.ended]);
 
