@@ -1,6 +1,24 @@
 # Changelog
 
-## [Unreleased]
+## [0.9.0] — 2026-09-30
+
+### Added: tap-to-track and tap-to-focus — point the camera at what the agent sees
+
+Two tools take a NORMALIZED frame coordinate (0.01–0.99): divide a pixel from
+`obsbot_tail2_snapshot` by the frame dimensions and pass it straight in — the geometry-free
+aiming loop, no FOV math required.
+
+- **`obsbot_tail2_track_target`** — `POST /ai/workmode/normaltrack/targetselect`, an endpoint
+  UNDOCUMENTED in the Tail 2's own REST doc (found in the Tail Air's during the SDK sweep,
+  measured live on this Tail 2 2026-09-30): a valid coordinate engages AI tracking on the
+  subject there — from mode `none` it armed `humanTrackingSingleMode` by itself. The tool reads
+  the engaged mode back. `objectTracking` cannot be entered this way (bare PUT → 400
+  `err_idx:32 "no xmin"` — it demands a bounding box whose grammar is not yet decoded).
+- **`obsbot_tail2_focus_point`** — `PUT /image/af/windowcenter`: moves the focus window AND
+  starts a point focus. afc/afs only (refused in mf, where the motor position is the tool).
+
+Hardware-verified: window moved and read back (then restored); tap-track engaged tracking
+through the built client. Tool surface: **32 `obsbot_tail2_*` tools**.
 
 ### Added: the Tail 2's whole image/exposure/audio/record surface — 10 tools from the vendor's own doc
 

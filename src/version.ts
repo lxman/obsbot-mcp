@@ -6,4 +6,4 @@
 //
 // This exists because tsconfig sets rootDir: "src", so importing ../package.json
 // would pull the repo root into the compilation and change the dist/ layout.
-export const VERSION = "0.8.0";
+export const VERSION = "0.9.0";
