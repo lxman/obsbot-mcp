@@ -287,7 +287,8 @@ resolves to that one.
 | `obsbot_tail2_scan` | — | Discover Tail 2 cameras: ~5 s mDNS listen (the camera's own announcements), HTTP subnet sweep fallback. Registers what it found. |
 | `obsbot_tail2_status` | `camera`? | One WebSocket status push: the full live block — power, rec, portrait, AI mode + tracking settings, zoom ratio, roll bias, focus modes, NDI/RTSP/SRT/RTMP flags, SD card, presets with poses, and per-subsystem health. No live yaw/pitch — Tail 2 gimbal moves are open-loop. |
 | `obsbot_tail2_info` | `camera`? | Identity + static config in one call: device_info, range (zoom **1.0–12.0**, focus 1–100, WB 2000–10000 K), networkconfig (NDI/stream settings). |
-| `obsbot_tail2_zoom` | `ratio` (`1.0`–`12.0`), `speed` (`1`–`10`, default `5`), `camera`? | Absolute zoom on the camera's own ratio scale. `speed` is required by the firmware. Returns `settled` (readback-verified) — see below. |
+| `obsbot_tail2_zoom` | `ratio` (`1.0`–`12.0`), `speed` (`1`–`10`, default `5`), `camera`? | Absolute zoom on the camera's own ratio scale. `speed` is required by the firmware. Returns `settled` (readback-verified) — see below. **Silently pins at 5.0 (the optical ceiling) unless hybrid zoom is unlocked — see `obsbot_tail2_hybrid_zoom`.** |
+| `obsbot_tail2_hybrid_zoom` | `enabled`, `camera`? | Unlock (or re-lock) the 5–12x digital zoom region — the switch OBSBOT Center owns, which does not exist in the REST API (zoom above 5.0 is acknowledged but pinned until this runs). Speaks Center's private UDP-9999 protocol directly, both checksums decoded; verified by readback from the live status snapshot (`zoom_infos.digital_enable`), works with Center closed. Hardware-verified both directions 2026-09-30. |
 | `obsbot_tail2_recenter` | `camera`? | Gimbal recenter (yaw/pitch/roll 0). Open-loop: returns on ack. Can drop AI tracking to `none`; re-enable with `obsbot_tail2_ai_track`. |
 | `obsbot_tail2_gimbal_position` | `camera`? | Live gimbal pose in degrees (yaw/pitch/roll) + zoom ratio, via save-scratch-preset → read → delete (~2 s). Needs one empty preset slot (probe slots are self-cleaning). |
 | `obsbot_tail2_gimbal_speed` | `yaw`? `pitch`? `roll`? (±150 speed), `durationMs`? (100–5000, default 500), `camera`? | Jog the gimbal (the joystick primitive) with automatic stop. Measured: command 20 ≈ 7.9°/s; positive yaw command DECREASES recorded yaw. Disable AI tracking first. |
@@ -303,6 +304,19 @@ resolves to that one.
 | `obsbot_tail2_stream` | `output`? (`ndi`/`rtsp`/`srt`/`off`), `camera`? | Read/set the ONE active network output. The programmatic way to arm SRT for `obsbot_tail2_snapshot` — no Center needed. |
 | `obsbot_tail2_only_me` | `enabled`?, `camera`? | Read/set OnlyMe human-tracking (track one person, not everyone). |
 | `obsbot_tail2_audio` | `volume`?, `mute`?, `camera`? | Read/set audio input. |
+| `obsbot_tail2_zoom_type` | `type`? (`normal`/`shot`/`halfBody`/`fullBody`/`P7`/`P9`/`P16`/`P24`), `camera`? | Read/set the auto-zoom framing pattern (Center's tracking slider). Writes gated: requires human tracking armed. |
+| `obsbot_tail2_preset_speed` | `speed`? (1–5), `camera`? | Read/set the preset switching speed. |
+| `obsbot_tail2_usb_mode` | `mode`? (`mtp`/`uvc`), `camera`? | Read/set the USB-C function mode. |
+| `obsbot_tail2_antiflicker` | `mode`? (`off`/`50hz`/`60hz`), `camera`? | Read/set anti-flicker. |
+| `obsbot_tail2_af_track` | `mode`? (`global`/`face`/`front`), `camera`? | Read/set the autofocus track mode. |
+| `obsbot_tail2_iso_range` | `min`?, `max`? (100–6400), `camera`? | Read/set the auto-ISO range (double slider; omitted bounds keep current). |
+| `obsbot_tail2_gesture` | `lockedTarget`?, `recording`?, `zoom`?, `zoomFactor`?, `camera`? | Read (bare) or set the gesture-control switches and zoom factor. |
+| `obsbot_tail2_stream_config` | `encoder`?, `resolution`?, `bitrate`?, `camera`? | Read (bare, incl. RTSP URLs) or set the stream encoder config. Resolution writes gated on output off. |
+| `obsbot_tail2_export_log` | `path`, `camera`? | Download the full diagnostic bundle (the Export Log archive: ust.json, status.json, factory records, kernel logs) to `path`. ~10–20 s. |
+| `obsbot_tail2_live_status` | `camera`? | Fresh runtime snapshot distilled: live gimbal pose (euler+joint), zoom internals incl. `hybridDigitalEnable`, runtime exposure truth, temps, boot stage, accessories. |
+| `obsbot_tail2_zone_tracking` | `enabled`, `camera`? | Toggle zone tracking (UDP 9999 key 03). No readback exists — effect shows in tracking behavior. |
+| `obsbot_tail2_auto_zoom_speed` | `speed` (1–10), `camera`? | Set the AI auto-zoom framing speed (UDP key 0x17; distinct from manual zoom speed). No readback. |
+| `obsbot_tail2_track_custom` | `enabled`?, `pan`?, `tilt`? (1–10), `panAuto`?, `tiltAuto`?, `camera`? | Read (bare) or configure custom tracking speed: per-axis speeds, Auto buttons (readback-verified via tracking_settings). Axis locks shown read-only — no known write path. |
 | `obsbot_tail2_track_target` | `x`, `y` (0.01–0.99), `camera`? | **Tap-to-track**: engage AI tracking on the subject at a normalized frame coordinate (snapshot pixel ÷ frame size). Undocumented endpoint, hardware-measured. |
 | `obsbot_tail2_focus_point` | `x`?, `y`? (0.01–0.99), `camera`? | **Tap-to-focus**: move the focus window to a normalized frame coordinate and start a point focus (afc/afs only). Bare call reads the window. |
 | `obsbot_tail2_portrait` | `enable`, `camera`? | Motorized 90° barrel rotation for portrait framing — no Tiny 2 equivalent. Verified on orientation feedback; retry if `settled:false` (writes can be silently dropped *while the motor is in motion* — measured). |

@@ -17,6 +17,8 @@ import { Tail2Api, Tail2HttpError } from "../../src/tail2/api.js";
  */
 interface FakeState {
   zoom: number;
+  /** Hybrid-zoom unlock, as the RM_TEST live snapshot reports it (§13b). */
+  digitalEnable: boolean;
   rollBias: number;
   aiMode: string;
   trackSpeed: string;
@@ -30,8 +32,7 @@ interface FakeState {
   speedJogs: number;
   stopCount: number;
   /** The 2026-09-30 vendor-doc surface: record/capture, focus, exposure, image, stream, audio. */
-  recording: "on" | "off";
-  focusMode: "afc" | "afs" | "mf";
+  recording: "on" | "off";  focusMode: "afc" | "afs" | "mf";
   focusPosition: number;
   focusWindow: { x: number; y: number };
   exposureMode: "manual" | "auto";
@@ -53,11 +54,27 @@ interface FakeState {
   delays: { zoom: number; portrait: number; preset: number };
   /** When true, zoom writes NEVER land: the swallowed-write hazard, frozen. */
   swallowZoom: boolean;
+  /** The 2026-10-01 probe batch. */
+  usbMode: string;
+  presetSpeed: number;
+  zoomType: string;
+  antiFlicker: string;
+  afTrack: string;
+  isoMin: number;
+  isoMax: number;
+  gestureLockedTarget: boolean;
+  gestureRecording: boolean;
+  gestureZoom: boolean;
+  gestureZoomFactor: number;
+  streamEncoder: string;
+  streamResolution: string;
+  streamBitrate: number;
 }
 
 function makeFakeTail2(): Promise<{ api: Tail2Api; state: FakeState; close: () => Promise<void> }> {
   const state: FakeState = {
     zoom: 2.0,
+    digitalEnable: true,
     rollBias: 0,
     aiMode: "humanTrackingSingleMode",
     trackSpeed: "slow",
@@ -91,6 +108,20 @@ function makeFakeTail2(): Promise<{ api: Tail2Api; state: FakeState; close: () =
     captures: 0,
     delays: { zoom: 120, portrait: 250, preset: 100 },
     swallowZoom: false,
+    usbMode: "mtp",
+    presetSpeed: 5,
+    zoomType: "shot",
+    antiFlicker: "60hz",
+    afTrack: "face",
+    isoMin: 100,
+    isoMax: 6400,
+    gestureLockedTarget: true,
+    gestureRecording: true,
+    gestureZoom: true,
+    gestureZoomFactor: 2.0,
+    streamEncoder: "h264",
+    streamResolution: "1920X1080P30",
+    streamBitrate: 20.0,
   };
 
   // gimbalcontrol: speeds integrate into the pose at the MEASURED rate
@@ -122,8 +153,13 @@ function makeFakeTail2(): Promise<{ api: Tail2Api; state: FakeState; close: () =
     new Promise((resolve) => {
       let raw = "";
       req.on("data", (c) => (raw += c));
-      req.on("end", () => resolve(raw ? (JSON.parse(raw) as Record<string, unknown>) : {}));
+      req.on("end", () => {
+        lastRawBody = raw;
+        resolve(raw ? (JSON.parse(raw) as Record<string, unknown>) : {});
+      });
     });
+  /** The raw text of the most recent request body — wire-format checks. */
+  let lastRawBody = "";
 
   const server: Server = createServer(async (req, res) => {
     const url = req.url ?? "";
@@ -137,6 +173,98 @@ function makeFakeTail2(): Promise<{ api: Tail2Api; state: FakeState; close: () =
     }
     if (req.method === "GET" && url === "/camera/sdk/ptz/zoom") {
       return json(res, 200, { ratio: state.zoom });
+    }
+    if (req.method === "GET" && url === "/camera/test/status") {
+      // The RM_TEST live snapshot (§13b) — only the field the client reads.
+      return json(res, 200, {
+        status: { sync_push: { media_status: { zoom_infos: { digital_enable: state.digitalEnable } } } },
+      });
+    }
+    // ---- the 2026-10-01 probe batch: uniform GET/PUT key-value endpoints ----
+    {
+      const kv: Record<string, { get: () => unknown; put: (b: Record<string, unknown>) => unknown }> = {
+        "/camera/sdk/usb/mode": {
+          get: () => ({ mode: state.usbMode }),
+          put: (b) => (state.usbMode = String(b.mode)),
+        },
+        "/camera/sdk/ptz/presetspeed": {
+          get: () => ({ speed: state.presetSpeed }),
+          put: (b) => (state.presetSpeed = Number(b.speed)),
+        },
+        "/camera/sdk/ai/human/zoomtype": {
+          get: () => ({ type: state.zoomType }),
+          put: (b) => (state.zoomType = String(b.type)),
+        },
+        "/camera/sdk/image/exposure/antiflick/mode": {
+          get: () => ({ mode: state.antiFlicker }),
+          put: (b) => (state.antiFlicker = String(b.mode)),
+        },
+        "/camera/sdk/image/af/trackmode": {
+          get: () => ({ mode: state.afTrack }),
+          put: (b) => (state.afTrack = String(b.mode)),
+        },
+        "/camera/sdk/image/exposure/auto/isorange": {
+          get: () => ({ isomin: state.isoMin, isomax: state.isoMax }),
+          put: (b) => ((state.isoMin = Number(b.isomin)), (state.isoMax = Number(b.isomax))),
+        },
+        "/camera/sdk/ai/gesturecontrol/lockedtarget": {
+          get: () => ({ enable: state.gestureLockedTarget }),
+          put: (b) => (state.gestureLockedTarget = Boolean(b.enable)),
+        },
+        "/camera/sdk/ai/gesturecontrol/recording": {
+          get: () => ({ enable: state.gestureRecording }),
+          put: (b) => (state.gestureRecording = Boolean(b.enable)),
+        },
+        "/camera/sdk/ai/gesturecontrol/zoom": {
+          get: () => ({ enable: state.gestureZoom }),
+          put: (b) => (state.gestureZoom = Boolean(b.enable)),
+        },
+        "/camera/sdk/ai/gesturecontrol/zoomfactor": {
+          get: () => ({ factor: state.gestureZoomFactor }),
+          put: (b) => (state.gestureZoomFactor = Number(b.factor)),
+        },
+        "/camera/sdk/ndi-rtsp-srt/bitrate": {
+          get: () => ({ bitrate: state.streamBitrate }),
+          // Reject integer JSON like the real firmware does (the client
+          // must send decimal-point float literals) — checked against the
+          // RAW wire body, since parsing erases the distinction.
+          put: () => {
+            if (!/"bitrate":\d+\.\d/.test(lastRawBody)) {
+              return new Error("Invalid value type");
+            }
+            state.streamBitrate = Number(JSON.parse(lastRawBody).bitrate);
+            return undefined;
+          },
+        },
+        "/camera/sdk/ndi-rtsp-srt/encoder": {
+          get: () => ({ encoder: state.streamEncoder }),
+          put: (b) => (state.streamEncoder = String(b.encoder)),
+        },
+        "/camera/sdk/ndi-rtsp-srt/resolution": {
+          get: () => ({ resolution: state.streamResolution }),
+          put: (b) => (state.streamResolution = String(b.resolution)),
+        },
+      };
+      const route = kv[url];
+      if (route && req.method === "GET") return json(res, 200, route.get());
+      if (route && req.method === "PUT") {
+        const b = await readBody(req);
+        const err = route.put(b);
+        if (err instanceof Error) return json(res, 400, { code: 400, err_idx: 0, detail: err.message });
+        return json(res, 200, { code: 200, err_idx: 0 });
+      }
+    }
+    if (req.method === "GET" && url === "/camera/sdk/ndi-rtsp-srt/rtspurl") {
+      return json(res, 200, {
+        wiredNetwork: { mainStreamUrl: "rtsp://127.0.0.1/stream1", subStreamUrl: "rtsp://127.0.0.1/stream2" },
+        wirelessNetwork: { mainStreamUrl: "rtsp://127.0.0.2/stream1", subStreamUrl: "rtsp://127.0.0.2/stream2" },
+      });
+    }
+    if (req.method === "GET" && url === "/camera/test/log") {
+      // A tiny stand-in for the ~12 MB diagnostic bundle.
+      const body = Buffer.from("fake-diagnostic-tarball");
+      res.writeHead(200, { "Content-Length": String(body.length) });
+      return res.end(body);
     }
     if (req.method === "PUT" && url === "/camera/sdk/ptz/zoom") {
       const b = await readBody(req);
@@ -561,6 +689,41 @@ describe("Tail2Api", () => {
     expect(err).toBeInstanceOf(Tail2HttpError);
     expect((err as Tail2HttpError).status).toBe(404);
     expect((err as Tail2HttpError).path).toBe("/camera/sdk/range");
+  });
+
+  it("hybridZoomEnabled reads digital_enable from the RM_TEST live snapshot", async () => {
+    expect(await fake.api.hybridZoomEnabled()).toBe(true);
+    fake.state.digitalEnable = false;
+    expect(await fake.api.hybridZoomEnabled()).toBe(false);
+    // The live snapshot is a plain GET on the undocumented endpoint.
+    const live = (await fake.api.liveStatus()) as { status?: { sync_push?: unknown } };
+    expect(live.status).toBeDefined();
+  });
+
+  it("the 2026-10-01 probe batch: writes verify by readback", async () => {
+    const fast = { attempts: 2, delayMs: 10 };
+    expect((await fake.api.zoomTypeSet("halfBody", fast)).type).toBe("halfBody");
+    expect((await fake.api.presetSpeedSet(3, fast)).speed).toBe(3);
+    expect((await fake.api.usbModeSet("uvc", fast)).mode).toBe("uvc");
+    expect((await fake.api.antiFlickerSet("50hz", fast)).mode).toBe("50hz");
+    expect((await fake.api.afTrackSet("front", fast)).mode).toBe("front");
+    expect(await fake.api.isoRangeSet(200, 3200, fast)).toMatchObject({ isomin: 200, isomax: 3200 });
+    expect((await fake.api.gestureLockedTargetSet(false, fast)).enable).toBe(false);
+    expect((await fake.api.gestureZoomFactorSet(3.5, fast)).factor).toBe(3.5);
+    expect((await fake.api.streamEncoderSet("h265", fast)).encoder).toBe("h265");
+    expect((await fake.api.streamBitrateSet(40, fast)).bitrate).toBe(40);
+    expect((await fake.api.streamResolutionSet("3840X2160P30", fast)).resolution).toBe("3840X2160P30");
+    // Reads see the mutated state.
+    expect(await fake.api.zoomTypeGet()).toEqual({ type: "halfBody" });
+    expect(await fake.api.isoRangeGet()).toEqual({ isomin: 200, isomax: 3200 });
+    const urls = (await fake.api.rtspUrlsGet()) as { wiredNetwork?: { mainStreamUrl?: string } };
+    expect(urls.wiredNetwork?.mainStreamUrl).toContain("rtsp://");
+  });
+
+  it("exportLog downloads the binary bundle", async () => {
+    const buf = await fake.api.exportLog(2000);
+    expect(Buffer.isBuffer(buf)).toBe(true);
+    expect(buf.toString()).toBe("fake-diagnostic-tarball");
   });
 
   it("unreachable cameras fail with the scan hint", async () => {

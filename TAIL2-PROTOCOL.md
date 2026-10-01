@@ -103,6 +103,10 @@ PUT /camera/sdk/ptz/preset {"operation":"rename", "id":N, "name":<base64>}      
   read-verify with a ladder.
 - Recall is open-loop on the gimbal axes; the only live arrival observable is the
   zoom ratio (verified: recall drove zoom 1.5 → saved 3.0).
+- **Pose validity gate (from Center's own UI, census 2026-09-30):** a preset
+  FAILS unless pan is within ±150° and tilt within ±60° — in both landscape
+  and portrait. Tighter than the gimbalcontrol speed range (±178) and tighter
+  than the physical gimbal; worth respecting client-side before a save.
 
 ### Rotation (no Tiny 2 equivalent)
 
@@ -136,7 +140,8 @@ Uniform GET/PUT shape `{key: value}` unless noted:
 (`/hdmi/output/resolution` et al.) is **not served** by firmware 7.2.13.1: every path shape
 probed 404s (`hdmi`, `hdmi/output`, `hdmi/output/resolution`, `hdmi/resolution`, `hdmi/control`,
 `video/hdmi`, `output/hdmi`). The port works as an output; it is not network-controllable on
-this firmware. The Tail 2 doc's own >4K30 media-unification note omits HDMI (the Tail Air's
+this firmware — EXCEPT orientation: Center exposes an HDMI landscape/portrait choice
+(census 2026-09-30), so some non-REST path serves that one setting. The Tail 2 doc's own >4K30 media-unification note omits HDMI (the Tail Air's
 includes it), consistent with the endpoints simply being absent here.
 | `GET/PUT /image/exposure/mode` | `{"mode":"manual"\|"auto"}` | |
 | `GET/PUT /image/exposure/auto/mode` | `{"mode":"global"\|"face"}` | face-priority AE |
@@ -144,12 +149,12 @@ includes it), consistent with the endpoints simply being absent here.
 | `GET/PUT /image/exposure/manual/{iso,shuttertime}` | `{"iso":100-6400}` / `{"shutter":"1/N"}` | **mode-gated: HTTP 500 unless exposure manual**. Manual ISO read back 894 on first switch — a live-AE-inherited value; the doc's "increment of 100" claim is false |
 | `GET/PUT /image/style/{brightness,contrast,hue,saturation,sharpness}` | `{"<c>":0-100}` | GET also returns `{mode}`; **PUT mode-gated: HTTP 500 "style mode is not manual" unless style/mode is manual** |
 | `GET/PUT /image/style/mode` | `{mode + all five values}` | PUT takes the full bundle; the client sends current values so a mode switch never stomps adjustments |
-| `GET/PUT /image/hdr/control` | `{"control":"on"\|"off"}` | |
+| `GET/PUT /image/hdr/control` | `{"control":"on"\|"off"}` | Center UI interlocks (census 2026-09-30): HDR requires frame rate ≤30 AND night view mode off |
 | `GET/PUT /image/whitebalance/config` | `{"mode":auto\|daylight\|fluorescent\|tungsten\|cloudy\|manual,"temperature":2000-10000}` | temperature writes observed not to stick outside manual mode (readback lags/ignores) |
 | `GET/PUT /ndi-rtsp-srt/control` | `{"control":"ndi"\|"rtsp"\|"srt"\|"off"}` | exactly ONE active output; setting srt displaces ndi (the exclusivity §7a measured); the programmatic way to arm SRT for snapshots |
 | `GET/PUT /ndi-rtsp-srt/{encoder,resolution,bitrate,rtspurl}` | per vendor doc | not yet exercised |
 | `GET/PUT /ai/human/onlyme` | `{"enable":bool}` | |
-| `GET/PUT /ai/human/zoomtype` | `normal\|shot\|halfBody\|fullBody\|P7\|P9\|P16\|P24` — Auto-Zoom framing patterns (portrait-only for some) | doc enum, richer than the status block's bare `zoom_type` |
+| `GET/PUT /ai/human/zoomtype` | `normal\|shot\|halfBody\|fullBody\|P7\|P9\|P16\|P24` — Auto-Zoom framing patterns (portrait-only for some) | doc enum, richer than the status block's bare `zoom_type`. Center census 2026-09-30: the Console page exposes this as a slider under Single/Group tracking with detents off,3,5,7,9,19?,16,24 — 7/9/16/24 map to P7/P9/P16/P24, 3/5 presumably halfBody/fullBody (3 disabled in group mode), off=normal; and arming AI tracking sets it to `shot`, which is why the WS `zoom_type` reads `shot` while tracking is active |
 | `GET/PUT /audio/input/{volume,mute,agc,enc,aux}` | `{"volume":0-100}` / `{"enable":bool}` / … | volume+mute exercised |
 | `GET/PUT /usb/mode`, `/record/{encoder,resolution,bitrate}`, `/album/filelist` | per vendor doc | now MEASURED — see rows above |
 
@@ -323,6 +328,109 @@ Ports seen here but not elsewhere in this document: **12345/tcp** (the SRV targe
 
 ## 9. Not yet decoded (next targets)
 
+> **2026-09-30 (later):** the Export Log bundle solved the READ side of most
+> items below — their persisted schema is now mapped in §13 (`ust.json`).
+> **2026-10-01: the flip-sheet census (§10b) closed the WRITE side** — zone
+> tracking, the custom-tracking fields, Auto/Manual zoom speed, Virtual
+> Tracking, One Push' family, Gimbal Speed/Smoothness, remote pair, Image
+> Style Streaming, As Initial State (a dedicated UDP command, not a file
+> write) and Timed Power On all decoded. Remaining genuinely-unknown: the
+> WB sub-itemization inside the 8238/c238 family, the c206 value encoding,
+> HDMI orientation's write path (no traffic observed), and the
+> Buzzer/lights/Plug-to-Power toggles (not in the sheet — presumably the
+> 4454 key-value surface, keys TBD).
+
+- **Zone tracking (Center's Console page switch, noted 2026-09-30 census).**
+  No endpoint in the vendor REST doc; no UDP 9999 command decoded for it.
+  Closest artifacts: `/ai/composition/{horizontaloffset,verticaloffset,*lock}`
+  (listed in the vendor doc, never probed) and the write-only
+  `POST /camera/sdk/face_framing`. Prime suspect for another UDP-only rider
+  like hybrid zoom was — decode by capturing one labeled flip.
+- **Custom tracking Pan/Tilt speeds + their Auto buttons (census 2026-09-30).**
+  READABLE in every WS push (`tracking_settings`: `horizontalSpeed`,
+  `verticalSpeed`, `horizontal_auto`, `vertical_auto`) but no write endpoint
+  in the vendor REST doc — UDP-or-undocumented-REST suspect. Capture a
+  labeled `customized` sweep (both sliders + both Auto toggles) to tag.
+- **Preset "As Initial State" (census 2026-09-30).** Center's per-slot action
+  menu: Update/Delete/Rename all map to existing REST ops, but As Initial
+  State (set the boot pose) has no vendor-doc endpoint, no status flag, no
+  decoded UDP command. Prime suspect: the §10 config-file write channel
+  (`/app/private/` file ops) — decode by capturing one labeled invocation.
+  The More page's "Device Initial State" dialog is the same mechanism with
+  its own controls: an Initial Position Zero button, a joystick to compose
+  the pose, and a Zoom Initial slider — none REST-visible.
+- **Census REST gaps (2026-09-30, Center pages):** controls whose endpoints
+  exist (vendor doc or bundle) but ship no MCP tool yet — Night View Mode
+  (`image_night_mode`, POST shape unprobed, interlocked with HDR + ≤30fps),
+  AF track mode (`image_af_trackmode`, enum likely `global|face|front`),
+  preset switching speed (`ptz/presetspeed`, GET measured), the zoomtype
+  framing patterns (`ai/human/zoomtype`, see its row above), and the auto
+  ISO range double-slider (`image_exposure_auto_isorange`; stops
+  100–6400 doubled, readable as iso_min/iso_max in GET /image), plus
+  anti-flicker (`image_exposure_antiflick_mode`, off/50/60), USB mode
+  switching (`usb/mode`, GET/PUT unprobed; status reads usb_mode) and the
+  stream encoder family (`ndi_rtsp_srt_{encoder,resolution,bitrate,rtspurl}`),
+  and the four gesture controls (`ai_gesturecontrol_{lockedtarget,recording,
+  zoom,zoomfactor}` — GETs measured 2026-09-30: zoom enabled, factor 2.0),
+  plus SD management (`setting_format_sd`, `setting_record_split` — the
+  status push already carries split_size; sdcard space likewise).
+  2026-10-01 UPDATE: all of the above EXCEPT `setting_format_sd` and
+  `setting_record_split` now ship as tools (see the probe batch in
+  CHANGELOG); shapes GET-measured and writes no-op-verified live, including
+  two measured GATES (zoomtype needs human tracking armed; stream
+  resolution needs the output off) and the evbias-style float-literal
+  quirk on `zoomfactor`/`bitrate`. STILL REST-ABSENT despite the bundle's
+  `image_mirror`/`image_night_mode` names: mirror, night mode and record
+  split 404 on GET/PUT/POST across every path shape tried — file-channel
+  (config write) suspects, decode via the flip-sheet capture.
+  All probe-then-tool candidates; none suspected of riding UDP.
+- **WB One Push calibration + R/B Gain mode (census 2026-09-30).** The six
+  WB modes + Kelvin ship (`obsbot_tail2_wb`), but Center also exposes R/B
+  gain adjustment (bundle's `image_balance` write, gain fields never probed),
+  a color picker with B-A (blue–amber) and G-M (green–magenta) fine-tune
+  spinners beside it, and a One Push white-card calibrate with NO vendor-doc
+  endpoint anywhere — UDP-or-unprobed suspects; capture labeled uses to tag.
+- **Power scheduling + boot behavior (census 2026-09-30):** Auto Power Off
+  (idle timeout), Timed Power Off, Timed Power On — each with settings
+  dialogs — plus Record on Power On and Plug/UnPlug to Power On/Off; none
+  REST-visible (the vendor's power endpoints are one-shot actions; no
+  schedule/auto-record fields in the status push). Same `/app/private/`
+  config-file suspect as the initial-state mechanism.
+- **Virtual Tracking switch (census 2026-09-30).** No resembling endpoint in
+  the vendor REST census and no status field. Prime suspect: enabling the
+  FreeD tracking-data output (the AR/VR production feature), which would
+  ride its own UDP path — capture one labeled flip to tag. The section's
+  fields — Target IP address, UDP port, virtual camera position X/Y/Z
+  offsets (stage calibration for the virtual origin), and pan/tilt angle
+  offsets with per-axis Reverse checkboxes — all read as FreeD sender
+  configuration.
+- **UE Animation Gesture Control (census 2026-09-30):** Gesture1/Gesture2
+  switches, "please go to UE5 to bind and use" — a gateway flag for the
+  OBSBOT Unreal plugin, semantics defined inside UE. No endpoint, no status
+  field; low tool value, noted for completeness.
+- **Minor unattributed toggles (census 2026-09-30):** Center switches with
+  no matching endpoint or status field so far — Buzzer, Status Light and
+  Tally Light (each with its own Brightness slider, 1–3 integer), Battery
+  Light. (Grows as the census continues.)
+- **Action buttons without endpoints (census 2026-09-30):** Remote
+  Controller pair (BLE pairing — transient action, no REST endpoint;
+  capture candidate), and Export Log (no endpoint in the vendor census —
+  prime suspect for the §10 file-read channel, the one Center behavior we
+  catalogued as never-seen; a labeled Export Log capture would be the first
+  observed file READ). Manual upgrade = vendor `firmware_upload` (no tool,
+  rightly); firmware version display is telemetry-only (same as serial/
+  model — rides the aa44 pushes, not REST).
+- **View-and-Gimbal coarse/fine button (census 2026-09-30).** Suspected
+  Center-side joystick scaling (no resembling state anywhere in the status
+  push or vendor doc). One toggle in the verification capture settles it:
+  no traffic = UI-only.
+- **Gimbal Speed stepped slider 1–5, slow→fast (census 2026-09-30).** No
+  matching camera state (status push carries only `preset_speed` and the
+  tracking custom speeds) and no vendor-doc endpoint — suspected Center-side
+  virtual-joystick ceiling, same class as coarse/fine. A sibling Gimbal
+  Smoothness slider 1–5 sits next to it, same suspicion. Verify both with
+  one labeled slide each.
+
 - **The Remo control protocol on UDP 9999 — partially decoded from a Center
   capture (2026-09-26, see §11).** Protobuf payloads inside an `0xaa`-magic
   frame; file read/write operations against camera config files under
@@ -433,6 +541,112 @@ in Center→camera frames), which is why no streaming write exists in the REST
 API. The working hypothesis for the RTSP "device occupied" deadlock: the RTSP
 server only serves after the stream is started via this file mechanism, and
 the URL lives in an as-yet-unread `…_start_rtsp.json`.
+
+### 10a. Control writes decoded: hybrid zoom, and the value checksum (MEASURED 2026-09-30)
+
+The control-plane role of this channel is now confirmed, not hypothetical:
+**OBSBOT Center flips settings that do not exist in the REST tree via UDP
+9999 writes.** First proven control: the hybrid-zoom unlock.
+
+**The hybrid-zoom gate (MEASURED).** The camera's zoom is optically walled
+at **5.0x**: `PUT /camera/sdk/ptz/zoom` with any ratio above 5.0 is
+*acknowledged* (code 200) but silently pins at 5.0 — with the switch off,
+repeated writes of 5.5/6.0/7.0/8.0 never move the readback. After the
+Center-side switch is flipped on, the same REST write settles at 8.0/12.0.
+Center's own zoom slider is gated the same way (maxes at 10 while locked,
+12 when unlocked — observed 2026-09-30), so the wall is universal, not a
+REST quirk.
+No REST endpoint changes state during the flip (full endpoint diff: empty),
+and the WS status block's `zoom_type` does NOT reflect it (it tracks
+AI-shot mode instead — four transitions checked). The 12x "hybrid zoom" of
+the product page is therefore real but only reachable through this channel.
+
+**Write-frame anatomy (26-byte control write, offsets):**
+
+```
+aa                       magic
+25                       frame type (write)
+<seq lo> <seq hi>        uint16 LE sequence (rolls; arbitrary fresh values
+                         accepted — hardware-verified with a random seq)
+14 00                    header constant
+<b6> <b7>                frame checksum — covers bytes [0..19] with itself
+                         zeroed, CRACKED (see below)
+0c 02 82 c1              command id (zoom-family control)
+02 06 a7 71 df 1c        TLV: sender identity (constant per Center install)
+03 57                    TLV terminator
+02 00                    TLV: value length = 2
+<ck hi> <ck lo>          TLV value checksum — CRACKED, below
+<subcmd> <value>         subcmd 01 = hybrid-zoom enable (value 00/01)
+                         subcmd 00 = PROBABLY Auto Zoom Speed 1–10 (range
+                         matches; Center's Console-page census 2026-09-30
+                         flagged it for a labeled-capture verification —
+                         not yet confirmed against that specific slider)
+```
+
+**TLV value checksum (CRACKED, 21/21 samples):**
+
+```
+ck = byteswap16( crc16_0xA001_reflected(subcmd, value; init 0, xorout 0) ) ^ 0xfe06
+```
+
+Same poly as the MODBUS/USB CRC family (the Tiny 2's vendor protocol uses
+CRC-16/USB — same core). Verified across TWO different command ids
+(`0282c1` subcmds 00 and 01, and the `0303 05` slider command), so it is a
+pure function of the value bytes — independent of command id, seq, and the
+frame checksum. Full sample table lives in `test/tail2/udp.test.ts`.
+
+**The [6..7] field: CRACKED (2026-09-30, second pass).** The breakthrough
+was direction: sweeping the camera→Center frames (idle capture, both
+directions) showed ONE formula across polls, writes, and ~900-byte
+telemetry pushes, both senders:
+
+```
+[6..7] = be16( byteswap16( crc16_0xA001_reflected(F; init 0) ) ^ 0xdbe4 )
+         where F = the frame's FIRST TWENTY BYTES with [6..7] themselves zeroed
+```
+
+The tail beyond byte 20 is NOT covered — which is why every full-frame CRC
+sweep missed. The earlier negative results all predate this: zeroed field
+(rejected — missing checksum), randomized seq with stale checksum (rejected
+— seq is inside the 20 covered bytes), captured checksum with altered
+payload (rejected — bytes 8-19 of the prefix include the command id).
+Exceptions: `aa 29` replies carry a different session header (`1c 00` at
+[4..5], `04 0c` at [8..9]) and did not match this model — the only shape
+not yet covered.
+
+**Synthesis VERIFIED on hardware (2026-09-30).** A frame built entirely
+from the model — fresh random sequence, both checksums computed — was
+accepted (zoom crossed the wall). `buildControlFrame()` in
+`src/tail2/udp.ts` reproduces both captured Center frames byte-for-byte
+from their sequence numbers (pinned in `test/tail2/udp.test.ts`).
+
+**Replay also works (earlier fallback, now historical).** Verbatim captured
+frames were accepted hours later, from a different source port, with no
+handshake replay. The two hardware-proven frames:
+
+```
+ON : aa251414140040c40c0282c10206a771df1c035702003e560101
+OFF: aa253a1314009bd40c0282c10206a771df1c03570200ff960100
+```
+
+Open risk, RESOLVED (MEASURED 2026-09-30): the `a771df1c` sender identity
+is NOT session-validated — with OBSBOT Center fully closed, fully
+synthesized frames (captured identity constant, fresh random sequences)
+were honored in both directions (OFF re-armed the 5.0 wall, ON lifted it).
+It is a client identifier, not a negotiated key. Residual caveat only: if
+a future firmware or a Center re-pair changes the accepted identity, the
+constants in `src/tail2/udp.ts` need a re-capture.
+
+**Other controls seen riding this channel (2026-09-30 capture):** command
+`0c 03 03 05` with a 0–100 value swept in tens (a slider — UNLABELED; note
+`0282c1` subcmd 00 is only PROBABLY the Auto Zoom Speed slider, pending the
+same verification). Both obey the same value checksum. Verification batch
+when convenient: capture one labeled sweep of Auto Zoom Speed, one labeled
+sweep of Manual Zoom Speed (the two must be distinguished — Manual could be
+UI-side, the speed Center attaches to its own ptz/zoom writes, since no
+zoom-speed state exists in the status push), one flip of zone tracking, and
+the 0303 05 slider's identity.
+
 
 ## 11. USB-C UVC mode (MEASURED 2026-09-26, Windows DirectShow; 2026-09-27, Linux uvcvideo)
 
@@ -693,3 +907,198 @@ command — but only after cross-platform verification.
   `ai_mode humanTrackingSingleMode`, zoom 2.0 (its value when found).
 
 ## 12. Source material
+
+## 13. The settings tree on disk: `ust.json` (MEASURED 2026-09-30, Export Log)
+
+Center's **Export Log** button downloads the camera's diagnostic bundle —
+and with it the entire persisted-settings schema, no file-channel decoding
+required. DECODED 2026-09-30 (second capture): it is a plain unauthenticated
+**`GET /camera/test/log`** on the same lighttpd REST server (port 80) — an
+endpoint in no vendor doc. `Content-Length` body (the tar.gz), no
+Content-Type (why it first looked like raw TCP), ~7 s server-side
+generation before the first byte, `User-Agent: Mozilla/5.0`. VERIFIED
+standalone: a bare HTTP GET reproduces the full archive with no Center, no
+UDP, no handshake. Center saves it to
+`%APPDATA%\OBSBOT_Center\deviceLogs\tail2_<date>_<serial>.tar.gz`.
+The `/camera/test/` path family is a lead for other hidden endpoints.
+
+Archive layout (the `/app/private/` namespace, seen from outside):
+`ust.json` (user settings — the prize), `status.json` (~220 KB runtime
+dump), `factory/*.json` (test/aging records), `config/{indicator,pr_wifi,
+ble_config,usb_eth,usb_rndis,usb_wifi}`, `remo_history/logNN.tar.gz`,
+`upgrade.tar.gz`, `dmesg_log`, `umap/*`, `free.txt`.
+
+`ust.json` maps the census gaps to their persisted homes — write path is
+still the §10 file channel (op `08 09` WRITE observed for SRT JSON in
+2026-09-26 captures), but the SCHEMA is now fully known:
+
+- **Power scheduling + boot:** `sys.power_ctrl` (`auto_suspend_time` —
+  negative minutes for Auto Power Off; `rtc_suspend_*` = Timed Power Off;
+  `rtc_resume_*` = Timed Power On; once/repeat masks), `boot_action`,
+  and per-stream `start_on_boot` flags (`record.start_on_boot` = Record on
+  Power On).
+- **Hybrid zoom:** `properties.ignore_digital_zoom` (false = digital
+  region enabled — consistent with the camera's state at export). The UDP
+  `0282c1` write presumably flips both runtime and this persisted flag.
+- **`properties.manual_zoom_speed: 7`** — Manual Zoom Speed is
+  camera-persisted, NOT Center-side; and 7 is a value from the
+  2026-09-30 1-10 sweep, shifting the `0282c1`-subcmd-00 label from
+  "probably Auto" toward "probably MANUAL" (labeled capture still pending).
+- **`pdtUst.gimbal_smoothness: 50`** — likewise camera-side (0-100 scale
+  under Center's 1-5 detents).
+- **`pdtUst.virtualTrack`** — the whole Virtual Tracking section:
+  `positionX/Y/Z`, `yaw/pitch/roll` offsets + per-axis `*Reverse`,
+  base64-encoded `ipv4`, `port`, `cm103_enable`. FreeD sender confirmed
+  structurally.
+- **WB extras:** `isp_ust.awb` carries `manual_gain{UserManualRGain,
+  UserManualBGain}` (R/B Gain mode), `wb_offset{XabOffset, YgmOffset}`
+  (the B-A and G-M spinners), `onePushRBGain{...}` (One Push state).
+- **AF track enum:** `af_track_mode` strings incl. `FACE`,
+  `CENTER_WEIGHT` (Center's Global/Face/Front mapping TBD).
+- **Streaming image style:** `isp_ust.live_style_en` — Center's
+  "Streaming" style button.
+- **Lights:** `device.tally` / `device.battery` `{light_opt, light_slider}`
+  (switch + 0-100 brightness); the status light likely `config/indicator`.
+- **`device.hdmi.rotation`** — the HDMI landscape/portrait control's
+  persisted home (the one HDMI setting Center exposes).
+- **`device.usb.mode`** (MTP/UVC) — the `usb/mode` REST endpoint's
+  persisted backing.
+- **`pdtUst.handposeControl{bHandpose1/2/3}`** — the UE gesture gates.
+- **`sys.login`** — base64 WebUI credentials (user + factory password),
+  relevant to the §2 auth picture.
+- **`device.visca`** — RS-232 VISCA/Pelco config (address, baudrate).
+- Full audio DSP tree (`audio_ust.chn[].{ns,agc,beamforming,hpf,notch}`),
+  per-format bitrate tables for record/NDI/RTMP, gamma LUTs, and
+  `pdtUst.groupMode` (group-tracking image overrides).
+
+Read side is therefore SOLVED for every "unattributed" census toggle: the
+authoritative answer lives in this file, fetchable with one HTTP GET.
+Open work: (a) ~~decode the Export Log read protocol~~ SOLVED —
+`GET /camera/test/log`, see above; probe the `/camera/test/` family for
+siblings; (b) confirm which settings Center writes via REST vs the
+file channel (SRT JSON went by file; hybrid zoom went by control frame —
+the split is per-control); (c) `status.json` (~220 KB) — INSPECTED, see
+§13a; (d) locate the preset bank / initial-state pose (not in this archive).
+
+### 13a. `status.json` — the runtime telemetry tree (inspected 2026-09-30)
+
+The ~220 KB runtime dump mirrors what the `aa 44` UDP telemetry pushes
+carry, as one JSON snapshot:
+
+- **Live gimbal pose** — `device.gimbal_status.status`: euler angles
+  (x/y/z), joint angles, angular velocities, lock/invert/cali states,
+  `attitude` (LANDSCAPE/PORTRAIT). The "no live pose" limitation is a REST
+  limitation; a telemetry listener gets full pose at push rate.
+- **Zoom system internals** — `lens_status.optical_zoom` (ratiox1000,
+  ust_ratiox1000 = persisted zoom home, real_ratiox1000) and
+  `lens_status.digital_zoom` (the CROP WINDOW: in/out/target rectangles on
+  the 3840x2160 sensor — digital zoom is sensor-crop, confirmed
+  structurally). `zoom_infos`: `zoom_setting_min/max = 100/1200` (ratio
+  x100), `digital_zoom_max = 240` (2.4x digital on 5x optical = 12x),
+  `has_mix_zoom`, `optics_enable`, and **`digital_enable`** — the hybrid
+  zoom state, READABLE here even though no REST endpoint exposes it.
+  `manual_zoom_speed` appears in runtime too (7).
+- **Live AE/AF truth** — `iq_status`: runtime shutter/aperture/ISO/EV vs
+  user settings, AF window (center_x/y), `afc_track_mode`, WB gains and
+  offsets runtime copies, night mode state.
+- **Accessory telemetry** — `basepan_status` (the 360° Rotation Base: two
+  battery channels + joint angle), `remote_status` (BT remote battery),
+  tally runtime, monitor thresholds (battery temp WARNING at 41°C).
+- **Versions** — kernel 6.6.8-rc7-ish + second-stage version blocks.
+- **NOT present**: the preset bank and the Device-Initial-State pose —
+  neither is in this archive; their storage is still unlocated (candidates:
+  a file the Export Log does not include, or gimbal-module NVM).
+
+Implication for tooling: a small WS/UDP telemetry listener could surface
+live pose, `digital_enable` (hybrid state READBACK — closes the one gap
+the hybrid tool has), firmware identity, and accessory state with no new
+protocol work.
+
+### 13b. The `RM_TEST` HTTP endpoints (MEASURED 2026-09-30)
+
+`GET /camera/test/log` has siblings on the same factory-test dispatcher
+(module `RM_TEST`, handler `Remo_Test_HttpSvrFunc`). CONFIRMED working:
+
+| Endpoint | Body | Notes |
+|---|---|---|
+| `/camera/test/log` | the full diagnostic tar.gz (~12 MB) | ~7 s server-side generation |
+| `/camera/test/status` | the ~220 KB runtime status tree, FRESH per request | live-verified: gimbal micro-drift visible between back-to-back fetches |
+| `/camera/test/ust` | the current `ust.json` settings tree | live settings readback over plain HTTP |
+
+Two traps for anyone probing further:
+
+1. **Unknown cmds return HTTP 200**, body = `... ERROR [RM_TEST]
+   Remo_Test_HttpSvrFunc-4178:cmd <name> unsupport` (a decimal-hex dump
+   format) — a naive prober reads every path as a hit. Distinguish by body.
+2. **This is the FACTORY TEST server.** The path suffix is the cmd name;
+   blind enumeration risks invoking a hardware-test or destructive action
+   (reboot/format-class cmds plausibly exist). No further names were probed
+   deliberately; string-mining Center's install and the web bundles found
+   no `camera/test` references (URL runtime-composed). If more cmds are
+   ever wanted, get the list from firmware, not from the live dispatcher.
+
+Tooling implication: `/camera/test/status` + `/camera/test/ust` give
+no-protocol-work readback for everything the REST tree hides — hybrid
+zoom state (`zoom_infos.digital_enable`), live gimbal pose (euler/joint),
+full settings — pollable as plain HTTP GETs.
+
+### 10b. The flip-sheet census (MEASURED 2026-10-01, labeled capture)
+
+Center with a fresh run (note: the sender identity RE-RANDOMIZED —
+`38141dae30c3` this run vs `a771df1c` yesterday — confirming per-run
+client ids, consistent with the camera not validating them). Every census
+unknown mapped, in sheet order:
+
+| Control | Mechanism (cmd → shape) |
+|---|---|
+| Zone tracking on/off | UDP `0c 04 44 54`, field `03`, LE32 bool |
+| Auto Zoom Speed 1–10 | UDP `4454`, field `17`, LE32 int (drags emit every step) — a SECOND 1–10 speed distinct from `0282c1` subcmd 00 (Manual, per ust) |
+| Tracking speed → Custom | `4454` field `04` bool |
+| Custom Pan / Tilt sliders | `4454` fields `07` / `0a`, value = slider/10 as FLOAT32 (0.1–1.0) |
+| Pan / Tilt Auto buttons | `4454` fields `06` / `09`, ONE-byte bool (len-9 TLV) — CORRECTED 2026-10-01 by live verification: they flip `horizontal_auto`/`vertical_auto` (first read as locks from the capture timeline alone) |
+| Pan / Tilt axis locks | WRITE PATH UNKNOWN — emitted no traffic in the sheet, and REST guesses under `ai/composition/*lock` all 404. Readable in the WS push only |
+| WB gains / B-A / G-M / One Push | UDP `0c 02 82 38` + `0c 02 c2 38` family, t≈104–162 (payloads carry gain-ish uint16s; not fully itemized) |
+| Virtual Tracking switch | UDP `0c 02 82 ae`, subcmd `01`, bool (same tail shape as remote-pair) |
+| Virtual Tracking fields | `0c 02 02 07` value frames + `c2c1`/`03 43 00` queries |
+| Coarse/fine button | NO TRAFFIC — client-side, confirmed |
+| Gimbal Speed 1–5 | UDP `0c 03 03 05` — THE MYSTERY SLIDER: values on the 0–100 scale (slider×10; 20/30/40/50 observed). Yesterday' s 10–100 tens sweep = this control |
+| Gimbal Smoothness 1–5 | UDP `0c 02 c2 06` (t≈355–362, the second-dragged slider per operator confirmation; value encoding in the tail not yet decoded — `…10 09 70 01/00`) |
+| HDMI orientation | NO TRAFFIC — client-side in Center or lazily persisted (ust `device.hdmi.rotation` exists but no write was captured for landscape→portrait→landscape) |
+| Remote pair | UDP `0c 13 0e 0c`, subcmd `01`, one-shot `01` |
+| Image Style Streaming | UDP `0c 02 42 38`, field `04`, bool (on then off observed) = ust `live_style_en` |
+| **As Initial State** | UDP `0c 04 44 38` — a DEDICATED COMMAND, not a file write: 74-byte frame carrying the pose as FLOAT32s + zoom + the preset name (`RGVmYXVsdA=="Default"`), plus a `0c 04 44 3a` companion. The boot-pose storage hunt is CLOSED |
+| Timed Power On | UDP `0c 02 42 a2`, 72-byte schedule structure (`15000000` = 21h; on/off pair observed) |
+
+Also observed: Center re-asserts the SRT config FILE (`0c 02 09 30` write
+of `/app/private/app_ust…_start_srt.json` with the full listener JSON)
+roughly every ~107 s while idle — the file channel is periodic background
+traffic, not user-action-driven.
+
+The `0c 04 44 54` command is a generic key→value setter (16-bit key,
+LE32 or FLOAT32 value, per-key checksum) — the widest write surface on
+the channel. Synthesis needs only the key table above plus the already
+cracked frame checksum (coverage is still bytes [0..19]; the 36-byte
+frames carry the value beyond byte 20, and the per-TLV checksum inside
+covers it).
+
+### 10c. The 4454 synthesizer (SHIPPED 2026-10-01)
+
+`buildKVFrame()` in `src/tail2/udp.ts` synthesizes the generic key-value
+writer; golden-tested byte-for-byte against the flip-sheet capture and
+hardware-verified live (zone toggle, auto zoom speed, custom enable,
+pan/tilt float speeds, Auto buttons — all landed and read back via
+`tracking_settings`). Grammar notes beyond §10b:
+
+- The sender-identity TLV is `02 06 <6 bytes>` — type 2, length SIX. The
+  hybrid frames' `a7 71 df 1c 03 57` is one 6-byte id (the `03 57` was
+  never a terminator); Center randomizes its 6-byte id per run.
+- Value width is PER-KEY: the Auto-button bools (keys 06/09) ride ONE byte
+  (len-9 TLV); every other value — booleans included — rides four.
+- The TLV checksum constant is LENGTH-dependent: `swap16(crc) ^ {9:
+  0xe1dd, 12: 0x440a}` (no unified init exists; searched exhaustively).
+- The frame checksum (bytes [0..19], field zeroed, `^ 0xdbe4`) covers the
+  4454 frames unchanged — verified against captured prefixes.
+
+Bonus REST shape discovered during the live e2e: `PUT ai/trackspeed` with
+`{"speed":"customized"}` alone is a 400 (`[horizontalSpeed] Key not
+found`) — customized mode requires the axis speeds in the same body.

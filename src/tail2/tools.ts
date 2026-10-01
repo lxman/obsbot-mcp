@@ -1,8 +1,10 @@
 import { z } from "zod";
+import { writeFile } from "node:fs/promises";
 import type { ToolDef } from "../mcp/tools.js";
 import type { Tail2Registry } from "./registry.js";
 import { srtSnapshot, ndiToolsInstalled, type SrtSnapshot } from "./snapshot.js";
 import { moveAbsolute } from "./move.js";
+import { hybridZoomSet, sendUdpFrame, kvSet, f32Bits, KV_KEYS, type UdpFrameSender } from "./udp.js";
 
 /**
  * MCP tools for the OBSBOT Tail 2 (network camera — HTTP/WS control; its USB
@@ -92,6 +94,49 @@ const snapshotSchema = withCamera({
   quality: num().pipe(z.number().int().min(1).max(100)).default(80),
 });
 
+// ---- 2026-10-01 probe-batch schemas -------------------------------------------------
+
+const ZOOM_TYPES = [
+  "normal", "shot", "halfBody", "fullBody", "P7", "P9", "P16", "P24",
+] as const;
+const zoomTypeSchema = withCamera({ type: z.enum(ZOOM_TYPES).optional() });
+const presetSpeedSchema = withCamera({
+  speed: num().pipe(z.number().int().min(1).max(5)).optional(),
+});
+const usbModeSchema = withCamera({ mode: z.enum(["mtp", "uvc"]).optional() });
+const antiFlickerSchema = withCamera({
+  mode: z.enum(["off", "50hz", "60hz"]).optional(),
+});
+const afTrackSchema = withCamera({ mode: z.enum(["global", "face", "front"]).optional() });
+const isoRangeSchema = withCamera({
+  min: num().pipe(z.number().int().min(100).max(6400)).optional(),
+  max: num().pipe(z.number().int().min(100).max(6400)).optional(),
+});
+const gestureSchema = withCamera({
+  lockedTarget: bool().optional(),
+  recording: bool().optional(),
+  zoom: bool().optional(),
+  zoomFactor: num().pipe(z.number().min(1).max(10)).optional(),
+});
+const streamConfigSchema = withCamera({
+  encoder: z.enum(["h264", "h265"]).optional(),
+  resolution: z.string().regex(/^\d{3,4}X\d{3,4}P\d{2}$/).optional(),
+  bitrate: num().pipe(z.number().min(0.7).max(160)).optional(),
+});
+const exportLogSchema = withCamera({ path: z.string().min(1) });
+const liveStatusSchema = withCamera({});
+const zoneTrackingSchema = withCamera({ enabled: bool() });
+const autoZoomSpeedSchema = withCamera({
+  speed: num().pipe(z.number().int().min(1).max(10)),
+});
+const trackCustomSchema = withCamera({
+  enabled: bool().optional(),
+  pan: num().pipe(z.number().int().min(1).max(10)).optional(),
+  tilt: num().pipe(z.number().int().min(1).max(10)).optional(),
+  panAuto: bool().optional(),
+  tiltAuto: bool().optional(),
+});
+
 const PRESET_SHAPE_NOTE =
   `unlike the Tiny 2, save OVERWRITES an occupied slot (no create-once), and ` +
   `there is no explicit-pose write in this API at all — a slot always captures ` +
@@ -106,6 +151,7 @@ export function createTail2Tools(
   registry: Tail2Registry,
   grab: (host: string, o: { maxDim: number; quality: number }) => Promise<SrtSnapshot> =
     (host, o) => srtSnapshot(host, o),
+  udpSend: UdpFrameSender = sendUdpFrame,
 ): ToolDef[] {
   return [
     {
@@ -186,6 +232,386 @@ export function createTail2Tools(
         const { api } = await registry.resolve(camera);
         const r = await api.zoomSet(ratio, speed);
         return { ok: true, ratio: r.ratio, settled: r.settled, note: SETTLED_NOTE };
+      },
+    },
+    {
+      name: "obsbot_tail2_hybrid_zoom",
+      description:
+        "Unlock (or re-lock) the Tail 2's hybrid digital zoom — the control OBSBOT Center owns. " +
+        "Out of the box the camera's advertised 12x range is walled at its 5x OPTICAL ceiling " +
+        "across the entire REST API: PUT ptz/zoom above 5.0 is acknowledged but silently pins at " +
+        "5.0. Center unlocks the 5-12x digital region through its private UDP 9999 protocol; this " +
+        "tool speaks that protocol directly (both checksums decoded — the synthesizer reproduces " +
+        "Center's captured frames byte-for-byte; TAIL2-PROTOCOL.md §10). Verified by readback " +
+        "from the live status snapshot (zoom_infos.digital_enable); returns settled:false if the " +
+        "readback hadn't caught up — behavioral double-check: obsbot_tail2_zoom ratio 6.0 settles " +
+        "above 5.0 only when enabled. Works with OBSBOT Center closed. Hardware-verified both " +
+        "directions 2026-09-30, including full synthesis with a fresh sequence number.",
+      schema: withCamera({ enabled: bool() }),
+      handler: async (args: unknown) => {
+        const { camera, enabled } = withCamera({ enabled: bool() }).parse(args);
+        const entry = await registry.resolve(camera);
+        const host = entry.hosts[0]!;
+        await hybridZoomSet(host, enabled, udpSend);
+        // The write has no ack frame; the live snapshot regenerates per
+        // request, so poll digital_enable until it matches (bounded).
+        let settled = false;
+        for (let i = 0; i < 4 && !settled; i++) {
+          if (i > 0) await new Promise((r) => setTimeout(r, 400));
+          try {
+            if ((await entry.api.hybridZoomEnabled()) === enabled) settled = true;
+          } catch {
+            // Readback is best-effort: the write itself is fire-and-forget.
+          }
+        }
+        return {
+          ok: true,
+          enabled,
+          settled,
+          note: settled
+            ? "readback-verified via /camera/test/status (zoom_infos.digital_enable)"
+            : "sent, but the readback had not caught up — retry this call or verify " +
+              "behaviorally with obsbot_tail2_zoom (ratio >5.0 settles only when enabled)",
+        };
+      },
+    },
+    {
+      name: "obsbot_tail2_zoom_type",
+      description:
+        "Read or set the auto-zoom framing pattern (Center's Console slider under Single/Group " +
+        "tracking: off/3/5/7/9/…/24). Off=normal, 7/9/16/24=P7/P9/P16/P24 (subject-size framing " +
+        "percentages), 3/5≈halfBody/fullBody (3 disabled in group mode). Arming AI tracking sets " +
+        "this to `shot` — which is why the status block's zoom_type reads shot while tracking. " +
+        "Writes are GATED (MEASURED 2026-10-01): the camera 500s unless human tracking is armed " +
+        "— obsbot_tail2_ai_track enabled:true first. Readback-verified write.",
+      schema: zoomTypeSchema,
+      handler: async (args: unknown) => {
+        const { camera, type } = zoomTypeSchema.parse(args);
+        const { api } = await registry.resolve(camera);
+        if (type === undefined) return await api.zoomTypeGet();
+        const r = await api.zoomTypeSet(type);
+        return { ok: true, ...r };
+      },
+    },
+    {
+      name: "obsbot_tail2_preset_speed",
+      description:
+        "Read or set the preset switching speed (1-5, Center's Console page). How fast recalls " +
+        "drive the gimbal. Readback-verified write.",
+      schema: presetSpeedSchema,
+      handler: async (args: unknown) => {
+        const { camera, speed } = presetSpeedSchema.parse(args);
+        const { api } = await registry.resolve(camera);
+        if (speed === undefined) return await api.presetSpeedGet();
+        const r = await api.presetSpeedSet(speed);
+        return { ok: true, ...r };
+      },
+    },
+    {
+      name: "obsbot_tail2_usb_mode",
+      description:
+        "Read or set the USB-C function mode: mtp or uvc. Control rides the network either way, " +
+        "so switching is safe remotely. `mtp` is the measured wire value; `uvc` is the presumed " +
+        "counterpart (GET-measured 2026-10-01). Readback-verified write.",
+      schema: usbModeSchema,
+      handler: async (args: unknown) => {
+        const { camera, mode } = usbModeSchema.parse(args);
+        const { api } = await registry.resolve(camera);
+        if (mode === undefined) return await api.usbModeGet();
+        const r = await api.usbModeSet(mode);
+        return { ok: true, ...r };
+      },
+    },
+    {
+      name: "obsbot_tail2_antiflicker",
+      description:
+        "Read or set the anti-flicker mode: off, 50hz or 60hz (60hz measured on this unit). " +
+        "Readback-verified write.",
+      schema: antiFlickerSchema,
+      handler: async (args: unknown) => {
+        const { camera, mode } = antiFlickerSchema.parse(args);
+        const { api } = await registry.resolve(camera);
+        if (mode === undefined) return await api.antiFlickerGet();
+        const r = await api.antiFlickerSet(mode);
+        return { ok: true, ...r };
+      },
+    },
+    {
+      name: "obsbot_tail2_af_track",
+      description:
+        "Read or set the autofocus track mode: global, face or front (Center's radios; `face` " +
+        "measured on the wire, the other two are the presumed strings). Readback-verified write.",
+      schema: afTrackSchema,
+      handler: async (args: unknown) => {
+        const { camera, mode } = afTrackSchema.parse(args);
+        const { api } = await registry.resolve(camera);
+        if (mode === undefined) return await api.afTrackGet();
+        const r = await api.afTrackSet(mode);
+        return { ok: true, ...r };
+      },
+    },
+    {
+      name: "obsbot_tail2_iso_range",
+      description:
+        "Read or set the auto-ISO range (the double-ended slider: both bounds, 100-6400 in " +
+        "doubling stops). Pass min and/or max; both default to the current value when omitted. " +
+        "Readback-verified write.",
+      schema: isoRangeSchema,
+      handler: async (args: unknown) => {
+        const { camera, min, max } = isoRangeSchema.parse(args);
+        const { api } = await registry.resolve(camera);
+        if (min === undefined && max === undefined) return await api.isoRangeGet();
+        const current = await api.isoRangeGet();
+        const r = await api.isoRangeSet(min ?? current.isomin, max ?? current.isomax);
+        return { ok: true, ...r };
+      },
+    },
+    {
+      name: "obsbot_tail2_gesture",
+      description:
+        "Read (bare) or set the gesture-control switches and the gesture zoom factor: " +
+        "lockedTarget, recording, zoom (booleans) and zoomFactor (the multiplier one zoom " +
+        "gesture applies, e.g. 2.0). All measured on the wire 2026-10-01. Writes are " +
+        "readback-verified; each field is optional.",
+      schema: gestureSchema,
+      handler: async (args: unknown) => {
+        const { camera, lockedTarget, recording, zoom, zoomFactor } = gestureSchema.parse(args);
+        const { api } = await registry.resolve(camera);
+        if (
+          lockedTarget === undefined && recording === undefined && zoom === undefined &&
+          zoomFactor === undefined
+        ) {
+          const [lt, rec, zm, zf] = await Promise.all([
+            api.gestureLockedTargetGet(),
+            api.gestureRecordingGet(),
+            api.gestureZoomGet(),
+            api.gestureZoomFactorGet(),
+          ]);
+          return { lockedTarget: lt.enable, recording: rec.enable, zoom: zm.enable, zoomFactor: zf.factor };
+        }
+        const out: Record<string, unknown> = { ok: true };
+        if (lockedTarget !== undefined) out.lockedTarget = await api.gestureLockedTargetSet(lockedTarget);
+        if (recording !== undefined) out.recording = await api.gestureRecordingSet(recording);
+        if (zoom !== undefined) out.zoom = await api.gestureZoomSet(zoom);
+        if (zoomFactor !== undefined) out.zoomFactor = await api.gestureZoomFactorSet(zoomFactor);
+        return out;
+      },
+    },
+    {
+      name: "obsbot_tail2_stream_config",
+      description:
+        "Read (bare) or set the stream encoder configuration shared by the network outputs: " +
+        "encoder (h264/h265), resolution (camera format like 1920X1080P30), bitrate (Mbps). " +
+        "The bare read also includes the RTSP URLs for both network interfaces. GATED (MEASURED " +
+        "2026-10-01): resolution writes 500 while an output is live — set obsbot_tail2_stream " +
+        "output:\"off\" first (encoder and bitrate writes are ungated). Readback-verified writes.",
+      schema: streamConfigSchema,
+      handler: async (args: unknown) => {
+        const { camera, encoder, resolution, bitrate } = streamConfigSchema.parse(args);
+        const { api } = await registry.resolve(camera);
+        if (encoder === undefined && resolution === undefined && bitrate === undefined) {
+          const [enc, res, br, urls] = await Promise.all([
+            api.streamEncoderGet(),
+            api.streamResolutionGet(),
+            api.streamBitrateGet(),
+            api.rtspUrlsGet(),
+          ]);
+          return { encoder: enc.encoder, resolution: res.resolution, bitrate: br.bitrate, rtspUrls: urls };
+        }
+        const out: Record<string, unknown> = { ok: true };
+        if (encoder !== undefined) out.encoder = await api.streamEncoderSet(encoder);
+        if (resolution !== undefined) out.resolution = await api.streamResolutionSet(resolution);
+        if (bitrate !== undefined) out.bitrate = await api.streamBitrateSet(bitrate);
+        return out;
+      },
+    },
+    {
+      name: "obsbot_tail2_export_log",
+      description:
+        "Download the camera's full diagnostic bundle (GET /camera/test/log — the same archive " +
+        "OBSBOT Center's Export Log button produces) and save it to `path`. ~12 MB tar.gz " +
+        "containing the settings tree (ust.json), the runtime status snapshot, factory records, " +
+        "kernel logs. Takes ~10-20 s (server-side archive generation).",
+      schema: exportLogSchema,
+      handler: async (args: unknown) => {
+        const { camera, path } = exportLogSchema.parse(args);
+        const { api } = await registry.resolve(camera);
+        const buf = await api.exportLog();
+        await writeFile(path, buf);
+        return { ok: true, path, bytes: buf.length, note: "tar.gz diagnostic bundle saved" };
+      },
+    },
+    {
+      name: "obsbot_tail2_live_status",
+      description:
+        "Read a FRESH runtime snapshot (GET /camera/test/status) distilled to what the REST " +
+        "tree hides: live gimbal pose (euler + joint angles — the WS push has no pose), zoom " +
+        "internals including digital_enable (the hybrid-zoom state, the readback " +
+        "obsbot_tail2_hybrid_zoom verifies against), runtime exposure truth (shutter/ISO/aperture " +
+        "as actually running), battery/lens temperatures, boot stage and uptime, and accessory " +
+        "state (360° base, BT remote, tally). Regenerated server-side per request.",
+      schema: liveStatusSchema,
+      handler: async (args: unknown) => {
+        const { camera } = liveStatusSchema.parse(args);
+        const { api } = await registry.resolve(camera);
+        const s = (await api.liveStatus()) as {
+          status?: {
+            init?: { stage?: string; poweron_pts?: number };
+            system?: unknown;
+            device?: {
+              gimbal_status?: {
+                status?: Record<string, number>;
+                attitude?: string;
+              };
+              lens_status?: { temperature?: number };
+              battery_status?: { capacity?: number; voltage?: number; temperature?: number; charging?: number };
+            };
+            sync_push?: {
+              media_status?: { zoom_infos?: Record<string, unknown> };
+              iq_status?: Record<string, unknown>;
+              dev_status?: {
+                basepan_status?: { basepan_joint_angle?: number };
+                remote_status?: { charging?: boolean; capacity?: number };
+              };
+            };
+          };
+        };
+        const gimbal = s.status?.device?.gimbal_status;
+        const zi = s.status?.sync_push?.media_status?.zoom_infos ?? {};
+        const iq = s.status?.sync_push?.iq_status ?? {};
+        // The runtime exposure fields live under `exposure_params`.
+        const ae = ((iq.exposure_params instanceof Object ? iq.exposure_params : {}) as Record<string, unknown>);
+        const n = (v: unknown): number | undefined => (typeof v === "number" ? v : undefined);
+        const str = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined);
+        return {
+          gimbal: {
+            euler: {
+              x: n(gimbal?.status?.x_euler_angle),
+              y: n(gimbal?.status?.y_euler_angle),
+              z: n(gimbal?.status?.z_euler_angle),
+            },
+            joint: {
+              x: n(gimbal?.status?.x_joint_angle),
+              y: n(gimbal?.status?.y_joint_angle),
+              z: n(gimbal?.status?.z_joint_angle),
+            },
+            attitude: gimbal?.attitude,
+          },
+          zoom: {
+            hybridDigitalEnable: zi.digital_enable,
+            settingMin: n(zi.zoom_setting_min),
+            settingMax: n(zi.zoom_setting_max),
+            settingCurrent: n(zi.zoom_setting_current),
+            manualZoomSpeed: n(zi.manual_zoom_speed),
+            digitalZoomMax: n(zi.digital_zoom_max),
+          },
+          exposureRuntime: {
+            shutter: str(ae.runtime_shutter),
+            iso: n(ae.runtime_iso),
+            aperture: str(ae.runtime_aperture),
+            ev: str(ae.runtime_ev),
+          },
+          power: {
+            batteryCapacity: n(s.status?.device?.battery_status?.capacity),
+            batteryVoltageMv: n(s.status?.device?.battery_status?.voltage),
+            batteryTempC: n(s.status?.device?.battery_status?.temperature),
+            charging: n(s.status?.device?.battery_status?.charging) === 1,
+            lensTempC: n(s.status?.device?.lens_status?.temperature),
+            bootStage: s.status?.init?.stage,
+          },
+          accessories: {
+            basePanJointAngle: n(s.status?.sync_push?.dev_status?.basepan_status?.basepan_joint_angle),
+            remoteCharging: s.status?.sync_push?.dev_status?.remote_status?.charging,
+            remoteCapacity: n(s.status?.sync_push?.dev_status?.remote_status?.capacity),
+          },
+        };
+      },
+    },
+    {
+      name: "obsbot_tail2_zone_tracking",
+      description:
+        "Toggle zone tracking (Center's Console page switch) on or off. Rides the camera's " +
+        "private UDP 9999 channel (generic key-value command, key 03 — decoded from a labeled " +
+        "capture 2026-10-01, TAIL2-PROTOCOL.md §10b). No ack and no REST-readable state — the " +
+        "effect shows in the tracking behavior. Synthesized frame, works with Center closed.",
+      schema: zoneTrackingSchema,
+      handler: async (args: unknown) => {
+        const { camera, enabled } = zoneTrackingSchema.parse(args);
+        const entry = await registry.resolve(camera);
+        await kvSet(entry.hosts[0]!, KV_KEYS.zoneTracking, enabled, udpSend);
+        return { ok: true, enabled, note: "sent — no readback exists for this switch" };
+      },
+    },
+    {
+      name: "obsbot_tail2_auto_zoom_speed",
+      description:
+        "Set the AUTO zoom speed 1-10 — how fast AI-tracking auto-zoom framing moves (Center's " +
+        "Console slider; distinct from the MANUAL zoom speed on obsbot_tail2_zoom's speed param). " +
+        "Rides UDP 9999 key 0x17. No REST-readable state; no ack — the frame is synthesized and " +
+        "works with Center closed.",
+      schema: autoZoomSpeedSchema,
+      handler: async (args: unknown) => {
+        const { camera, speed } = autoZoomSpeedSchema.parse(args);
+        const entry = await registry.resolve(camera);
+        await kvSet(entry.hosts[0]!, KV_KEYS.autoZoomSpeed, speed, udpSend);
+        return { ok: true, speed, note: "sent — no readback exists for this control" };
+      },
+    },
+    {
+      name: "obsbot_tail2_track_custom",
+      description:
+        "Configure CUSTOM tracking speed (Center's `customized` track speed): enable it, set the " +
+        "per-axis Pan/Tilt speeds 1-10, and toggle the per-axis Auto buttons. Bare call reads " +
+        "current state from the status push (tracking_settings, locks included read-only). " +
+        "Writes ride UDP 9999 keys 04/07/0a/06/09 (pan/tilt travel as float32 slider/10 on the " +
+        "wire; keys 06/09 are the Auto buttons — hardware-verified against horizontal_auto/" +
+        "vertical_auto). The AXIS LOCKS have no known write path (not UDP, REST guesses 404) — " +
+        "shown read-only. Verified by tracking_settings readback.",
+      schema: trackCustomSchema,
+      handler: async (args: unknown) => {
+        const { camera, enabled, pan, tilt, panAuto, tiltAuto } = trackCustomSchema.parse(args);
+        const entry = await registry.resolve(camera);
+        const readBare =
+          enabled === undefined && pan === undefined && tilt === undefined &&
+          panAuto === undefined && tiltAuto === undefined;
+        if (readBare) {
+          const st = (await entry.api.status()) as {
+            tracking_settings?: Record<string, unknown>;
+          };
+          const t = st.tracking_settings ?? {};
+          const n = (v: unknown): number | undefined => (typeof v === "number" ? v : undefined);
+          const b = (v: unknown): boolean | undefined => (typeof v === "boolean" ? v : undefined);
+          return {
+            mode: (await entry.api.trackSpeedGet()).speed,
+            pan: n(t.horizontalSpeed),
+            tilt: n(t.verticalSpeed),
+            panLock: b(t.PanAxisLock),
+            tiltLock: b(t.TiltAxisLock),
+            panAuto: b(t.horizontal_auto),
+            tiltAuto: b(t.vertical_auto),
+          };
+        }
+        const host = entry.hosts[0]!;
+        const out: Record<string, unknown> = { ok: true };
+        if (enabled !== undefined) await kvSet(host, KV_KEYS.customTrackingEnable, enabled, udpSend);
+        if (pan !== undefined) await kvSet(host, KV_KEYS.panSpeed, f32Bits(pan / 10), udpSend);
+        if (tilt !== undefined) await kvSet(host, KV_KEYS.tiltSpeed, f32Bits(tilt / 10), udpSend);
+        // The Auto-button bools ride ONE byte on the wire (len-9 TLV) — the
+        // only keys that do; everything else is 4-byte.
+        if (panAuto !== undefined) await kvSet(host, KV_KEYS.panAuto, panAuto, udpSend, undefined, { bool8: true });
+        if (tiltAuto !== undefined) await kvSet(host, KV_KEYS.tiltAuto, tiltAuto, udpSend, undefined, { bool8: true });
+        // Readback: tracking_settings reflects pan/tilt/autos; the mode shows
+        // `customized` once enabled.
+        const st = (await entry.api.status()) as { tracking_settings?: Record<string, unknown> };
+        const t = st.tracking_settings ?? {};
+        out.readback = {
+          mode: (await entry.api.trackSpeedGet()).speed,
+          pan: t.horizontalSpeed,
+          tilt: t.verticalSpeed,
+          panAuto: t.horizontal_auto,
+          tiltAuto: t.vertical_auto,
+        };
+        return out;
       },
     },
     {

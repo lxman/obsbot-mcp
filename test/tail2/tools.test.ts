@@ -1,4 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { existsSync, rmSync } from "node:fs";
+import { join as pathJoin } from "node:path";
+import { tmpdir } from "node:os";
 import { createTail2Tools } from "../../src/tail2/tools.js";
 import { Tail2Registry } from "../../src/tail2/registry.js";
 import type { Tail2Api } from "../../src/tail2/api.js";
@@ -13,7 +16,7 @@ import type { Tail2Api } from "../../src/tail2/api.js";
 
 interface FakeTail2 {
   api: Tail2Api;
-  calls: { zoom?: [number, number]; aiMode?: string; trackSpeed?: string; rollBias?: number; portrait?: boolean; recenter?: boolean; presetSave?: [number, string]; presetCall?: number; presetDelete?: number; presetRename?: [number, string]; srtEnabled?: boolean; ndiEnabled?: boolean; gimbalSpeed?: [number, number, number]; gimbalStop?: boolean; gimbalInvert?: boolean; gimbalPose?: { yaw: number; pitch: number; roll: number; ratio: number }; tapTarget?: [number, number] };
+  calls: { zoom?: [number, number]; aiMode?: string; trackSpeed?: string; rollBias?: number; portrait?: boolean; recenter?: boolean; presetSave?: [number, string]; presetCall?: number; presetDelete?: number; presetRename?: [number, string]; srtEnabled?: boolean; ndiEnabled?: boolean; gimbalSpeed?: [number, number, number]; gimbalStop?: boolean; gimbalInvert?: boolean; gimbalPose?: { yaw: number; pitch: number; roll: number; ratio: number }; tapTarget?: [number, number]; zoomType?: string; presetSpeed?: number; usbMode?: string; antiFlicker?: string; afTrack?: string; isoRange?: { isomin: number; isomax: number } };
   /** State for the 2026-09-30 vendor-doc surface (record/focus/exposure/image/stream/audio). */
   st: {
     recording: boolean;
@@ -150,14 +153,76 @@ const makeFake = (): FakeTail2 => {
     },
     // The 2026-09-30 vendor-doc surface: uniform get/set pairs over a state
     // object; capture counts triggers.
-    recordGet: async () => landed({ recording: f.st.recording ? "on" : "off" }),
-    recordSet: async (on: boolean) => {
+    recordGet: async () => landed({ recording: f.st.recording ? "on" : "off" }),    recordSet: async (on: boolean) => {
       f.st.recording = on;
       return landed({ settled: true, recording: on ? "on" : "off" });
     },
     captureTrigger: async () => {
       f.st.captures++;
     },
+    // The 2026-10-01 probe batch: get returns current, set records + verifies.
+    zoomTypeGet: async () => landed({ type: f.calls.zoomType ?? "shot" }),
+    zoomTypeSet: async (type: string) => {
+      f.calls.zoomType = type;
+      return landed({ settled: true, type });
+    },
+    presetSpeedGet: async () => landed({ speed: f.calls.presetSpeed ?? 5 }),
+    presetSpeedSet: async (speed: number) => {
+      f.calls.presetSpeed = speed;
+      return landed({ settled: true, speed });
+    },
+    usbModeGet: async () => landed({ mode: f.calls.usbMode ?? "mtp" }),
+    usbModeSet: async (mode: string) => {
+      f.calls.usbMode = mode;
+      return landed({ settled: true, mode });
+    },
+    antiFlickerGet: async () => landed({ mode: f.calls.antiFlicker ?? "60hz" }),
+    antiFlickerSet: async (mode: "off" | "50hz" | "60hz") => {
+      f.calls.antiFlicker = mode;
+      return landed({ settled: true, mode });
+    },
+    afTrackGet: async () => landed({ mode: f.calls.afTrack ?? "face" }),
+    afTrackSet: async (mode: string) => {
+      f.calls.afTrack = mode;
+      return landed({ settled: true, mode });
+    },
+    isoRangeGet: async () => landed(f.calls.isoRange ?? { isomin: 100, isomax: 6400 }),
+    isoRangeSet: async (isomin: number, isomax: number) => {
+      f.calls.isoRange = { isomin, isomax };
+      return landed({ settled: true, isomin, isomax });
+    },
+    gestureLockedTargetGet: async () => landed({ enable: true }),
+    gestureLockedTargetSet: async (enable: boolean) => landed({ settled: true, enable }),
+    gestureRecordingGet: async () => landed({ enable: true }),
+    gestureRecordingSet: async (enable: boolean) => landed({ settled: true, enable }),
+    gestureZoomGet: async () => landed({ enable: true }),
+    gestureZoomSet: async (enable: boolean) => landed({ settled: true, enable }),
+    gestureZoomFactorGet: async () => landed({ factor: 2.0 }),
+    gestureZoomFactorSet: async (factor: number) => landed({ settled: true, factor }),
+    streamEncoderGet: async () => landed({ encoder: "h264" }),
+    streamEncoderSet: async (encoder: string) => landed({ settled: true, encoder }),
+    streamResolutionGet: async () => landed({ resolution: "1920X1080P30" }),
+    streamResolutionSet: async (resolution: string) => landed({ settled: true, resolution }),
+    streamBitrateGet: async () => landed({ bitrate: 20.0 }),
+    streamBitrateSet: async (bitrate: number) => landed({ settled: true, bitrate }),
+    rtspUrlsGet: async () => landed({ wiredNetwork: { mainStreamUrl: "rtsp://x/stream1" } }),
+    exportLog: async () => Buffer.from("tarball-bytes"),
+    liveStatus: async () =>
+      landed({
+        status: {
+          device: {
+            gimbal_status: { status: { x_euler_angle: 0.5, y_euler_angle: 1, z_euler_angle: 2 }, attitude: "REMO_BASE_LANDSCAPE" },
+            lens_status: { temperature: 36 },
+            battery_status: { capacity: 100, voltage: 8248, temperature: 41, charging: 0 },
+          },
+          sync_push: {
+            media_status: { zoom_infos: { digital_enable: true, zoom_setting_min: 100, zoom_setting_max: 1200, zoom_setting_current: 250, manual_zoom_speed: 7 } },
+            iq_status: { exposure_params: { runtime_shutter: "1/40", runtime_iso: 2776 } },
+            dev_status: { basepan_status: { basepan_joint_angle: 0 }, remote_status: { charging: false, capacity: 80 } },
+          },
+          init: { stage: "REMO_INIT_STAGE_DONE", poweron_pts: 26360 },
+        },
+      }),
     focusModeGet: async () => landed({ mode: f.st.focusMode }),
     focusModeSet: async (mode: "afc" | "afs" | "mf") => {
       f.st.focusMode = mode;
@@ -313,6 +378,20 @@ describe("tail2 tools", () => {
       "obsbot_tail2_audio",
       "obsbot_tail2_track_target",
       "obsbot_tail2_focus_point",
+      "obsbot_tail2_hybrid_zoom",
+      "obsbot_tail2_zoom_type",
+      "obsbot_tail2_preset_speed",
+      "obsbot_tail2_usb_mode",
+      "obsbot_tail2_antiflicker",
+      "obsbot_tail2_af_track",
+      "obsbot_tail2_iso_range",
+      "obsbot_tail2_gesture",
+      "obsbot_tail2_stream_config",
+      "obsbot_tail2_export_log",
+      "obsbot_tail2_live_status",
+      "obsbot_tail2_zone_tracking",
+      "obsbot_tail2_auto_zoom_speed",
+      "obsbot_tail2_track_custom",
     ]) {
       expect(names).toContain(expected);
     }
@@ -338,8 +417,142 @@ describe("tail2 tools", () => {
     expect(r.ndi).toEqual({ enable: true });
   });
 
-  it("zoom writes ratio+speed and reports settled", async () => {
+  it("hybrid zoom synthesizes the frame, sends to the first host, and verifies by digital_enable readback", async () => {
     const f = makeFake();
+    const reg = await seededRegistry(f);
+    // Readback state the fake serves: starts enabled, flips when written.
+    let digitalEnable = true;
+    (f.api as { hybridZoomEnabled: () => Promise<boolean | undefined> }).hybridZoomEnabled = async () => digitalEnable;
+    const sent: Array<{ host: string; frame: Buffer }> = [];
+    const tools = createTail2Tools(reg, undefined, async (host, frame) => {
+      sent.push({ host, frame });
+      digitalEnable = frame[25] === 0x01;
+    });
+    const t = tool(tools, "obsbot_tail2_hybrid_zoom");
+    const on = (await t.handler({ enabled: true })) as { ok: boolean; enabled: boolean; settled: boolean };
+    const off = (await t.handler({ enabled: false, camera: "aa:aa:aa:aa:aa:aa" })) as {
+      ok: boolean;
+      enabled: boolean;
+      settled: boolean;
+    };
+    expect(on).toMatchObject({ ok: true, enabled: true, settled: true });
+    expect(off).toMatchObject({ ok: true, enabled: false, settled: true });
+    // Both writes went to the registry entry's first host, frames in order.
+    expect(sent.map((s) => s.host)).toEqual(["192.168.0.10", "192.168.0.10"]);
+    expect(sent[0]!.frame.subarray(0, 2)).toEqual(Buffer.from([0xaa, 0x25]));
+    // ON then OFF differ in the TLV (checksum + boolean), same command path.
+    expect(sent[0]!.frame.subarray(8, 12)).toEqual(sent[1]!.frame.subarray(8, 12));
+    expect(sent[0]!.frame[25]).toBe(0x01);
+    expect(sent[1]!.frame[25]).toBe(0x00);
+  });
+
+  it("hybrid zoom reports settled:false when the readback never agrees (write still sent)", async () => {
+    const f = makeFake();
+    const reg = await seededRegistry(f);
+    (f.api as { hybridZoomEnabled: () => Promise<boolean | undefined> }).hybridZoomEnabled = async () => false;
+    const sent: Array<{ host: string; frame: Buffer }> = [];
+    const tools = createTail2Tools(reg, undefined, async (host, frame) => {
+      sent.push({ host, frame });
+    });
+    const r = (await tool(tools, "obsbot_tail2_hybrid_zoom").handler({ enabled: true })) as {
+      ok: boolean;
+      settled: boolean;
+    };
+    expect(r).toMatchObject({ ok: true, settled: false });
+    expect(sent).toHaveLength(1); // exactly one write; retries are readback-only
+  });
+
+  it("the 2026-10-01 probe-batch tools read bare and write dispatch", async () => {
+    const f = makeFake();
+    const tools = createTail2Tools(await seededRegistry(f));
+    const call = async (name: string, args: unknown) => tool(tools, name).handler(args);
+
+    // Bare reads.
+    expect(await call("obsbot_tail2_zoom_type", {})).toEqual({ type: "shot" });
+    expect(await call("obsbot_tail2_gesture", {})).toEqual({
+      lockedTarget: true, recording: true, zoom: true, zoomFactor: 2.0,
+    });
+    const sc = (await call("obsbot_tail2_stream_config", {})) as Record<string, unknown>;
+    expect(sc.encoder).toBe("h264");
+    expect(sc.rtspUrls).toBeDefined();
+
+    // Writes dispatch and verify.
+    expect(await call("obsbot_tail2_zoom_type", { type: "P9" })).toMatchObject({ ok: true, type: "P9" });
+    expect(f.calls.zoomType).toBe("P9");
+    expect(await call("obsbot_tail2_preset_speed", { speed: 3 })).toMatchObject({ ok: true, speed: 3 });
+    expect(await call("obsbot_tail2_usb_mode", { mode: "uvc" })).toMatchObject({ ok: true, mode: "uvc" });
+    expect(await call("obsbot_tail2_antiflicker", { mode: "50hz" })).toMatchObject({ ok: true, mode: "50hz" });
+    expect(await call("obsbot_tail2_af_track", { mode: "front" })).toMatchObject({ ok: true, mode: "front" });
+    // ISO range: one-sided writes keep the current other bound.
+    await call("obsbot_tail2_iso_range", { min: 200 });
+    expect(f.calls.isoRange).toEqual({ isomin: 200, isomax: 6400 });
+    // Gesture: per-field writes.
+    const g = (await call("obsbot_tail2_gesture", { lockedTarget: false, zoomFactor: 3.5 })) as Record<string, unknown>;
+    expect(g.lockedTarget).toMatchObject({ settled: true, enable: false });
+    expect(g.zoomFactor).toMatchObject({ settled: true, factor: 3.5 });
+
+    // live_status distills the nested tree.
+    const ls = (await call("obsbot_tail2_live_status", {})) as {
+      gimbal: { euler: { x?: number } };
+      zoom: { hybridDigitalEnable?: boolean; settingMax?: number };
+      power: { batteryCapacity?: number; bootStage?: string };
+    };
+    expect(ls.gimbal.euler.x).toBe(0.5);
+    expect(ls.zoom.hybridDigitalEnable).toBe(true);
+    expect(ls.zoom.settingMax).toBe(1200);
+    expect(ls.power.batteryCapacity).toBe(100);
+    expect(ls.power.bootStage).toBe("REMO_INIT_STAGE_DONE");
+  });
+
+  it("export_log saves the bundle to the requested path", async () => {
+    const f = makeFake();
+    const tools = createTail2Tools(await seededRegistry(f));
+    const path = pathJoin(tmpdir(), `obsbot-export-test-${Date.now()}.tar.gz`);
+    try {
+      const r = (await tool(tools, "obsbot_tail2_export_log").handler({ path })) as { ok: boolean; bytes: number };
+      expect(r.ok).toBe(true);
+      expect(r.bytes).toBeGreaterThan(0);
+      expect(existsSync(path)).toBe(true);
+    } finally {
+      rmSync(path, { force: true });
+    }
+  });
+
+  it("the KV tools synthesize 4454 frames with the right keys", async () => {
+    const f = makeFake();
+    const reg = await seededRegistry(f);
+    const sent: Buffer[] = [];
+    const tools = createTail2Tools(reg, undefined, async (_host, frame) => {
+      sent.push(frame);
+    });
+    const call = (name: string, args: unknown) => tool(tools, name).handler(args);
+
+    const z = (await call("obsbot_tail2_zone_tracking", { enabled: true })) as { ok: boolean; enabled: boolean };
+    expect(z).toMatchObject({ ok: true, enabled: true });
+    const s = (await call("obsbot_tail2_auto_zoom_speed", { speed: 6 })) as { ok: boolean; speed: number };
+    expect(s).toMatchObject({ ok: true, speed: 6 });
+    // zone: key 3 bool4B (36-byte frame); autoZoomSpeed: key 0x17 int (36)
+    expect(sent[0]!.length).toBe(36);
+    expect(sent[0]!.readUInt32LE(28)).toBe(0x03); // key
+    expect(sent[0]!.readUInt32LE(32)).toBe(1); // value
+    expect(sent[1]!.readUInt32LE(28)).toBe(0x17);
+    expect(sent[1]!.readUInt32LE(32)).toBe(6);
+
+    // track_custom writes: enable + pan (float /10) + tilt + autos (1-byte bools)
+    const c = (await call("obsbot_tail2_track_custom", {
+      enabled: true, pan: 4, tilt: 6, panAuto: true, tiltAuto: false,
+    })) as { ok: boolean; readback?: unknown };
+    expect(c.ok).toBe(true);
+    expect(c.readback).toBeDefined();
+    // frames 2..6: enable(36), pan(36), tilt(36), panAuto(33), tiltAuto(33)
+    expect(sent.slice(2).map((b) => b.length)).toEqual([36, 36, 36, 33, 33]);
+    expect(sent[3]!.readUInt32LE(28)).toBe(0x07); // pan key
+    expect(sent[4]!.readUInt32LE(28)).toBe(0x0a); // tilt key
+    // pan float 0.4f lands in the tail
+    expect(sent[3]!.subarray(-4).toString("hex")).toBe("cdcccc3e");
+  });
+
+  it("zoom writes ratio+speed and reports settled", async () => {    const f = makeFake();
     const tools = createTail2Tools(await seededRegistry(f));
     const r = (await tool(tools, "obsbot_tail2_zoom").handler({ ratio: "4.5", speed: "3" })) as {
       ok: boolean;

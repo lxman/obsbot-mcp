@@ -255,6 +255,31 @@ export class Tail2Api {
     return this.req<Record<string, unknown>>("GET", "/camera/sdk/range");
   }
 
+  /**
+   * The RM_TEST live snapshot, `GET /camera/test/status` (TAIL2-PROTOCOL.md
+   * §13b): a ~220 KB FRESH-per-request runtime tree carrying what the REST
+   * tree hides — live gimbal pose (euler/joint angles), zoom internals
+   * (`zoom_infos.digital_enable` = the hybrid-zoom state), runtime AE truth,
+   * accessory telemetry. Regenerated server-side per request (measured
+   * 2026-09-30: gimbal micro-drift visible between back-to-back fetches).
+   */
+  liveStatus(): Promise<Record<string, unknown>> {
+    return this.req<Record<string, unknown>>("GET", "/camera/test/status");
+  }
+
+  /**
+   * Hybrid-zoom readback: `zoom_infos.digital_enable` from the live
+   * snapshot. True = the 5-12x digital region is unlocked (the state
+   * `obsbot_tail2_hybrid_zoom` writes). Returns undefined when the field
+   * is absent (unexpected firmware shape) rather than guessing.
+   */
+  async hybridZoomEnabled(): Promise<boolean | undefined> {
+    const s = (await this.liveStatus()) as {
+      status?: { sync_push?: { media_status?: { zoom_infos?: { digital_enable?: boolean } } } };
+    };
+    return s.status?.sync_push?.media_status?.zoom_infos?.digital_enable;
+  }
+
   networkConfig(): Promise<Record<string, unknown>> {
     return this.req<Record<string, unknown>>("GET", "/camera/sdk/networkconfig");
   }
@@ -880,5 +905,230 @@ export class Tail2Api {
       { attempts: 6, delayMs: 350, ...verify },
     );
     return { settled: v.settled, presets: v.value };
+  }
+
+  // ---- 2026-10-01 probe batch (GETs measured live; writes no-op-verified) --------
+  //
+  // The vendor-doc surface that shipped no tool. Shapes below are the wire
+  // truth from the 2026-10-01 probe sweep, not doc claims.
+
+  zoomTypeGet(): Promise<{ type: string }> {
+    return this.req("GET", "/camera/sdk/ai/human/zoomtype");
+  }
+
+  /** Auto-Zoom framing pattern (Center's Console slider: off/3/5/7/9/…/24). */
+  async zoomTypeSet(
+    type: string,
+    verify: VerifyOpts = {},
+  ): Promise<{ settled: boolean; type: string }> {
+    await this.send("PUT", "/camera/sdk/ai/human/zoomtype", { type });
+    const v = await this.verified(() => this.zoomTypeGet(), (r) => r.type === type, verify);
+    return { settled: v.settled, type: v.value.type };
+  }
+
+  presetSpeedGet(): Promise<{ speed: number }> {
+    return this.req("GET", "/camera/sdk/ptz/presetspeed");
+  }
+
+  async presetSpeedSet(
+    speed: number,
+    verify: VerifyOpts = {},
+  ): Promise<{ settled: boolean; speed: number }> {
+    await this.send("PUT", "/camera/sdk/ptz/presetspeed", { speed });
+    const v = await this.verified(
+      () => this.presetSpeedGet(),
+      (r) => r.speed === speed,
+      { attempts: 4, delayMs: 350, ...verify },
+    );
+    return { settled: v.settled, speed: v.value.speed };
+  }
+
+  usbModeGet(): Promise<{ mode: string }> {
+    return this.req("GET", "/camera/sdk/usb/mode");
+  }
+
+  async usbModeSet(mode: string, verify: VerifyOpts = {}): Promise<{ settled: boolean; mode: string }> {
+    await this.send("PUT", "/camera/sdk/usb/mode", { mode });
+    const v = await this.verified(() => this.usbModeGet(), (r) => r.mode === mode, verify);
+    return { settled: v.settled, mode: v.value.mode };
+  }
+
+  antiFlickerGet(): Promise<{ mode: string }> {
+    return this.req("GET", "/camera/sdk/image/exposure/antiflick/mode");
+  }
+
+  async antiFlickerSet(
+    mode: "off" | "50hz" | "60hz",
+    verify: VerifyOpts = {},
+  ): Promise<{ settled: boolean; mode: string }> {
+    await this.send("PUT", "/camera/sdk/image/exposure/antiflick/mode", { mode });
+    const v = await this.verified(() => this.antiFlickerGet(), (r) => r.mode === mode, verify);
+    return { settled: v.settled, mode: v.value.mode };
+  }
+
+  afTrackGet(): Promise<{ mode: string }> {
+    return this.req("GET", "/camera/sdk/image/af/trackmode");
+  }
+
+  async afTrackSet(mode: string, verify: VerifyOpts = {}): Promise<{ settled: boolean; mode: string }> {
+    await this.send("PUT", "/camera/sdk/image/af/trackmode", { mode });
+    const v = await this.verified(() => this.afTrackGet(), (r) => r.mode === mode, verify);
+    return { settled: v.settled, mode: v.value.mode };
+  }
+
+  isoRangeGet(): Promise<{ isomin: number; isomax: number }> {
+    return this.req("GET", "/camera/sdk/image/exposure/auto/isorange");
+  }
+
+  async isoRangeSet(
+    isomin: number,
+    isomax: number,
+    verify: VerifyOpts = {},
+  ): Promise<{ settled: boolean; isomin: number; isomax: number }> {
+    await this.send("PUT", "/camera/sdk/image/exposure/auto/isorange", { isomin, isomax });
+    const v = await this.verified(
+      () => this.isoRangeGet(),
+      (r) => r.isomin === isomin && r.isomax === isomax,
+      verify,
+    );
+    return { settled: v.settled, isomin: v.value.isomin, isomax: v.value.isomax };
+  }
+
+  gestureLockedTargetGet(): Promise<{ enable: boolean }> {
+    return this.req("GET", "/camera/sdk/ai/gesturecontrol/lockedtarget");
+  }
+
+  gestureLockedTargetSet(enable: boolean, verify: VerifyOpts = {}): Promise<{ settled: boolean; enable: boolean }> {
+    return this.boolSend("/camera/sdk/ai/gesturecontrol/lockedtarget", enable, verify);
+  }
+
+  gestureRecordingGet(): Promise<{ enable: boolean }> {
+    return this.req("GET", "/camera/sdk/ai/gesturecontrol/recording");
+  }
+
+  gestureRecordingSet(enable: boolean, verify: VerifyOpts = {}): Promise<{ settled: boolean; enable: boolean }> {
+    return this.boolSend("/camera/sdk/ai/gesturecontrol/recording", enable, verify);
+  }
+
+  gestureZoomGet(): Promise<{ enable: boolean }> {
+    return this.req("GET", "/camera/sdk/ai/gesturecontrol/zoom");
+  }
+
+  gestureZoomSet(enable: boolean, verify: VerifyOpts = {}): Promise<{ settled: boolean; enable: boolean }> {
+    return this.boolSend("/camera/sdk/ai/gesturecontrol/zoom", enable, verify);
+  }
+
+  gestureZoomFactorGet(): Promise<{ factor: number }> {
+    return this.req("GET", "/camera/sdk/ai/gesturecontrol/zoomfactor");
+  }
+
+  async gestureZoomFactorSet(
+    factor: number,
+    verify: VerifyOpts = {},
+  ): Promise<{ settled: boolean; factor: number }> {
+    // Same firmware quirk as evbias: JSON integers are rejected ("Invalid
+    // value type", MEASURED 2026-10-01 — 2 fails, 2.0 applies) — so the
+    // body is a pre-built string carrying a decimal point.
+    await this.send("PUT", "/camera/sdk/ai/gesturecontrol/zoomfactor", `{"factor":${factor.toFixed(1)}}`);
+    const v = await this.verified(
+      () => this.gestureZoomFactorGet(),
+      (r) => Math.abs(r.factor - factor) < 0.05,
+      verify,
+    );
+    return { settled: v.settled, factor: v.value.factor };
+  }
+
+  /** PUT {enable} + readback — the shared shape of the three gesture switches. */
+  private async boolSend(
+    path: string,
+    enable: boolean,
+    verify: VerifyOpts,
+  ): Promise<{ settled: boolean; enable: boolean }> {
+    await this.send("PUT", path, { enable });
+    const v = await this.verified(
+      () => this.req<{ enable: boolean }>("GET", path),
+      (r) => r.enable === enable,
+      verify,
+    );
+    return { settled: v.settled, enable: v.value.enable };
+  }
+
+  streamEncoderGet(): Promise<{ encoder: string }> {
+    return this.req("GET", "/camera/sdk/ndi-rtsp-srt/encoder");
+  }
+
+  async streamEncoderSet(encoder: string, verify: VerifyOpts = {}): Promise<{ settled: boolean; encoder: string }> {
+    const r = await this.stringSend("/camera/sdk/ndi-rtsp-srt/encoder", "encoder", encoder, verify);
+    return { settled: r.settled, encoder: r.value };
+  }
+
+  streamResolutionGet(): Promise<{ resolution: string }> {
+    return this.req("GET", "/camera/sdk/ndi-rtsp-srt/resolution");
+  }
+
+  async streamResolutionSet(resolution: string, verify: VerifyOpts = {}): Promise<{ settled: boolean; resolution: string }> {
+    const r = await this.stringSend("/camera/sdk/ndi-rtsp-srt/resolution", "resolution", resolution, verify);
+    return { settled: r.settled, resolution: r.value };
+  }
+
+  streamBitrateGet(): Promise<{ bitrate: number }> {
+    return this.req("GET", "/camera/sdk/ndi-rtsp-srt/bitrate");
+  }
+
+  async streamBitrateSet(bitrate: number, verify: VerifyOpts = {}): Promise<{ settled: boolean; bitrate: number }> {
+    // Float literal like gestureZoomFactorSet — the firmware's JSON
+    // integers are rejected on the float fields.
+    await this.send("PUT", "/camera/sdk/ndi-rtsp-srt/bitrate", `{"bitrate":${bitrate.toFixed(1)}}`);
+    const v = await this.verified(
+      () => this.streamBitrateGet(),
+      (r) => Math.abs(r.bitrate - bitrate) < 0.05,
+      verify,
+    );
+    return { settled: v.settled, bitrate: v.value.bitrate };
+  }
+
+  /** Read-only: the RTSP URLs for both network interfaces (About-page data). */
+  rtspUrlsGet(): Promise<Record<string, unknown>> {
+    return this.req("GET", "/camera/sdk/ndi-rtsp-srt/rtspurl");
+  }
+
+  /** PUT {<field>: <value>} + readback — the shared shape of the string configs. */
+  private async stringSend(
+    path: string,
+    field: string,
+    value: string,
+    verify: VerifyOpts,
+  ): Promise<{ settled: boolean; value: string }> {
+    await this.send("PUT", path, { [field]: value });
+    const v = await this.verified(
+      () => this.req<Record<string, string>>("GET", path),
+      (r) => r[field] === value,
+      verify,
+    );
+    return { settled: v.settled, value: v.value[field] ?? value };
+  }
+
+  /**
+   * The full diagnostic bundle (`GET /camera/test/log`, ~12 MB tar.gz, ~7 s
+   * server-side generation). Binary, not JSON — and long: generation plus
+   * transfer needs a timeout far beyond the client default.
+   */
+  async exportLog(timeoutMs = 180_000): Promise<Buffer> {
+    let res: Response;
+    try {
+      res = await fetch(this.baseUrl + "/camera/test/log", {
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+    } catch (e) {
+      throw new Error(
+        `Tail 2 at ${this.baseUrl} is unreachable (${e instanceof Error ? e.message : String(e)}). ` +
+          `Check the camera is powered and on the network; if it changed IP, re-run obsbot_tail2_scan.`,
+      );
+    }
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Tail2HttpError(res.status, "/camera/test/log", text.slice(0, 300));
+    }
+    return Buffer.from(await res.arrayBuffer());
   }
 }
