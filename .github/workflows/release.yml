@@ -193,10 +193,24 @@ jobs:
       - name: Publish to npm (OIDC) or dry-run
         run: |
           if [ "${{ inputs.dry_run }}" = "true" ]; then
-            echo "DRY RUN — not publishing"
+            echo "DRY RUN - not publishing"
             npm publish --dry-run
           else
-            npm publish
+            VERSION="$(node -p "require('./package.json').version")"
+            # Idempotent publish: npm's backend can register a version while
+            # the packument lags (MEASURED 2026-10-01: accepted at :45, public
+            # packument served nothing for ~20 min, then a re-run hit
+            # EPUBLISHCONFLICT). If publish reports a conflict but the
+            # registry serves this exact version, that is success, not failure.
+            if ! npm publish; then
+              SERVED="$(npm view "obsbot-mcp@$VERSION" version 2>/dev/null || true)"
+              if [ "$SERVED" = "$VERSION" ]; then
+                echo "publish conflicted but registry serves obsbot-mcp@$VERSION — continuing"
+              else
+                echo "::error::npm publish failed and obsbot-mcp@$VERSION is not served"
+                exit 1
+              fi
+            fi
           fi
       # The MCP Registry stores metadata only — it points at the npm package we
       # just published and verifies we own it by fetching that package and
