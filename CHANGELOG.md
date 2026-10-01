@@ -1,5 +1,85 @@
 # Changelog
 
+## [0.9.1] — 2026-10-01
+
+### Added: the 2026-10-01 probe batch — ten tools off the vendor-doc surface and the RM_TEST reads
+
+Every endpoint the census flagged as "mechanism exists, no tool" is now a
+tool, plus the two RM_TEST reads that close the loop on hybrid zoom:
+
+- **`obsbot_tail2_zoom_type`** — the auto-zoom framing patterns
+  (`normal|shot|halfBody|fullBody|P7|P9|P16|P24`); also explains the status
+  block's `zoom_type: shot` (tracking arms it). Writes GATED: requires human
+  tracking armed (500 otherwise, measured).
+- **`obsbot_tail2_preset_speed`**, **`obsbot_tail2_antiflicker`**,
+  **`obsbot_tail2_af_track`**, **`obsbot_tail2_iso_range`** (one-sided
+  writes keep the current other bound), **`obsbot_tail2_usb_mode`**,
+  **`obsbot_tail2_gesture`** (three switches + zoom factor),
+  **`obsbot_tail2_stream_config`** (encoder/resolution/bitrate + RTSP URLs
+  on the read; resolution writes GATED on output off, measured).
+- **`obsbot_tail2_export_log`** — downloads the diagnostic bundle
+  (`GET /camera/test/log`) to a file: the settings tree, runtime snapshot,
+  factory records, kernel logs.
+- **`obsbot_tail2_live_status`** — the fresh-per-request RM_TEST snapshot
+  distilled to what REST hides: live gimbal pose, zoom internals including
+  the hybrid state, runtime exposure truth, accessory telemetry.
+- All write shapes no-op-verified on live hardware (11/13 direct; the two
+  500s turned out to be the gates above, not shape errors).
+
+### Added: the 4454 key-value synthesizer — zone tracking, custom tracking, auto-zoom speed
+
+The flip-sheet census (§10b) mapped every remaining Center control to the
+UDP channel; the generic `4454` key→value writer is now synthesized and
+golden-tested against the capture:
+
+- **`obsbot_tail2_zone_tracking`** — the Console switch (key 03), send-only
+  (no readable state exists).
+- **`obsbot_tail2_auto_zoom_speed`** — 1–10 (key 0x17), send-only.
+- **`obsbot_tail2_track_custom`** — enable + per-axis Pan/Tilt 1–10 (float
+  ÷10 on the wire) + the Auto buttons (key 06/09, ONE-byte bools — semantics
+  corrected by live verification: they flip `horizontal_auto`/`vertical_auto`,
+  not the locks). Readback-verified end-to-end on hardware; locks remain
+  read-only (write path unknown — no traffic, REST guesses 404).
+- Protocol finds along the way: the identity TLV is `02 06` + SIX bytes
+  (`03 57` was never a terminator — it's the hybrid id's tail); the TLV
+  checksum constant is length-dependent `{9: 0xe1dd, 12: 0x440a}`; and REST
+  `ai/trackspeed` to `customized` requires the axis speeds in the same body.
+
+### Added: `obsbot_tail2_hybrid_zoom` — the 12x unlock, decoded off the wire
+
+The Tail 2's advertised 12x zoom is optically walled at **5.0x**: `PUT ptz/zoom`
+above 5.0 is acknowledged (HTTP 200) but silently pins at the optical ceiling.
+The unlock switch lives in OBSBOT Center's private **UDP 9999** protocol and
+nowhere in the REST tree — a full endpoint diff during a Center flip shows zero
+state changes. Decoded from differential tshark captures (flip ON vs OFF, then
+a labeled controls sweep):
+
+- **Write-frame anatomy** for the `0c 02 82 c1` zoom-family control — subcmd
+  `01` = hybrid-zoom boolean, subcmd `00` = a 1–10 speed.
+- **Both checksums cracked, full synthesis verified.** TLV value checksum
+  (21/21 samples, two command ids):
+  `byteswap16(crc16_0xA001_reflected(subcmd, value; init 0)) ^ 0xfe06`.
+  Frame checksum — the wall that forced replay for most of the session:
+  `be16(byteswap16(crc16_0xA001_reflected(first 20 bytes, field zeroed)) ^ 0xdbe4)`.
+  The coverage stops at byte 20, which is why full-frame sweeps missed it; the
+  crack came from sweeping the camera→Center direction (both directions share
+  one formula across polls, writes, and ~900-byte telemetry pushes). A frame
+  built entirely from the model — fresh random sequence, computed checksums —
+  was accepted on hardware, and the synthesizer reproduces Center's captured
+  frames byte-for-byte (pinned in tests). Only `aa29` replies (different
+  session header) remain outside the model.
+- **Replay worked first**: verbatim captured frames stayed valid for hours
+  from any source port — that fallback, the captured frames, the sender-token
+  scope question (RESOLVED: not session-bound — synthesized frames honored
+  with Center fully closed), and two slider/speed commands riding the same
+  channel are all documented in TAIL2-PROTOCOL.md §10a.
+- **Readback closed the loop**: the undocumented RM_TEST endpoints
+  (`GET /camera/test/{log,status,ust}`, §13b) serve the live runtime and
+  settings trees — the tool now verifies writes against
+  `zoom_infos.digital_enable` instead of reporting fire-and-forget, and the
+  same endpoints yield the settings schema (`ust.json`, §13) that maps every
+  Center control the REST tree hides to its persisted home.
+
 ## [0.9.0] — 2026-09-30
 
 ### Added: tap-to-track and tap-to-focus — point the camera at what the agent sees
