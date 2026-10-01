@@ -6,6 +6,8 @@ function send(o) {
   process.stdout.write(JSON.stringify(o) + "\n");
 }
 
+let snapCalls = 0; // snapshot-truncation scenario state, persists across requests
+
 rl.on("line", (line) => {
   if (!line.trim()) return;
   let req;
@@ -77,23 +79,41 @@ rl.on("line", (line) => {
       return send({ ok: true, min: 0, max: 100 });
     case "zoom_set":
       return send({ ok: true });
-    case "snapshot":
+    case "snapshot": {
       if (req.path === "busy") {
         return send({ ok: false, busy: true, error: "camera in use by another application" });
       }
       if (req.path === "withformat") {
         return send({
-          ok: true, mime: "image/jpeg", width: 640, height: 360, base64: "QUJD",
+          ok: true, mime: "image/jpeg", width: 640, height: 360,
+          base64: Buffer.from([0xff, 0xd8, 0x00, 0x00, 0xff, 0xd9]).toString("base64"),
           sourceFormat: "MJPG 1920x1080@30.00", sourcePin: "preview",
         });
       }
       if (req.path === "blankformat") {
         return send({
-          ok: true, mime: "image/jpeg", width: 640, height: 360, base64: "QUJD",
+          ok: true, mime: "image/jpeg", width: 640, height: 360,
+          base64: Buffer.from([0xff, 0xd8, 0x00, 0x00, 0xff, 0xd9]).toString("base64"),
           sourceFormat: "",
         });
       }
-      return send({ ok: true, mime: "image/jpeg", width: 640, height: 360, base64: "QUJD" });
+      // Minimal complete JPEG (SOI..EOI) and a truncated one (SOI, no EOI).
+      const good = Buffer.from([0xff, 0xd8, 0x00, 0x00, 0xff, 0xd9]).toString("base64");
+      const bad = Buffer.from([0xff, 0xd8, 0x00, 0x00, 0x00]).toString("base64");
+      if (req.path === "truncOnce") {
+        snapCalls += 1;
+        return send(
+          snapCalls === 1
+            ? { ok: true, mime: "image/jpeg", width: 640, height: 360, base64: bad }
+            : { ok: true, mime: "image/jpeg", width: 640, height: 360, base64: good },
+        );
+      }
+      if (req.path === "truncAlways") {
+        snapCalls += 1;
+        return send({ ok: true, mime: "image/jpeg", width: 640, height: 360, base64: bad });
+      }
+      return send({ ok: true, mime: "image/jpeg", width: 640, height: 360, base64: good });
+    }
     case "camctrl_get":
       return send({ ok: true, value: 300, flags: 2 });
     default:

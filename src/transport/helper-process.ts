@@ -273,6 +273,15 @@ export class HelperProcess {
     await this.rpc({ op: "zoom_set", units });
   }
 
+  /**
+   * The camera sporadically emits truncated MJPEG frames — worst right after
+   * wake — and the helper captures whatever the device hands over. Validate
+   * every JPEG at this boundary (SOI at the head, EOI at the tail) and retry
+   * the capture a bounded number of times instead of handing an agent a frame
+   * that decodes to half an image. Ported from obsbotd's observation
+   * (2026-10-01); it lives HERE rather than in any helper so every platform
+   * gets it for free. Non-JPEG mimes pass unvalidated (nothing to check).
+   */
   async snapshot(opts: SnapshotOpts): Promise<Snapshot> {
     const req: Record<string, unknown> = { op: "snapshot" };
     if (opts.path !== undefined) req.path = opts.path;
@@ -282,20 +291,37 @@ export class HelperProcess {
     // Snapshot waits out a caller-supplied settle delay and then captures a real
     // frame, so it gets its own budget on top of that delay rather than the
     // default. Without this a legitimate slow capture would look like a wedge.
-    const resp = await this.rpcRaw(req, SNAPSHOT_RPC_TIMEOUT_MS + (opts.settleMs ?? 0));
-    if (!resp.ok) {
-      if (resp.busy) throw new CameraBusyError((resp.error as string) ?? undefined);
-      throw new Error((resp.error as string) ?? "snapshot failed");
+    const timeout = SNAPSHOT_RPC_TIMEOUT_MS + (opts.settleMs ?? 0);
+    const attempts = 4; // 1 capture + 3 retries, matching the reference behavior
+    for (let i = 0; i < attempts; i++) {
+      const resp = await this.rpcRaw(req, timeout);
+      if (!resp.ok) {
+        if (resp.busy) throw new CameraBusyError((resp.error as string) ?? undefined);
+        throw new Error((resp.error as string) ?? "snapshot failed");
+      }
+      const mime = resp.mime as string;
+      if (typeof mime === "string" && mime.startsWith("image/jpeg")) {
+        const buf = Buffer.from(resp.base64 as string, "base64");
+        const complete =
+          buf.length >= 4 &&
+          buf[0] === 0xff && buf[1] === 0xd8 &&
+          buf[buf.length - 2] === 0xff && buf[buf.length - 1] === 0xd9;
+        if (!complete) continue; // truncated: capture again
+      }
+      return {
+        mime,
+        width: resp.width as number,
+        height: resp.height as number,
+        base64: resp.base64 as string,
+        ...(typeof resp.sourceFormat === "string" && resp.sourceFormat !== ""
+          ? { sourceFormat: resp.sourceFormat }
+          : {}),
+      };
     }
-    return {
-      mime: resp.mime as string,
-      width: resp.width as number,
-      height: resp.height as number,
-      base64: resp.base64 as string,
-      ...(typeof resp.sourceFormat === "string" && resp.sourceFormat !== ""
-        ? { sourceFormat: resp.sourceFormat }
-        : {}),
-    };
+    throw new Error(
+      "snapshot returned a truncated JPEG after 4 attempts (the camera is at its worst " +
+        "right after wake) — retry this call, or pass settleMs to wait out the post-wake window",
+    );
   }
 
   async camCtrlSet(property: number, value: number, flags: number): Promise<void> {

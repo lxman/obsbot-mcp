@@ -62,7 +62,10 @@ test("snapshot returns the decoded frame from the helper", async () => {
   const h = new HelperProcess(["node", fake]);
   await h.start();
   const snap = await h.snapshot({ maxDim: 640, quality: 70, settleMs: 100 });
-  expect(snap).toEqual({ mime: "image/jpeg", width: 640, height: 360, base64: "QUJD" });
+  expect(snap).toEqual({
+    mime: "image/jpeg", width: 640, height: 360,
+    base64: Buffer.from([0xff, 0xd8, 0x00, 0x00, 0xff, 0xd9]).toString("base64"),
+  });
   await h.close();
 });
 
@@ -89,14 +92,38 @@ test("snapshot omits an empty source format rather than reporting it", async () 
   expect(snap).not.toHaveProperty("sourceFormat");
   await h.close();
 });
-
 test("snapshot throws CameraBusyError when the helper reports busy", async () => {
   const h = new HelperProcess(["node", fake]);
   await h.start();
+
   await expect(h.snapshot({ path: "busy" })).rejects.toBeInstanceOf(CameraBusyError);
+
   await h.close();
 });
 
+test("snapshot retries past a truncated JPEG and returns the next complete frame", async () => {
+  const h = new HelperProcess(["node", fake]);
+  await h.start();
+
+  const snap = await h.snapshot({ path: "truncOnce" });
+  const buf = Buffer.from(snap.base64, "base64");
+  expect(buf[0]).toBe(0xff);
+  expect(buf[1]).toBe(0xd8); // SOI
+  expect(buf[buf.length - 1]).toBe(0xd9); // EOI — the retried frame is whole
+
+  await h.close();
+});
+
+test("snapshot fails honestly after 4 truncated attempts, naming the remedy", async () => {
+  const h = new HelperProcess(["node", fake]);
+  await h.start();
+
+  await expect(h.snapshot({ path: "truncAlways" })).rejects.toThrow(
+    /truncated JPEG after 4 attempts.*settleMs/s,
+  );
+
+  await h.close();
+});
 test("xu_get round-trips: returns the reply bytes as a Buffer", async () => {
   const h = new HelperProcess(["node", fake]);
   await h.start();

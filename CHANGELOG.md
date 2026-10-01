@@ -1,6 +1,21 @@
 # Changelog
 
-## [0.9.1] — 2026-10-01
+## [0.9.2] — 2026-10-01
+
+### Fixed: snapshots validate JPEG integrity and retry past truncated frames
+
+The Tiny 2 sporadically emits truncated MJPEG frames — worst right after
+wake — and until now whatever the helper captured was passed through
+unvalidated, so an agent could receive a frame that decodes to half an
+image. Every snapshot is now checked at the helper RPC boundary for a
+complete SOI..EOI and retried up to 4 attempts; a persistently truncating
+camera fails with an honest error naming the remedy (`settleMs` to wait
+out the post-wake window). Validation lives in the TS layer, so all
+platform helpers get it. (Ported from obsbotd's observation — the one
+part of its critique that was both new and correct. Its other headline
+claim, atomic pan+tilt via one `VIDIOC_S_EXT_CTRLS`, turned out to be
+prior art: upstream's `v4l2_set_pantilt()` has done exactly that since
+2026-07, move-cancelling analysis included.)
 
 ### Added: the 2026-10-01 probe batch — ten tools off the vendor-doc surface and the RM_TEST reads
 
@@ -44,6 +59,8 @@ golden-tested against the capture:
   (`03 57` was never a terminator — it's the hybrid id's tail); the TLV
   checksum constant is length-dependent `{9: 0xe1dd, 12: 0x440a}`; and REST
   `ai/trackspeed` to `customized` requires the axis speeds in the same body.
+## [0.9.1] — 2026-10-01
+
 
 ### Added: `obsbot_tail2_hybrid_zoom` — the 12x unlock, decoded off the wire
 
