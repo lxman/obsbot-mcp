@@ -93,6 +93,21 @@ test("decodePresetEntry flags the exhausted marker", () => {
   expect(decodePresetEntry(hexToBuf("02000000")).end).toBe(true);
 });
 
+test("decodePresetEntry treats status 0x03 (empty-store quirk on selector 0x0D) as end:true even with non-zero trailing bytes", () => {
+  // With 0 presets stored, selector 0x0D returns status 0x03 repeatedly rather
+  // than 0x02 (exhausted). Only status 0x00 is a valid preset entry.
+  const b = hexToBuf("0300000018fcfce5640055484a6c633256304d513d3d00");
+  expect(decodePresetEntry(b)).toEqual({ end: true });
+});
+
+test("decodePresetEntry reads zoom as u16le at offset 8..9 (supports zoom > 2.55x)", () => {
+  // 3.0x zoom = 300 = 0x012c -> LE bytes 2c 01 at offset 8..9 (reading u8 at
+  // offset 8 would misread 0x2c = 44 -> 0.44x zoom).
+  const e = decodePresetEntry(hexToBuf("0000000018fcfce52c0155484a6c633256304d513d3d00"));
+  expect(e.end).toBe(false);
+  expect(e.pose?.zoom).toBe(3);
+});
+
 // --- I4: decodePresetEntry must not choke on, or misdecode, hostile input ---
 
 test("I4: decodePresetEntry treats a buffer too short for the fixed header as end/invalid, not a RangeError", () => {

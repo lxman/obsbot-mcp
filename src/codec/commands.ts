@@ -392,8 +392,22 @@ export const rangeToPercent = (value: number, min: number, max: number): number 
 
 // ---------------------------------------------------------------------------
 //  Status block (UVC XU selector 6, GET_CUR) — a flat fixed-offset snapshot,
-//  NOT a V3 frame reply: no magic, no CRC. Offsets confirmed against the
-//  OpenFoxes/Tiny4Linux reference (status.rs). Extend by adding offsets here.
+//  NOT a V3 frame reply: no magic, no CRC. Built on demand by firmware.
+//  Known offsets (confirmed on Tiny 2 & Tiny 2 Lite, see GitHub issue #3):
+//    0x00     : variable byte (observed 0x24, 0x25, 0x27 — not a fixed marker)
+//    0x02     : sleep flag (0 = awake, 1 = sleep)
+//    0x04-0x05: zoom u16le (0-100 percent over UVC zoom range on Tiny 2)
+//    0x06     : HDR (0 = off, non-zero = on)
+//    0x07     : face-priority AE (0 = global, 1 = face)
+//    0x09     : device status (raw {0,1,2,6} mapped to {1,2,3,4}, else 8)
+//    0x0a-0x0b: auto-sleep timeout in seconds (u16le, e.g. 600 = 10 min)
+//    0x11     : FOV mode enum (0=wide, 1=medium, 2=narrow, 3=custom)
+//    0x13     : image mirror (0 = normal, 1 = mirrored)
+//    0x18/0x1c: AI mode / submode tuple (m, n)
+//    0x1f     : framerate (fps, e.g. 30, 60)
+//    0x21     : LED state
+//    0x24     : tracking speed (0 = standard, 2 = sport)
+//    0x25-0x3b: never written by firmware (zero-padded)
 // ---------------------------------------------------------------------------
 const STATUS_OFF_SLEEP = 0x02; // 0 = awake, 1 = sleep
 const STATUS_OFF_HDR = 0x06;   // 0 = off, non-zero = on

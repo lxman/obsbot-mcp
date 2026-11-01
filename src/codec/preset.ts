@@ -90,15 +90,18 @@ const BOOT_FLAGS_BLOCK = Buffer.from(
 export const encodeBootFlags = (seq: number): Buffer =>
   buildFrame({ seq, cmd: CMD.BOOT_FLAGS, receiver: RECEIVER, payload: BOOT_FLAGS_BLOCK });
 
-// NOTE: the vendor GET encoders (LIST 0x3b44 / VALUE 0x3a44 / NAME 0x3b04) were
-// deleted 2026-07-19. They built valid frames, but the device answers them on a
-// reply path we cannot read: after sending one, the reply selector returns the
-// flat status block, never a V3 frame. Preset reads use the flat selectors below
-// instead. Do not reintroduce them expecting readable replies.
+// NOTE: Preset server lives in the AI module (/app/ai/aisdk.cross, USettings::Preset).
+// On the framed V3 channel (selector 0x02):
+//   - AI_GET_GIMBAL_PRESET_LIST (0x3b44, flags 0x01) replies with the plain list of
+//     0-based stored slot IDs (1 byte per preset, no leading count byte; flags 0x09
+//     when 0 presets are stored).
+//   - AI_GET_GIMBAL_PRESET_ID_VALUE (0x3a44) and AI_GET_GIMBAL_PRESET_ID_NAME (0x3b04)
+//     return structured error frames (flags 0x89, error 0x000a / 0x000c) when queried
+//     directly from the host. The camera app is an internal RPC client of those opcodes
+//     and exposes the full preset state to the host via flat XU selectors 12 and 13 below.
 
-// Flat XU selector 12 (list): <count:u8> <slotIdx:u8> x count. Hardware-verified
-// 2026-07-19 — the framed-reply model (recvVendor + parseFrame) does NOT carry
-// preset data; reads on the vendor reply path just return the flat status block.
+// Flat XU selector 12 (0x0C, list): <count:u8> <slotIdx:u8> x count.
+// Unlike the framed 0x3b44 reply, flat selector 12 prepends a count byte.
 export interface PresetListBlock { count: number; slots: number[] }
 
 export const decodePresetList = (block: Buffer): PresetListBlock => {
@@ -144,14 +147,17 @@ export interface PresetEntry {
   pose?: PresetPose;
 }
 
-const ENTRY_END = 0x02;
-// Minimum bytes needed to read the fixed header (status, slotIdx, 2 reserved,
-// pitch i16, yaw i16, zoom u8) before the variable-length base64 name starts
+const ENTRY_VALID = 0x00;
+// Minimum bytes needed to read the fixed header (status u8, slotIdx u8, pad u16,
+// pitch i16, yaw i16, zoom u16) before the variable-length base64 name starts
 // at offset 10.
 const ENTRY_HEADER_LEN = 10;
 
 export const decodePresetEntry = (block: Buffer): PresetEntry => {
-  if (block.length > 0 && block[0] === ENTRY_END) return { end: true };
+  // Only status 0x00 is a valid preset entry. 0x02 is cursor-exhausted after
+  // walking populated entries; 0x03 is returned repeatedly when the preset
+  // store is completely empty (confirmed on both Tiny 2 and Tiny 2 Lite).
+  if (block.length > 0 && block[0] !== ENTRY_VALID) return { end: true };
   // I4: a buffer too short to hold the fixed header can't be decoded — without
   // this guard, block.readInt16LE(4)/(6) below throws a raw RangeError that
   // surfaces to the caller as an opaque ERR_OUT_OF_RANGE. Treat it the same as
@@ -159,10 +165,10 @@ export const decodePresetEntry = (block: Buffer): PresetEntry => {
   if (block.length < ENTRY_HEADER_LEN) return { end: true };
   // I3/I4: an all-zero header is exactly what a failed/short USB read decodes
   // as (status 0x00 "not end", slotIdx 0, pitch/yaw/zoom all 0) — it is NOT a
-  // real occupied slot. A committed preset's zoom is always >=1.0 (block[8]
-  // >=100), so an all-zero header never corresponds to a genuine entry. Treat
-  // it as end-of-list/invalid: the dangerous failure mode for a create-once
-  // resource is a false OCCUPIED read, never a false EMPTY.
+  // real occupied slot. A committed preset's zoom is always >=1.0 (zoom u16le
+  // at offset 8 >= 100), so an all-zero header never corresponds to a genuine
+  // entry. Treat it as end-of-list/invalid: the dangerous failure mode for a
+  // create-once resource is a false OCCUPIED read, never a false EMPTY.
   if (block.subarray(0, ENTRY_HEADER_LEN).equals(Buffer.alloc(ENTRY_HEADER_LEN))) {
     return { end: true };
   }
@@ -175,7 +181,7 @@ export const decodePresetEntry = (block: Buffer): PresetEntry => {
   const slot = (slotIdx + 1) as 1 | 2 | 3;
   const pitch = block.readInt16LE(4) / 100;
   const yaw = block.readInt16LE(6) / 100;
-  const zoom = block[8] / 100;
+  const zoom = block.readUInt16LE(8) / 100;
   const nul = block.indexOf(0, 10);
   const b64 = block.subarray(10, nul === -1 ? block.length : nul).toString("ascii");
   const name = Buffer.from(b64, "base64").toString("ascii");

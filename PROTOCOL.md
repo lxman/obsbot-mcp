@@ -86,16 +86,24 @@ NodeId=node)` with the 60-byte frame as the property data.
 ### Frame layout (`V3` frame)
 ```
 off 0    : 0xAA                  magic
-off 1    : 0x25                  version/flags (send path: b &= 0xFD; b |= 0x01; bit 0x60 ⇒ nested segment)
-off 2-3  : seq    u16 LE         increments per sent frame
-off 4-5  : len    u16 LE = 0x0C  # bytes covered by the token (magic..cmd = 12)
-off 6-7  : token  u16 LE         checksum (see below)
-off 8    : sender   = 0x0A
-off 9    : receiver = 0x04
-off 10-11: cmd    u16 LE         command id (e.g. 0xA0C2, 0x6484)
-off 12+  : payload              command-specific float32/int params, LE.
-                                 When flags&0x60: nested segment {len2 u16 @12, token2 u16 @14, data @16}
-                                 with token2 computed the same way over the nested segment.
+off 1    : flags                 request: 0x25 = SET w/ nested payload, 0x01 = header-only GET
+                                 reply  : 0x29 = data reply w/ nested payload (len = 12)
+                                          0x09 = ACK / empty-payload reply (len = 12, NO nested segment)
+                                          0x89 = error reply (len = 16; 0x0200 @12..13, u16 errCode @14..15)
+off 2-3  : seq    u16 LE         increments per sent frame; echoed in reply
+off 4-5  : len    u16 LE         header length covered by token (12 for normal/ACK, 16 for 0x89 error)
+off 6-7  : token  u16 LE         header CRC-16/USB over frame[0 : len] with bytes 6-7 zeroed
+off 8    : sender                host = 0x0A (swapped with receiver in replies)
+off 9    : receiver              subsystem id (0x02 Camera, 0x03 Gimbal, 0x04 AI, 0x0D Upgrade)
+off 10-11: cmd    u16 LE         command id (receiver = cmd & 0x3F, index = cmd >> 6)
+off 12+  : payload / error       When (flags & 0x60) != 0 and len == 12:
+                                   nested segment {len2 u16 @12, token2 u16 @14, data @16}
+                                 When flags == 0x89 and len == 16:
+                                   off 12-13 = 0x0200, off 14-15 = u16 LE error code
+                                   (e.g. 0xFFFD unsupported command, 0x000A/0x000C parameter error)
+                                 When flags == 0x09 (or 0x01):
+                                   NO payload segment — bytes [12..) in the camera's reply buffer are
+                                   unwritten stale data from prior commands and must be ignored.
 ```
 
 ### Token (checksum) — **CRC-16/USB**
@@ -144,17 +152,22 @@ Three on-device preset slots (indices 0-2 on the wire, presented as slots 1-3). 
 use two different mechanisms** in the implementation below: reads go through flat XU selectors
 12/13, writes through framed V3 `SET_CUR` commands, same as gimbal/AI/wake commands above.
 
-> **Correction (2026-07-20).** This section previously justified the flat-selector read path by
-> asserting "the vendor GET-reply path is non-functional … just returns the flat status block,
-> never a V3 frame". **That is wrong.** The framed GET path works; it requires the header-only
-> flags byte `frame[1] = 0x01` instead of the SET flavour `0x25`. Framed GETs sent with `0x25` are
-> not answered, which is what produced the original conclusion. `AI_GET_GIMBAL_PRESET_LIST`
-> (`0x3b44`) does reply, returning an occupied-slot count.
+> **Corrections (2026-07-20 & 2026-11-01, see GitHub issue #3).**
 >
-> The flat-selector protocol below remains hardware-verified and is what the code ships, so it is
-> documented as-is. But it is no longer the *only* option, and the framed alternative has not been
-> fully explored — the per-entry lookups (`AI_GET_GIMBAL_PRESET_ID_VALUE`, `…_ID_NAME`) stay silent
-> on a header-only GET and probably need a payload index. See `tiny2_specification.md` §4.
+> 1. **Preset server architecture (`/app/ai/aisdk.cross`):** The preset store (`USettings::Preset`)
+>    lives in the AI module, which registers receiver `0x04` handlers at indexes `0xE5` (`0x3944`
+>    create), `0xE6` (`0x3984` delete), `0xE7` (`0x39C4` recall), `0xE9` (`0x3A44` read pose),
+>    `0xEA` (`0x3A84` rename), `0xEC` (`0x3B04` read name), `0xED` (`0x3B44` list), and `0xF8`
+>    (`0x3E04` update).
+> 2. **Framed `0x3B44` (`AI_GET_GIMBAL_PRESET_LIST`) vs. flat selector `0x0C`:** Framed `0x3B44`
+>    (sent with `flags = 0x01`) replies with the **plain list of stored 0-based slot IDs** (1 byte
+>    per preset in store order, **no leading count byte**; when 0 presets are stored it replies with
+>    `flags = 0x09` and a 0-byte payload). Flat selector `0x0C` prepends a count byte (`[count, ids...]`).
+> 3. **Why preset reads use flat selectors `0x0C` / `0x0D`:** Direct host V3 queries to `0x3B04`
+>    (`AI_GET_GIMBAL_PRESET_ID_NAME`) and `0x3A44` (`AI_GET_GIMBAL_PRESET_ID_VALUE`) return
+>    structured error replies (`flags = 0x89`, error `0x000A` header-only / `0x000C` with a 4-byte
+>    slot index). The camera application acts as an internal RPC client of `0xED` / `0xEC` / `0xE9`
+>    and exposes the full preset list and entry cursor to the host on flat XU selectors `0x0C` and `0x0D`.
 
 ### Read protocol: flat XU selectors 12 (list) + 13 (entry cursor)
 
@@ -175,12 +188,12 @@ no cmd field. Three-step read:
 
 | offset | field | notes |
 |---|---|---|
-| 0 | status | `0x02` = cursor exhausted (no more entries; the fields below are not present) |
+| 0 | status | `0x00` = valid entry; `0x02` = cursor exhausted; `0x03` = empty-store quirk (returned repeatedly when 0 presets are stored). Only `0x00` is a real entry. |
 | 1 | slotIdx | 0-based (0/1/2 → slot 1/2/3) |
-| 2-3 | reserved | unobserved |
+| 2-3 | pad | `uint16` LE padding |
 | 4-5 | pitch | `int16` LE, hundredths of a degree (÷100 → tilt in degrees) |
 | 6-7 | yaw | `int16` LE, hundredths of a degree (÷100 → pan in degrees) |
-| 8 | zoom | `uint8`, hundredths of ratio (÷100 → zoom, e.g. `100` → `1.0`) |
+| 8-9 | zoom | `uint16` LE, hundredths of ratio (÷100 → zoom, e.g. `100` → `1.0`, `300` → `3.0`) |
 | 10.. | name | base64 ASCII, NUL-terminated (or running to the end of the buffer) |
 
 ### Write commands (framed V3, `SET_CUR` on selector `0x02`, receiver `0x04`, sender `0x0A`)

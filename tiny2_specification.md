@@ -139,7 +139,11 @@ Known selector roles:
 | `0x02` | framed V3 command channel **and** reply mailbox (§4) |
 | `0x06` | 60-byte status block; also the target for raw `uvcExt` writes (§5) |
 | `0x08` | ASCII product name, NUL-padded ("OBSBOT Tiny 2 StreamCamera") |
-| `0x0C` / `0x0D` (12/13) | gimbal preset list and entry cursor |
+| `0x09` | 4-state AI tracking state enum (`0x00` idle, `0x01` while AI tracking is active) |
+| `0x0A` | 3-state enum proxied to AI module (index `0x25`, wire `0x0944` `AI_SET/GET_TARGET_SELECT`) |
+| `0x0B` | 2-state enum proxied to AI module (index `0x33`, wire `0x0CC4`) |
+| `0x0C` / `0x0D` (12/13) | gimbal preset list (`[count, slotIdx...]`) and entry cursor |
+| `0x0E` | constant read-only block (`fe 3f 04 00 ...`, `SET_CUR` rejected) |
 
 ---
 
@@ -163,8 +167,19 @@ off  size  field
 16   len2  payload
 ```
 
-Replies use the same layout with **sender and receiver swapped** and a reply flags byte of `0x29`.
-A reply parses with the same parser as a request.
+Replies swap **sender and receiver** and use three distinct `FLAGS` / `len` combinations
+(confirmed on both Tiny 2 and Tiny 2 Lite; see GitHub issue #3):
+
+- **`0x29` (data reply, `len = 12`):** carries a nested payload segment at offset 12 (`{len2, token2, payload}`).
+- **`0x09` (ACK / empty-payload reply, `len = 12`):** carries **no payload segment**. The camera only
+  overwrites bytes `[0..12)` of its 60-byte reply buffer, leaving stale `{len2, token2, payload}` bytes
+  from earlier commands at offset `12..` (still with a valid `token2` CRC). A parser **must** check
+  `(flags & 0x60) != 0` before reading `len2` at offset 12, or it will misattribute the previous
+  command's payload to the `0x09` reply.
+- **`0x89` (error reply, `len = 16`):** 16-byte header covered by the header CRC over `[0..16)` with
+  bytes 6–7 zeroed, and no payload segment. Bytes `12..13` are `0x0200` (`00 02` LE) and bytes `14..15`
+  hold the `u16le` error code (e.g. `0xFFFD` = unsupported command, `0x000A` / `0x000C` = rejected
+  preset/AI GET on `0x3B04`, `0x3A44`, `0x0944`, `0x0CC4`).
 
 ### 4.2 The flags byte — the key to readback
 
@@ -347,7 +362,13 @@ commands that require a payload parameter and ignore a header-only GET (white ba
 Notable working reads beyond those already covered: `CAM_GET_SYS_TIME` (returns a Unix timestamp,
 but the clock is unset/factory-set — read `1689984608` = 2023-07-22 — **do not trust it as a time
 source**), `CAM_GET_AUDIO_VOLUME`, `CAM_GET_SUSPEND_TIME` (600 s), `CAM_GET_WDR_MODE`,
-`CAM_GET_MIRROR_FLIP`, `CAM_GET_ROTATION_DEG`, `AI_GET_GIMBAL_PRESET_LIST`.
+`CAM_GET_MIRROR_FLIP`, `CAM_GET_ROTATION_DEG`, `AI_GET_GIMBAL_PRESET_LIST` (`0x3B44`, returns a
+plain list of 0-based stored slot IDs with no leading count byte — `flags = 0x09` when empty).
+
+**Model differences (Tiny 2 `3564:fef8` vs. Tiny 2 Lite `3564:fef9` fw 6.2.5.3):**
+`CAM_GET_USB_MODE` (`0x6042`, 4 B), `CAM_GET_UVC_MODE` (`0xC442`, 4 B), and `AI_GET_GIM_STATE`
+(`0x6604`, 24 B) all succeed with `flags = 0x29` on the Tiny 2, whereas on the Tiny 2 Lite they
+reply with `flags = 0x89`, error `0xFFFD` (unsupported command).
 
 ---
 
@@ -421,8 +442,8 @@ caused it.
 
 - Field layouts of `AI_GET_GIM_STATE` (24 B), `GIM_GET_STATE` (32 B), `AI_GET_QUICK_STATUS` (12 B).
 - Whether the silent GETs accept a payload parameter, and its shape.
-- `AI_GET_GIMBAL_PRESET_LIST` structure with presets actually populated (it reads count 0 when the
-  slots are empty).
+- *(Resolved, issue #3)* `AI_GET_GIMBAL_PRESET_LIST` (`0x3B44`) payload is the plain list of stored
+  0-based slot IDs (1 byte per preset in store order, no count byte; 0 bytes / `flags = 0x09` when empty).
 - Whether `AI_RST_GIM_BOOT_POS` and `AI_TRG_GIM_BOOT_POS` (empty payloads) suffer the §4.5 defect.
 - The remaining unaudited SET encoders: the five preset commands, boot flags, zoom-with-speed,
   AI track speed.

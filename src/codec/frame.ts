@@ -35,20 +35,47 @@ export class FrameParseError extends Error {
 }
 
 export interface ParsedFrame {
+  flags: number;
   seq: number;
   cmd: number;
   receiver: number;
   sender: number;
   payload: Buffer;
+  errorCode?: number;
 }
 
-/** Reverse of buildFrame: validate header + optional payload CRC and slice fields out. */
+/**
+ * Reverse of buildFrame: validate header + optional payload CRC and slice fields out.
+ *
+ * Reply framing (confirmed on Tiny 2 and Tiny 2 Lite, see GitHub issue #3):
+ *   - flags (byte 1):
+ *       0x25 = request with nested payload segment
+ *       0x01 = header-only GET request (no payload segment)
+ *       0x29 = reply carrying a nested payload segment (hdrLen = 12)
+ *       0x09 = plain ACK / empty-payload reply (hdrLen = 12, NO payload segment;
+ *              bytes [12..) in the camera's 60-byte buffer are unwritten stale
+ *              data from earlier replies and MUST NOT be parsed as a payload)
+ *       0x89 = error reply (hdrLen = 16; bytes 12-13 are 0x0200, bytes 14-15
+ *              carry the u16le firmware error code, e.g. 0xFFFD unsupported,
+ *              0x000A/0x000C parameter error; no payload segment)
+ *   - hdrLen (bytes 4-5 u16le): length of the header covered by the header CRC
+ *     (12 for standard frames, 16 for 0x89 error frames).
+ */
 export function parseFrame(buf: Buffer): ParsedFrame {
   if (buf.length < 12) throw new FrameParseError(`frame too short: ${buf.length} bytes`);
   if (buf[0] !== 0xaa) throw new FrameParseError(`bad magic: 0x${buf[0].toString(16)}`);
 
-  // Header CRC covers bytes [0,12) with the token field (6-7) treated as zero.
-  const hdr = Buffer.from(buf.subarray(0, 12));
+  const flags = buf[1];
+  const hdrLen = buf.readUInt16LE(4);
+  if (hdrLen !== 12 && hdrLen !== 16) {
+    throw new FrameParseError(`invalid header length: ${hdrLen}`);
+  }
+  if (buf.length < hdrLen) {
+    throw new FrameParseError(`frame too short for header: need ${hdrLen} bytes, have ${buf.length}`);
+  }
+
+  // Header CRC covers bytes [0,hdrLen) with the token field (6-7) treated as zero.
+  const hdr = Buffer.from(buf.subarray(0, hdrLen));
   hdr[6] = 0;
   hdr[7] = 0;
   const wantHdr = crc16usb(hdr);
@@ -64,8 +91,19 @@ export function parseFrame(buf: Buffer): ParsedFrame {
   const receiver = buf[9];
   const cmd = buf.readUInt16LE(10);
 
+  // 16-byte error header (flags 0x89): bytes 12-13 = 0x0200, bytes 14-15 = error code.
+  if (hdrLen === 16) {
+    const errorCode = buf.readUInt16LE(14);
+    return { flags, seq, cmd, receiver, sender, payload: Buffer.alloc(0), errorCode };
+  }
+
+  // Only inspect the nested payload segment at offset 12 when the flags byte has
+  // the nested-segment indicator set (flags & 0x60, e.g. 0x25 request or 0x29 reply).
+  // Header-only frames (0x01 GET request, 0x09 ACK/empty reply) do not write bytes
+  // [12..) in the camera's reply mailbox, leaving stale nested segments from prior
+  // commands intact in the tail.
   let payload = Buffer.alloc(0);
-  if (buf.length >= 16) {
+  if ((flags & 0x60) !== 0 && buf.length >= 16) {
     const len2 = buf.readUInt16LE(12);
     if (len2 > 0) {
       const end = 16 + len2;
@@ -87,5 +125,5 @@ export function parseFrame(buf: Buffer): ParsedFrame {
     }
   }
 
-  return { seq, cmd, receiver, sender, payload };
+  return { flags, seq, cmd, receiver, sender, payload };
 }

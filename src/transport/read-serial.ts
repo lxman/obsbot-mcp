@@ -98,8 +98,12 @@ function describeMailbox(raw: Buffer, req: Buffer, wantSeq: number): string {
   }
   try {
     const f = parseFrame(raw);
-    const empty = f.payload.length === 0 ? ", empty payload" : "";
-    return `held cmd 0x${f.cmd.toString(16)} seq ${f.seq}${empty} ` +
+    const err =
+      f.errorCode !== undefined
+        ? `, error 0x${f.errorCode.toString(16).padStart(4, "0")}`
+        : "";
+    const empty = f.errorCode === undefined && f.payload.length === 0 ? ", empty payload" : "";
+    return `held cmd 0x${f.cmd.toString(16)} seq ${f.seq}${err}${empty} ` +
       `(wanted cmd 0x${UG_GET_SN_CMD.toString(16)} seq ${wantSeq})`;
   } catch (e) {
     return `unparseable: ${(e as Error).message}; first bytes ${raw.subarray(0, 8).toString("hex")}`;

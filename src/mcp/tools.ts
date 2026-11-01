@@ -1196,9 +1196,13 @@ export function createTools(
                   sentFrame: frame.toString("hex"),
                   replyHex: raw.toString("hex"),
                   parsed: {
+                    flags: "0x" + p.flags.toString(16).padStart(2, "0"),
                     cmd: "0x" + p.cmd.toString(16).padStart(4, "0"),
                     receiver: p.receiver,
                     payloadHex: p.payload.toString("hex"),
+                    ...(p.errorCode !== undefined
+                      ? { errorCode: "0x" + p.errorCode.toString(16).padStart(4, "0") }
+                      : {}),
                   },
                 };
               }

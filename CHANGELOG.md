@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.9.3] — 2026-11-01
+
+### Fixed: V3 reply framing (`0x29` / `0x09` / `0x89`), 16-byte error replies, and flat preset entry cursor (#3)
+
+Thanks to **@gnacho** for detailed Tiny 2 Lite (`3564:fef9`, fw `6.2.5.3`) measurements and `/app/ai/aisdk.cross` firmware disassembly in [#3](https://github.com/lxman/obsbot-mcp/issues/3), cross-verified against a live Tiny 2 (`3564:fef8`):
+
+- **`parseFrame` reply flavour & header length handling (`src/codec/frame.ts`):**
+  - Reads the header length from bytes 4–5 (`12` for standard/ACK frames, `16` for `0x89` error frames) and verifies the header CRC over `[0, hdrLen)`.
+  - Decodes 16-byte `0x89` error replies (bytes 12–13 `0x0200`, bytes 14–15 `u16le` error code such as `0xFFFD` unsupported command or `0x000A` / `0x000C` rejected GET) onto `ParsedFrame.errorCode`, surfacing structured firmware errors in `obsbot_debug_probe` (`mode: "query"`) and `readSerial` diagnostics instead of failing header CRC and timing out.
+  - Only parses a nested payload segment at offset 12 when `(flags & 0x60) !== 0` (`0x25` request or `0x29` data reply). Header-only `0x09` ACK/empty replies (such as `AI_GET_GIMBAL_PRESET_LIST` `0x3B44` when 0 presets are stored) only overwrite bytes `[0..12)` of the camera's 60-byte selector-2 mailbox, leaving the previous command's nested segment and valid `token2` CRC intact in the buffer tail.
+- **Flat preset entry cursor (`src/codec/preset.ts`):**
+  - `decodePresetEntry` now requires `block[0] === 0x00` (`ENTRY_VALID`), treating both `0x02` (cursor exhausted) and `0x03` (empty-store quirk on XU selector `0x0D`) as `end: true`.
+  - Reads preset zoom at offset `8..9` as `u16le` (`block.readUInt16LE(8) / 100`) rather than `u8`, supporting preset zoom values above `2.55x`.
+- **Protocol documentation (`PROTOCOL.md`, `tiny2_specification.md`, `src/codec/commands.ts`):**
+  - Documented the `/app/ai/aisdk.cross` (`USettings::Preset`) preset server opcodes (`0xE5..0xF8`), the plain slot-ID payload of framed `0x3B44` vs. `[count, ids...]` on flat selector `0x0C`, XU unit-2 selectors `0x09–0x0E`, additional selector-6 status block offsets (`0x09` device status, `0x0a–0x0b` auto-sleep seconds, `0x13` mirror, `0x1f` fps, `0x21` LED), and Tiny 2 vs. Tiny 2 Lite opcode support differences (`0x6042`, `0xC442`, `0x6604`).
+
 ## [0.9.2] — 2026-10-01
 
 ### Fixed: snapshots validate JPEG integrity and retry past truncated frames

@@ -1087,6 +1087,31 @@ test("obsbot_debug_probe query returns ok:false when no valid reply arrives with
   expect((transport.xuGetRaw as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(1);
 });
 
+test("obsbot_debug_probe query surfaces a 16-byte 0x89 error reply with its errorCode instead of timing out", async () => {
+  const transport = makeFakeTransport();
+  // Build a 16-byte 0x89 error reply for AI_GET_GIMBAL_PRESET_ID_NAME (0x3b04) at seq=1:
+  // aa 89 0100 1000 <crc16> 04 0a 043b 0002 0a00
+  const errBuf = Buffer.alloc(60);
+  Buffer.from("aa89010010000000040a043b00020a00", "hex").copy(errBuf);
+  const { crc16usb } = await import("../../src/codec/crc.js");
+  errBuf.writeUInt16LE(crc16usb(errBuf.subarray(0, 16)), 6);
+  transport.xuGetRaw = vi.fn(async () => errBuf);
+  const tools = createTools(makeFakeMgr(transport), undefined, true);
+  const tool = findTool(tools, "obsbot_debug_probe");
+  const result = await tool.handler({ mode: "query", opcode: "AI_GET_GIMBAL_PRESET_ID_NAME" });
+  expect(result).toMatchObject({
+    ok: true,
+    opcode: "AI_GET_GIMBAL_PRESET_ID_NAME",
+    parsed: {
+      flags: "0x89",
+      cmd: "0x3b04",
+      receiver: 0x0a,
+      payloadHex: "",
+      errorCode: "0x000a",
+    },
+  });
+});
+
 // --- Preset read path: flat XU selectors 12 (list) + 13 (entry cursor). ---
 // Real captured fixtures from hardware (2026-07-19 session) — see preset.test.ts
 // for the byte-layout tests these mirror.
