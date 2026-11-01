@@ -86,7 +86,9 @@ NodeId=node)` with the 60-byte frame as the property data.
 ### Frame layout (`V3` frame)
 ```
 off 0    : 0xAA                  magic
-off 1    : flags                 request: 0x25 = SET w/ nested payload, 0x01 = header-only GET
+off 1    : flags                 request: 0x25 = SET w/ nested payload
+                                          0x21 = GET w/ nested request payload (e.g. 0x3B04 / 0x3A44)
+                                          0x01 = header-only GET
                                  reply  : 0x29 = data reply w/ nested payload (len = 12)
                                           0x09 = ACK / empty-payload reply (len = 12, NO nested segment)
                                           0x89 = error reply (len = 16; 0x0200 @12..13, u16 errCode @14..15)
@@ -100,7 +102,8 @@ off 12+  : payload / error       When (flags & 0x60) != 0 and len == 12:
                                    nested segment {len2 u16 @12, token2 u16 @14, data @16}
                                  When flags == 0x89 and len == 16:
                                    off 12-13 = 0x0200, off 14-15 = u16 LE error code
-                                   (e.g. 0xFFFD unsupported command, 0x000A/0x000C parameter error)
+                                   (0xFFFD unsupported command on receiver, 0x000A missing/invalid
+                                   request payload, 0x000C unoccupied slot / entry not found)
                                  When flags == 0x09 (or 0x01):
                                    NO payload segment — bytes [12..) in the camera's reply buffer are
                                    unwritten stale data from prior commands and must be ignored.
@@ -163,11 +166,16 @@ use two different mechanisms** in the implementation below: reads go through fla
 >    (sent with `flags = 0x01`) replies with the **plain list of stored 0-based slot IDs** (1 byte
 >    per preset in store order, **no leading count byte**; when 0 presets are stored it replies with
 >    `flags = 0x09` and a 0-byte payload). Flat selector `0x0C` prepends a count byte (`[count, ids...]`).
-> 3. **Why preset reads use flat selectors `0x0C` / `0x0D`:** Direct host V3 queries to `0x3B04`
->    (`AI_GET_GIMBAL_PRESET_ID_NAME`) and `0x3A44` (`AI_GET_GIMBAL_PRESET_ID_VALUE`) return
->    structured error replies (`flags = 0x89`, error `0x000A` header-only / `0x000C` with a 4-byte
->    slot index). The camera application acts as an internal RPC client of `0xED` / `0xEC` / `0xE9`
->    and exposes the full preset list and entry cursor to the host on flat XU selectors `0x0C` and `0x0D`.
+> 3. **Parameterized preset GETs (`0x3B04` / `0x3A44`) vs. flat selectors `0x0C` / `0x0D`:**
+>    `0x3B04` (`AI_GET_GIMBAL_PRESET_ID_NAME`) and `0x3A44` (`AI_GET_GIMBAL_PRESET_ID_VALUE`) require
+>    `flags = 0x21` (GET with nested payload) carrying a 4-byte `u32le` 0-based slot index. Sending
+>    `flags = 0x01` (header-only GET) returns `flags = 0x89, errorCode = 0x000A` (missing request
+>    payload), and querying an unoccupied slot with `flags = 0x21` returns `errorCode = 0x000C`. On
+>    occupied slots, `0x3B04` replies with `0x29` + raw ASCII name bytes and `0x3A44` replies with
+>    `0x29` + a 24-byte pose block (float32 zoom at offset 16..19). The camera application acts as an
+>    internal RPC client of `0xED` / `0xEC` / `0xE9` and exposes the combined preset list and entry
+>    cursor on flat XU selectors `0x0C` and `0x0D`, which remains the preferred read path since `0x0D`
+>    returns slot index, pose, and name in a single read.
 
 ### Read protocol: flat XU selectors 12 (list) + 13 (entry cursor)
 

@@ -154,7 +154,7 @@ Known selector roles:
 ```
 off  size  field
  0     1   magic 0xAA
- 1     1   FLAGS          <- 0x25 = SET w/ nested payload; 0x01 = header-only GET
+ 1     1   FLAGS          <- 0x25 = SET w/ nested payload; 0x21 = GET w/ nested payload; 0x01 = header-only GET
  2     2   seq (u16 LE)
  4     2   len = 12 (u16 LE)
  6     2   header CRC-16/USB over bytes [0,12) with bytes 6-7 treated as zero
@@ -178,14 +178,17 @@ Replies swap **sender and receiver** and use three distinct `FLAGS` / `len` comb
   command's payload to the `0x09` reply.
 - **`0x89` (error reply, `len = 16`):** 16-byte header covered by the header CRC over `[0..16)` with
   bytes 6–7 zeroed, and no payload segment. Bytes `12..13` are `0x0200` (`00 02` LE) and bytes `14..15`
-  hold the `u16le` error code (e.g. `0xFFFD` = unsupported command, `0x000A` / `0x000C` = rejected
-  preset/AI GET on `0x3B04`, `0x3A44`, `0x0944`, `0x0CC4`).
+  hold the `u16le` error code:
+  - `0xFFFD` — unsupported command on target receiver
+  - `0x000A` — missing or invalid request payload (e.g. header-only `0x01` sent to `0x3B04` / `0x3A44` / `0x0944` / `0x0CC4`)
+  - `0x000C` — unoccupied slot / entry not found (e.g. `0x3B04` / `0x3A44` with `flags = 0x21` for an empty preset slot)
 
 ### 4.2 The flags byte — the key to readback
 
-**Verified on both macOS and Windows.** The flags byte at offset 1 selects the frame flavour:
+**Verified on macOS, Windows, and Linux.** The flags byte at offset 1 selects the frame flavour:
 
 - **`0x25`** — SET commands carrying a nested payload. Correct for every write.
+- **`0x21`** — GET requests carrying a nested request payload (`0x01` GET bit | `0x20` nested-payload bit), e.g. `AI_GET_GIMBAL_PRESET_ID_NAME` (`0x3B04`) and `AI_GET_GIMBAL_PRESET_ID_VALUE` (`0x3A44`) with a 4-byte `u32le` slot index.
 - **`0x01`** — header-only GET requests. **The device does not answer a GET framed with `0x25`.**
 
 This single byte is the difference between a zero-filled reply and real data. Every historical
@@ -297,16 +300,28 @@ sentinel values, i.e. unset — while the camera demonstrably boots to the `GIM_
 The camera comes up **awake** on cold plug-in, at its stored boot pose. Soft sleep/wake does not
 re-enumerate USB; only a physical replug does.
 
-### 6.2 Gimbal state blocks (undecoded)
+### 6.2 Gimbal state blocks (`AI_GET_GIM_STATE` and `GIM_GET_STATE` — decoded)
 
-| command | wireCmd | reply | status |
-|---|---|---|---|
-| `AI_GET_GIM_STATE` | `0x6604` | 24 B | field layout undecoded |
-| `GIM_GET_STATE` | — | 32 B | field layout undecoded |
-| `AI_GET_QUICK_STATUS` | `0x0104` | 12 B | field layout undecoded |
+| command | wireCmd | receiver | reply | status |
+|---|---|---|---|---|
+| `AI_GET_GIM_STATE` | `0x6604` | `0x04` | 24 B | **Decoded** — 9× `int16le` in deci-degrees (`0.1°` / `0.1 °/s`) + 6 B uninitialized stack tail |
+| `GIM_GET_STATE` | `0x0043` | `0x03` | 32 B | **Decoded** — 12× `int16le` in centi-degrees (`0.01°` / `0.01 °/s`) + 8 B status tail |
+| `AI_GET_QUICK_STATUS` | `0x0104` | `0x04` | 12 B | field layout undecoded |
 
-Decoding these needs differential sampling — read at several known poses and diff. The SDK suggests
-`AI_GET_GIM_STATE` carries both euler and motor angle triplets.
+**`AI_GET_GIM_STATE` (`0x6604`, receiver `0x04`, 24 bytes)** and **`GIM_GET_STATE` (`0x0043`, receiver `0x03`, 32 bytes)** share the same first 9 `int16le` fields (18 bytes), differing only in scale (`÷ 10` deci-degrees on `0x6604` vs. `÷ 100` centi-degrees on `0x0043`):
+
+| offset | type | `0x6604` scale | `0x0043` scale | field |
+|---|---|---|---|---|
+| `0..1` | `int16le` | `÷ 10` (`0.1°`) | `÷ 100` (`0.01°`) | **motor roll** joint angle |
+| `2..3` | `int16le` | `÷ 10` (`0.1°`) | `÷ 100` (`0.01°`) | **motor pitch** joint angle |
+| `4..5` | `int16le` | `÷ 10` (`0.1°`) | `÷ 100` (`0.01°`) | **motor yaw** joint angle |
+| `6..7` | `int16le` | `÷ 10` (`0.1°`) | `÷ 100` (`0.01°`) | **Euler roll** attitude angle |
+| `8..9` | `int16le` | `÷ 10` (`0.1°`) | `÷ 100` (`0.01°`) | **Euler pitch** attitude angle (`+` = down = `−UVC tilt`) |
+| `10..11` | `int16le` | `÷ 10` (`0.1°`) | `÷ 100` (`0.01°`) | **Euler yaw** attitude angle (`+` = camera's left = `+UVC pan`) |
+| `12..13` | `int16le` | `÷ 10` (`0.1 °/s`) | `÷ 100` (`0.01 °/s`) | **roll** angular velocity |
+| `14..15` | `int16le` | `÷ 10` (`0.1 °/s`) | `÷ 100` (`0.01 °/s`) | **pitch** angular velocity |
+| `16..17` | `int16le` | `÷ 10` (`0.1 °/s`) | `÷ 100` (`0.01 °/s`) | **yaw** angular velocity |
+| `18..23` | 6 B | **uninitialized stack tail** | `3× int16le` (`0.01°`) target/setpoint | On `0x6604`, `/app/ai/aisdk.cross` populates an 18-byte struct (`9× int16_t`) inside a 24-byte stack buffer; bytes `18..23` leak leftover stack contents (e.g. `0x0054b390` / `0x0054b491` code pointers in `aisdk.cross` or prior float32 values) and vary between reads on a stationary camera. Ignore bytes `18..23` on `0x6604`. |
 
 ### 6.3 Zone / hand tracking limits (decoded)
 
@@ -354,10 +369,12 @@ Probed with the `0x01` flavour, validated per §4.3.
 | Ai (79–111) | 33 | **18** |
 | SysMg, TXBle, PrimaryBle, Upgrade | not probed — see §9 | — |
 
-Commands that answer return real, self-consistent data. Commands that stay silent fall into two
-groups: features this hardware lacks (all NDI controls, `MODULE_ACTIVATE` — Tail Air hardware), and
-commands that require a payload parameter and ignore a header-only GET (white balance group,
-`FIELD_VIEW`, preset ID/name lookups). The payload-parameter hypothesis is **untested**.
+Commands that answer return real, self-consistent data. Commands that stay silent or return `0x89`
+(`0x000A`) on a header-only `0x01` GET fall into two groups: features this hardware lacks (all NDI
+controls, `MODULE_ACTIVATE` — Tail Air hardware), and commands that require a request payload framed
+with **`flags = 0x21`** (verified on `AI_GET_GIMBAL_PRESET_ID_NAME` `0x3B04` and
+`AI_GET_GIMBAL_PRESET_ID_VALUE` `0x3A44` with a 4-byte `u32le` 0-based slot index: occupied slots
+return `0x29` with the ASCII name or 24-byte pose; empty slots return `0x89` with `errorCode = 0x000C`).
 
 Notable working reads beyond those already covered: `CAM_GET_SYS_TIME` (returns a Unix timestamp,
 but the clock is unset/factory-set — read `1689984608` = 2023-07-22 — **do not trust it as a time
@@ -366,9 +383,10 @@ source**), `CAM_GET_AUDIO_VOLUME`, `CAM_GET_SUSPEND_TIME` (600 s), `CAM_GET_WDR_
 plain list of 0-based stored slot IDs with no leading count byte — `flags = 0x09` when empty).
 
 **Model differences (Tiny 2 `3564:fef8` vs. Tiny 2 Lite `3564:fef9` fw 6.2.5.3):**
-`CAM_GET_USB_MODE` (`0x6042`, 4 B), `CAM_GET_UVC_MODE` (`0xC442`, 4 B), and `AI_GET_GIM_STATE`
-(`0x6604`, 24 B) all succeed with `flags = 0x29` on the Tiny 2, whereas on the Tiny 2 Lite they
-reply with `flags = 0x89`, error `0xFFFD` (unsupported command).
+`CAM_GET_USB_MODE` (`0x6042`, 4 B) and `CAM_GET_UVC_MODE` (`0xC442`, 4 B) succeed with `flags = 0x29`
+on the Tiny 2, whereas on the Tiny 2 Lite they reply with `flags = 0x89`, error `0xFFFD` (unsupported
+command). `AI_GET_GIM_STATE` (`0x6604`, 24 B) works on **both** models when sent to receiver `0x04`
+(and returns `0x89` / `0xFFFD` on both when sent to receiver `0x02`).
 
 ---
 
@@ -440,8 +458,10 @@ caused it.
 
 ## 11. Open questions
 
-- Field layouts of `AI_GET_GIM_STATE` (24 B), `GIM_GET_STATE` (32 B), `AI_GET_QUICK_STATUS` (12 B).
-- Whether the silent GETs accept a payload parameter, and its shape.
+- *(Resolved, issue #3)* `AI_GET_GIM_STATE` (`0x6604`, 24 B) and `GIM_GET_STATE` (`0x0043`, 32 B)
+  layouts — see §6.2. `AI_GET_QUICK_STATUS` (`0x0104`, 12 B) remains undecoded.
+- *(Resolved for preset GETs, issue #3)* Parameterized GETs use `flags = 0x21` (`0x01 | 0x20`) with
+  a nested request payload (e.g. `0x3B04` and `0x3A44` with `u32le` slot index).
 - *(Resolved, issue #3)* `AI_GET_GIMBAL_PRESET_LIST` (`0x3B44`) payload is the plain list of stored
   0-based slot IDs (1 byte per preset in store order, no count byte; 0 bytes / `flags = 0x09` when empty).
 - Whether `AI_RST_GIM_BOOT_POS` and `AI_TRG_GIM_BOOT_POS` (empty payloads) suffer the §4.5 defect.
