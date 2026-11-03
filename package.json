@@ -1,6 +1,6 @@
 {
   "name": "obsbot-mcp",
-  "version": "0.9.4",
+  "version": "0.9.5",
   "description": "Cross-platform MCP server for OBSBOT Tiny 2 (UVC) camera control",
   "mcpName": "io.github.lxman/obsbot-mcp",
   "license": "MIT",
@@ -45,10 +45,9 @@
     "integration": "node scripts/integration/run.mjs"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.0",
-    "ws": "^8.21.3",
-    "zod": "^3.23.0",
-    "zod-to-json-schema": "^3.23.0"
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "ws": "^8.22.1",
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

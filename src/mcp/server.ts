@@ -4,7 +4,7 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { zodToJsonSchema } from "zod-to-json-schema";
+import { z } from "zod";
 import { DeviceManager } from "../device/manager.js";
 import { helperFactory } from "../device/helper-factory.js";
 import { makeLogSink } from "./log-sink.js";
@@ -113,16 +113,31 @@ export async function startServer(opts: { debug?: boolean } = {}): Promise<void>
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: tools.map((tool) => ({
-      name: tool.name,
-      description: tool.description,
+    tools: tools.map((tool) => {
       // Advertise a real JSON Schema (types, enums, defaults, required) derived
       // from each tool's zod schema. Without typed properties, clients serialize
       // numbers/booleans as strings and strict validation rejects them.
-      inputSchema: zodToJsonSchema(tool.schema, { target: "jsonSchema7" }) as {
+      // Zod 4's toJSONSchema (output mode) preserves piped constraints + defaults,
+      // and marks defaulted fields required in output; strip defaulted fields from
+      // `required` so MCP clients know they are optional inputs.
+      const inputSchema = z.toJSONSchema(tool.schema, { target: "draft-7" }) as {
         type: "object";
-      },
-    })),
+        properties?: Record<string, Record<string, unknown>>;
+        required?: string[];
+      };
+      if (Array.isArray(inputSchema.required) && inputSchema.properties) {
+        const props = inputSchema.properties;
+        inputSchema.required = inputSchema.required.filter(
+          (k) => !(k in props && "default" in (props[k] ?? {})),
+        );
+        if (inputSchema.required.length === 0) delete inputSchema.required;
+      }
+      return {
+        name: tool.name,
+        description: tool.description,
+        inputSchema,
+      };
+    }),
   }));
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {

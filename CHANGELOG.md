@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.5] — 2026-11-03
+
+### Security & Dependencies: resolve all 15 `npm audit` advisories (`0 vulnerabilities`)
+
+- Upgraded `@modelcontextprotocol/sdk` to `^1.32.2`, `zod` to `^4.6.7`, `ws` to `^8.22.1`, and `vitest` / transitive dependencies (`proxy-addr`, `body-parser`, `fast-uri`, `ip-address`, `hono`, `@hono/node-server`, `qs`, `vite`, `nanoid`, `source-map-js`, `postcss`), bringing `npm audit` to **0 vulnerabilities**.
+- Replaced `zod-to-json-schema` with Zod 4's built-in `z.toJSONSchema(tool.schema, { target: "draft-7" })` in [`src/mcp/server.ts`](src/mcp/server.ts), removing an external dependency while preserving draft-7 JSON Schema generation for all tool input schemas.
+
 ## [0.9.4] — 2026-11-03
 
 ### Added: `obsbot_tail2_sleep` and `obsbot_tail2_wake` (Tail 2 network sleep & wake)
