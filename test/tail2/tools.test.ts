@@ -16,7 +16,7 @@ import type { Tail2Api } from "../../src/tail2/api.js";
 
 interface FakeTail2 {
   api: Tail2Api;
-  calls: { zoom?: [number, number]; aiMode?: string; trackSpeed?: string; rollBias?: number; portrait?: boolean; recenter?: boolean; presetSave?: [number, string]; presetCall?: number; presetDelete?: number; presetRename?: [number, string]; srtEnabled?: boolean; ndiEnabled?: boolean; gimbalSpeed?: [number, number, number]; gimbalStop?: boolean; gimbalInvert?: boolean; gimbalPose?: { yaw: number; pitch: number; roll: number; ratio: number }; tapTarget?: [number, number]; zoomType?: string; presetSpeed?: number; usbMode?: string; antiFlicker?: string; afTrack?: string; isoRange?: { isomin: number; isomax: number } };
+  calls: { zoom?: [number, number]; aiMode?: string; trackSpeed?: string; rollBias?: number; portrait?: boolean; recenter?: boolean; powerOn?: boolean; presetSave?: [number, string]; presetCall?: number; presetDelete?: number; presetRename?: [number, string]; srtEnabled?: boolean; ndiEnabled?: boolean; gimbalSpeed?: [number, number, number]; gimbalStop?: boolean; gimbalInvert?: boolean; gimbalPose?: { yaw: number; pitch: number; roll: number; ratio: number }; tapTarget?: [number, number]; zoomType?: string; presetSpeed?: number; usbMode?: string; antiFlicker?: string; afTrack?: string; isoRange?: { isomin: number; isomax: number } };
   /** State for the 2026-09-30 vendor-doc surface (record/focus/exposure/image/stream/audio). */
   st: {
     recording: boolean;
@@ -101,6 +101,14 @@ const makeFake = (): FakeTail2 => {
     },
     recenter: async () => {
       f.calls.recenter = true;
+    },
+    sleep: async () => {
+      f.calls.powerOn = false;
+      return landed({ settled: true, power_on: false });
+    },
+    wake: async () => {
+      f.calls.powerOn = true;
+      return landed({ settled: true, power_on: true });
     },
     portraitSet: async (enable: boolean) => {
       f.calls.portrait = enable;
@@ -349,6 +357,8 @@ describe("tail2 tools", () => {
     for (const expected of [
       "obsbot_tail2_devices",
       "obsbot_tail2_scan",
+      "obsbot_tail2_wake",
+      "obsbot_tail2_sleep",
       "obsbot_tail2_status",
       "obsbot_tail2_info",
       "obsbot_tail2_zoom",
@@ -584,6 +594,18 @@ describe("tail2 tools", () => {
     const r = await tool(tools, "obsbot_tail2_recenter").handler({});
     expect(f.calls.recenter).toBe(true);
     expect(r).toEqual({ ok: true });
+  });
+
+  it("sleep and wake call api.sleep/wake and report state + power_on + settled", async () => {
+    const f = makeFake();
+    const tools = createTail2Tools(await seededRegistry(f));
+    const s = await tool(tools, "obsbot_tail2_sleep").handler({});
+    expect(f.calls.powerOn).toBe(false);
+    expect(s).toEqual({ ok: true, state: "sleep", power_on: false, settled: true });
+
+    const w = await tool(tools, "obsbot_tail2_wake").handler({});
+    expect(f.calls.powerOn).toBe(true);
+    expect(w).toEqual({ ok: true, state: "run", power_on: true, settled: true });
   });
 
   it("portrait enable/disable reaches the api and reports orientation", async () => {

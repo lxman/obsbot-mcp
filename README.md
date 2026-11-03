@@ -63,7 +63,7 @@ With the installed binary, use `"command": "obsbot-mcp"` and `"args": ["--debug"
 
 35 tools on Windows and macOS, 34 on Linux (`obsbot_gimbal_move_speed` is unavailable there — see
 [limitations](#linux-gimbal-position-feedback-is-not-live)). `--debug` adds `obsbot_debug_probe` for
-one more. Every Tail 2 camera on the network adds the 32 `obsbot_tail2_*` tools in
+one more. Every Tail 2 camera on the network adds the 48 `obsbot_tail2_*` tools in
 [OBSBOT Tail 2](#obsbot-tail-2-network-cameras) below (all platforms — they are pure TypeScript).
 All names below are current as of v0.4.0 — **every tool was renamed in this
 release and there is no backward-compatible alias**; see [CHANGELOG.md](./CHANGELOG.md) for the
@@ -285,6 +285,8 @@ resolves to that one.
 |------|------------|-------------|
 | `obsbot_tail2_devices` | — | List registered Tail 2 cameras (mac, name, host(s)). Registration is not liveness. |
 | `obsbot_tail2_scan` | — | Discover Tail 2 cameras: ~5 s mDNS listen (the camera's own announcements), HTTP subnet sweep fallback. Registers what it found. |
+| `obsbot_tail2_wake` | `camera`? | Wake a sleeping Tail 2 (`POST /camera/sdk/poweron`). **Moves the camera:** un-stows the gimbal back to its active pose and resumes the media/streaming daemon. Polls `power_on: true` (~4–6 s). Hardware-verified 2026-11-03. |
+| `obsbot_tail2_sleep` | `camera`? | Put a Tail 2 to sleep (`POST /camera/sdk/poweroff`). Despite the path name, the camera's own web UI uses this for sleep/hibernate rather than a hard power cut: **moves the camera** (stows the gimbal face-down at pitch ~84–89°), suspends the media/streaming daemon, and keeps the HTTP/WS server online so `obsbot_tail2_wake` can resume it over the network. Polls `power_on: false` (~3–6 s). Hardware-verified 2026-11-03. |
 | `obsbot_tail2_status` | `camera`? | One WebSocket status push: the full live block — power, rec, portrait, AI mode + tracking settings, zoom ratio, roll bias, focus modes, NDI/RTSP/SRT/RTMP flags, SD card, presets with poses, and per-subsystem health. No live yaw/pitch — Tail 2 gimbal moves are open-loop. |
 | `obsbot_tail2_info` | `camera`? | Identity + static config in one call: device_info, range (zoom **1.0–12.0**, focus 1–100, WB 2000–10000 K), networkconfig (NDI/stream settings). |
 | `obsbot_tail2_zoom` | `ratio` (`1.0`–`12.0`), `speed` (`1`–`10`, default `5`), `camera`? | Absolute zoom on the camera's own ratio scale. `speed` is required by the firmware. Returns `settled` (readback-verified) — see below. **Silently pins at 5.0 (the optical ceiling) unless hybrid zoom is unlocked — see `obsbot_tail2_hybrid_zoom`.** |

@@ -16,6 +16,9 @@ import { Tail2Api, Tail2HttpError } from "../../src/tail2/api.js";
  * (TAIL2-PROTOCOL.md §8.1).
  */
 interface FakeState {
+  powerOn: boolean;
+  /** When true, WS pushes two concatenated JSON objects in one frame (mod_wstunnel coalescing). */
+  coalesceWsPush: boolean;
   zoom: number;
   /** Hybrid-zoom unlock, as the RM_TEST live snapshot reports it (§13b). */
   digitalEnable: boolean;
@@ -73,6 +76,8 @@ interface FakeState {
 
 function makeFakeTail2(): Promise<{ api: Tail2Api; state: FakeState; close: () => Promise<void> }> {
   const state: FakeState = {
+    powerOn: true,
+    coalesceWsPush: false,
     zoom: 2.0,
     digitalEnable: true,
     rollBias: 0,
@@ -279,6 +284,14 @@ function makeFakeTail2(): Promise<{ api: Tail2Api; state: FakeState; close: () =
       return json(res, 200, { code: 200, err_idx: 0 });
     }
     if (req.method === "POST" && url === "/camera/sdk/ptz/reset") {
+      return json(res, 200, { code: 200, err_idx: 0 });
+    }
+    if (req.method === "POST" && url === "/camera/sdk/poweroff") {
+      setTimeout(() => (state.powerOn = false), state.delays.portrait);
+      return json(res, 200, { code: 200, err_idx: 0 });
+    }
+    if (req.method === "POST" && url === "/camera/sdk/poweron") {
+      setTimeout(() => (state.powerOn = true), state.delays.portrait);
       return json(res, 200, { code: 200, err_idx: 0 });
     }
     if (req.method === "POST" && url === "/camera/sdk/ptz/gimbalcontrol") {
@@ -522,14 +535,15 @@ function makeFakeTail2(): Promise<{ api: Tail2Api; state: FakeState; close: () =
   const sockets = new Set<WebSocket>();
   const push = (): void => {
     const block = JSON.stringify({
-      power_on: true,
+      power_on: state.powerOn,
       switch_portrait: state.portrait,
       zoom_ratio: state.zoom,
       roll_bias: state.rollBias,
       ai_mode: state.aiMode,
       ndi: { enable: true },
     });
-    for (const ws of sockets) if (ws.readyState === ws.OPEN) ws.send(block);
+    const wire = state.coalesceWsPush ? `${block}${block}` : block;
+    for (const ws of sockets) if (ws.readyState === ws.OPEN) ws.send(wire);
   };
   const timer = setInterval(push, 100);
   wss.on("connection", (ws) => {
@@ -642,6 +656,17 @@ describe("Tail2Api", () => {
 
   it("recenter acks without readback (open-loop by design)", async () => {
     await expect(fake.api.recenter()).resolves.not.toThrow();
+  });
+
+  it("sleep and wake verify power_on transition on the WS push and tolerate coalesced frames", async () => {
+    fake.state.coalesceWsPush = true;
+    const s = await fake.api.sleep(fastVerify);
+    expect(s).toEqual({ settled: true, power_on: false });
+    expect(fake.state.powerOn).toBe(false);
+
+    const w = await fake.api.wake(fastVerify);
+    expect(w).toEqual({ settled: true, power_on: true });
+    expect(fake.state.powerOn).toBe(true);
   });
 
   it("preset save captures the current zoom into the named slot", async () => {

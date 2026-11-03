@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.9.4] — 2026-11-03
+
+### Added: `obsbot_tail2_sleep` and `obsbot_tail2_wake` (Tail 2 network sleep & wake)
+
+- **`obsbot_tail2_sleep` (`POST /camera/sdk/poweroff` `{}`)** and **`obsbot_tail2_wake` (`POST /camera/sdk/poweron` `{}`):**
+  - Hardware-verified on OBSBOT Tail 2 (`7.2.13.1`). Despite the `/camera/sdk/poweroff` endpoint name, the camera's own web UI uses this pair for **Sleep / Resume** (`isHibernate`): `poweroff` stows the gimbal straight down (pitch ~84–89°), suspends the media/streaming daemon, and flips `power_on` to `false` on `ws://<host>/ws/` while keeping `lighttpd` online on port 80 so `poweron` wakes the camera and un-stows the gimbal over the network (~4–6 s).
+  - Both tools verify completion against `power_on` on the WebSocket status push and ride out transient WebSocket restarts while the camera's daemon suspends or resumes.
+- **WebSocket status parser (`src/tail2/api.ts`):**
+  - Handles `mod_wstunnel` coalescing two back-to-back JSON status pushes into a single WebSocket frame (observed on hardware during sleep transitions).
+- **Tiny 2 vs. Tiny 2 Lite protocol documentation (`PROTOCOL.md`, `tiny2_specification.md`):**
+  - Decoded `AI_GET_GIM_STATE` (`0x6604`, 24 B) and `GIM_GET_STATE` (`0x0043`, 32 B) from live Tiny 2 (`3564:fef8`) non-intrusive queries alongside Tiny 2 Lite (`3564:fef9`) measurements (#3).
+
 ## [0.9.3] — 2026-11-01
 
 ### Fixed: V3 reply framing (`0x29` / `0x09` / `0x89`), 16-byte error replies, and flat preset entry cursor (#3)

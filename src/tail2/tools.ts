@@ -54,6 +54,8 @@ const TAIL2_TRACK_SPEEDS = ["superLazy", "lazy", "slow", "fast", "crazy", "custo
 
 const devicesSchema = z.object({});
 const scanSchema = z.object({});
+const wakeSchema = withCamera({});
+const sleepSchema = withCamera({});
 const statusSchema = withCamera({});
 const infoSchema = withCamera({});
 const zoomSchema = withCamera({
@@ -181,6 +183,50 @@ export function createTail2Tools(
         return {
           found: found.map((e) => ({ mac: e.mac, name: e.name, hosts: e.hosts })),
           registered: registry.list().length,
+        };
+      },
+    },
+    {
+      name: "obsbot_tail2_wake",
+      description:
+        "Wake a sleeping Tail 2 (POST /camera/sdk/poweron). This MOVES the camera: waking " +
+        "un-stows the gimbal back to its active pose and resumes the media/streaming daemon. " +
+        "Polls the WebSocket status push (riding out brief socket restarts while the daemon " +
+        "wakes) until power_on reads true (~4–6s). Hardware-verified 2026-11-03.",
+      schema: wakeSchema,
+      handler: async (args: unknown) => {
+        const { camera } = wakeSchema.parse(args);
+        const { api } = await registry.resolve(camera);
+        const r = await api.wake();
+        return {
+          ok: true,
+          state: "run",
+          power_on: r.power_on,
+          settled: r.settled,
+          ...(r.settled ? {} : { note: SETTLED_NOTE }),
+        };
+      },
+    },
+    {
+      name: "obsbot_tail2_sleep",
+      description:
+        "Put a Tail 2 to sleep (POST /camera/sdk/poweroff). Despite the endpoint name, the " +
+        "camera's own web UI uses this for sleep/hibernate rather than a hard power cut: " +
+        "this MOVES the camera (stowing the gimbal face-down at pitch ~84–89°), suspends the " +
+        "media/streaming daemon (NDI/SRT/RTSP and /camera/test/status stop while asleep), and " +
+        "keeps the HTTP/WS server online so obsbot_tail2_wake can resume it over the network. " +
+        "Polls the status push until power_on reads false (~3–6s). Hardware-verified 2026-11-03.",
+      schema: sleepSchema,
+      handler: async (args: unknown) => {
+        const { camera } = sleepSchema.parse(args);
+        const { api } = await registry.resolve(camera);
+        const r = await api.sleep();
+        return {
+          ok: true,
+          state: "sleep",
+          power_on: r.power_on,
+          settled: r.settled,
+          ...(r.settled ? {} : { note: SETTLED_NOTE }),
         };
       },
     },

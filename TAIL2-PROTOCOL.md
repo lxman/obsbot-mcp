@@ -182,7 +182,7 @@ bundle): `image_af`, `image_balance`, `image_exposure`, `image_flicker`, `image_
 `image_mirror`, `image_night_mode`, `image_screen` — payload shapes not yet probed.
 
 ### Power / system / storage / streaming
-`POST poweroff`, `POST poweron`, `POST reboot`, `POST switch_portrait`, `PUT record/control`,
+`POST poweroff`, `POST poweron` (**MEASURED 2026-11-03:** despite the endpoint names, the camera's own web bundle uses `POST /camera/sdk/poweroff` `{}` for **Sleep/Hibernate** ("Device is sleeping") and `POST /camera/sdk/poweron` `{}` for **Resume/Wake** — `poweroff` transitions `power_status` to `REMO_CAMERA_POWER_STATUS_SUSPENDING`, stows the gimbal straight down to pitch ~84–89°, suspends the media/RM_TEST daemon (`GET /camera/test/status` returns 404 while asleep), and keeps `lighttpd` + `/ws/` (`power_on: false`) alive on port 80 so `poweron` can wake the camera over the network in ~5–6 s; shipped as `obsbot_tail2_sleep` and `obsbot_tail2_wake`), `POST reboot`, `POST switch_portrait`, `PUT record/control`,
 `POST capture/trigger`, `POST firmware_upload`, `POST setting_format_sd`,
 `setting_record_split`, `setting_rename`, `setting_reset`, `event_clear`,
 `update_status_clear`, `change_password`, `login`. Album (SD content): `GET/POST

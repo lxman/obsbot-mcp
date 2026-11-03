@@ -114,6 +114,53 @@ export interface VerifyOpts {
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * Parse a status JSON frame from `ws://<host>/ws/`. Normally a single JSON
+ * object, but `lighttpd`'s `mod_wstunnel` proxies a raw TCP byte stream from
+ * port 5900 and can coalesce two back-to-back pushes into one WebSocket frame
+ * (measured 2026-11-03 while sleeping: `{"power_on":false,...}` followed at
+ * byte 23 by the next push, throwing `Unexpected non-whitespace character
+ * after JSON`). When full-buffer `JSON.parse` fails, extract the first
+ * balanced `{...}` object.
+ */
+function parseWsStatus(raw: string): Tail2Status {
+  try {
+    return JSON.parse(raw) as Tail2Status;
+  } catch (firstErr) {
+    const start = raw.indexOf("{");
+    if (start >= 0) {
+      let depth = 0;
+      let inStr = false;
+      let esc = false;
+      for (let i = start; i < raw.length; i++) {
+        const ch = raw[i];
+        if (esc) {
+          esc = false;
+          continue;
+        }
+        if (ch === "\\") {
+          esc = true;
+          continue;
+        }
+        if (ch === '"') {
+          inStr = !inStr;
+          continue;
+        }
+        if (!inStr) {
+          if (ch === "{") depth++;
+          else if (ch === "}") {
+            depth--;
+            if (depth === 0) {
+              return JSON.parse(raw.slice(start, i + 1)) as Tail2Status;
+            }
+          }
+        }
+      }
+    }
+    throw firstErr;
+  }
+}
+
 export class Tail2Api {
   readonly baseUrl: string;
   private readonly timeoutMs: number;
@@ -239,7 +286,7 @@ export class Tail2Api {
       );
       ws.on("message", (data: WebSocket.RawData) => {
         try {
-          const parsed = JSON.parse(data.toString()) as Tail2Status;
+          const parsed = parseWsStatus(data.toString());
           settle(() => {
             ws.terminate();
             resolve(parsed);
@@ -318,6 +365,49 @@ export class Tail2Api {
   /** Gimbal recenter (`POST ptz/reset`). Open-loop: the Tail 2 reports no live pose. */
   async recenter(): Promise<void> {
     await this.send("POST", "/camera/sdk/ptz/reset", {});
+  }
+
+  // ---- power / sleep --------------------------------------------------------
+
+  /**
+   * Put the Tail 2 to sleep (`POST /camera/sdk/poweroff` `{}`). Despite the
+   * path name, the camera's own web UI uses this for hibernate/sleep ("Device
+   * is sleeping" / "Resume"), not a hard power cut: `lighttpd` stays up on
+   * port 80 while the media daemon suspends, the gimbal stows straight down
+   * (pitch ~84–89°), and the WS status push flips `power_on` to `false` in
+   * ~3–6s (hardware-verified 2026-11-03). During the suspend transition the
+   * `/ws/` tunnel can briefly drop or time out, so status reads in the verify
+   * loop catch transient errors rather than aborting the poll.
+   */
+  async sleep(
+    verify: VerifyOpts = {},
+  ): Promise<{ settled: boolean; power_on: boolean }> {
+    await this.send("POST", "/camera/sdk/poweroff", {});
+    const v = await this.verified(
+      () => this.status().catch((): Tail2Status => ({})),
+      (s) => s.power_on === false,
+      { attempts: 12, delayMs: 600, ...verify },
+    );
+    return { settled: v.settled, power_on: v.value.power_on ?? true };
+  }
+
+  /**
+   * Wake the Tail 2 from sleep (`POST /camera/sdk/poweron` `{}`). Un-stows the
+   * gimbal back to its active pose and resumes the media daemon; `power_on`
+   * flips back to `true` on the WS push in ~4–6s (hardware-verified 2026-11-03).
+   * Transient WS handshake timeouts while the daemon restarts are swallowed
+   * inside the verify loop so polling continues until `/ws/` comes back up.
+   */
+  async wake(
+    verify: VerifyOpts = {},
+  ): Promise<{ settled: boolean; power_on: boolean }> {
+    await this.send("POST", "/camera/sdk/poweron", {});
+    const v = await this.verified(
+      () => this.status().catch((): Tail2Status => ({})),
+      (s) => s.power_on === true,
+      { attempts: 12, delayMs: 600, ...verify },
+    );
+    return { settled: v.settled, power_on: v.value.power_on ?? false };
   }
 
   // ---- gimbal speed control (the joystick primitive) -------------------------
