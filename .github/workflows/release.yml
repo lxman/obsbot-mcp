@@ -36,15 +36,6 @@ jobs:
             src: native/macos
             build: native/macos/build
             build_out: native/macos/build
-          # Intel Macs, and Apple Silicon running Node under Rosetta (where
-          # process.arch reports x64). Cross-compiled from the arm64 runner.
-          - os: macos-latest
-            triple: darwin-x64
-            helper: obsbot-helper
-            src: native/macos
-            build: native/macos/build-x64
-            build_out: native/macos/build-x64
-            cmake_extra: -DCMAKE_OSX_ARCHITECTURES=x86_64
           - os: ubuntu-latest
             triple: linux-x64
             helper: obsbot-helper
@@ -83,6 +74,23 @@ jobs:
         with:
           name: ${{ matrix.triple }}
           path: native/prebuilt/${{ matrix.triple }}/${{ matrix.helper }}
+          if-no-files-found: error
+      # Build and upload darwin-x64 on the SAME macOS runner rather than
+      # spawning a second macOS VM (GitHub throttles concurrent macos-latest
+      # arm64 runners per repo, causing a second macOS matrix job to time out
+      # in queue for 15 minutes while the first finishes in 15 seconds).
+      - name: Cross-compile and stage darwin-x64 on the same macOS runner
+        if: runner.os == 'macOS'
+        run: |
+          cmake -S native/macos -B native/macos/build-x64 -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=x86_64
+          cmake --build native/macos/build-x64 --config Release
+          mkdir -p native/prebuilt/darwin-x64
+          cp native/macos/build-x64/obsbot-helper native/prebuilt/darwin-x64/obsbot-helper
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: runner.os == 'macOS'
+        with:
+          name: darwin-x64
+          path: native/prebuilt/darwin-x64/obsbot-helper
           if-no-files-found: error
 
   publish:
