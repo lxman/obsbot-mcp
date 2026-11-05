@@ -189,4 +189,43 @@ describe("Tail2Registry", () => {
     expect(found).toEqual([]);
     expect(reg.list()).toEqual([]);
   });
+
+  it("addHost recognizes a sleeping Tail 2 via status() when info() fails (HTTP 405), and upgrades to real MAC on refresh()", async () => {
+    let awake = false;
+    const reg = new Tail2Registry({
+      makeApi: (host) =>
+        ({
+          info: async () => {
+            if (!awake || host !== "192.168.0.132") throw new Error("HTTP 405: code:405");
+            return {
+              device_name: "Tail 2_bc3cbc",
+              wired_ip: "192.168.0.132",
+              wireless_ip: "192.168.55.222",
+              mac: "10:A5:62:BC:3C:BC",
+            };
+          },
+          status: async () => {
+            if (host !== "192.168.0.132") throw new Error("ECONNREFUSED");
+            return { power_on: awake };
+          },
+        }) as unknown as Tail2Api,
+    });
+
+    // While sleeping: addHost registers via WS status fallback using the host as placeholder identity.
+    const sleeping = await reg.addHost("192.168.0.132");
+    expect(sleeping).not.toBeNull();
+    expect(sleeping?.mac).toBe("192.168.0.132");
+    expect(sleeping?.hosts).toEqual(["192.168.0.132"]);
+    expect(reg.list()).toHaveLength(1);
+
+    // Once awake: refresh() upgrades the entry in-place to the real MAC and device_name.
+    awake = true;
+    const upgraded = await reg.refresh(sleeping!);
+    expect(upgraded.mac).toBe("10:a5:62:bc:3c:bc");
+    expect(upgraded.name).toBe("Tail 2_bc3cbc");
+    expect(upgraded.hosts).toEqual(["192.168.0.132", "192.168.55.222"]);
+    expect(reg.list()).toHaveLength(1);
+    await expect(reg.resolve("10:a5:62:bc:3c:bc")).resolves.toBe(upgraded);
+    await expect(reg.resolve("192.168.0.132")).resolves.toBe(upgraded);
+  });
 });

@@ -86,25 +86,109 @@ export class Tail2Registry {
    * or null when nothing Tail-2-shaped answers there (wrong device, plain
    * HTTP server, or silence) — a scan probes hundreds of addresses and
    * "not here" is the normal outcome, not an error.
+   *
+   * When the camera is asleep (`POST /camera/sdk/poweroff`), `lighttpd` stays
+   * online on port 80 and `/ws/` keeps pushing `{"power_on":false}`, but every
+   * `GET /camera/sdk/*` — including `device_info` — returns HTTP 405
+   * (`code:405`, measured 2026-11-05). Falling back to a one-shot `api.status()`
+   * check when `info()` fails lets `addHost()` (and therefore `OBSBOT_TAIL2_HOSTS`,
+   * `resolve("192.168.0.132")`, and `scanSubnet()`) recognize and register a
+   * sleeping Tail 2 so `obsbot_tail2_wake` can wake it. Once awake, a later
+   * `addHost()`, `addAnnouncement()`, or `refreshEntry()` upgrades the
+   * placeholder host key to the camera's real MAC and `device_name`.
    */
   async addHost(host: string): Promise<Tail2Entry | null> {
     const api = this.makeApi(host);
-    let info: Tail2DeviceInfo;
+    let info: Tail2DeviceInfo | null = null;
     try {
       info = await api.info();
     } catch {
+      info = null;
+    }
+    if (info) {
+      if (typeof info.mac !== "string" || info.mac === "" || !info.device_name) return null;
+      return this.upsertIdentified(info.mac.toLowerCase(), info.device_name, [host], api);
+    }
+    // `GET /camera/sdk/device_info` failed — check whether a sleeping Tail 2 is
+    // pushing `{"power_on":false}` on `ws://<host>/ws/`.
+    try {
+      const st = await api.status();
+      if (typeof st.power_on !== "boolean") return null;
+    } catch {
       return null;
     }
-    if (typeof info.mac !== "string" || info.mac === "" || !info.device_name) return null;
-    const mac = info.mac.toLowerCase();
-    const existing = this.byMac.get(mac);
+    // Already known under a real MAC (e.g. from an earlier mDNS announcement) or
+    // under this host placeholder? Reuse it.
+    const want = host.toLowerCase();
+    for (const e of this.byMac.values()) {
+      if (e.mac === want || e.hosts.some((h) => h.toLowerCase() === want)) {
+        if (!e.hosts.includes(host)) e.hosts.push(host);
+        return e;
+      }
+    }
+    const entry: Tail2Entry = { mac: want, name: `Tail 2 (${host})`, hosts: [host], api };
+    this.byMac.set(want, entry);
+    return entry;
+  }
+
+  /**
+   * Merge an identified `(mac, name, hosts)` into `byMac`, upgrading any
+   * host-placeholder entry that was created while the camera was sleeping.
+   */
+  private upsertIdentified(
+    mac: string,
+    name: string,
+    hosts: string[],
+    api?: Tail2Api,
+  ): Tail2Entry {
+    let existing = this.byMac.get(mac);
+    // Reap any sleeping-host placeholder entries whose host belongs to this camera.
+    for (const [key, e] of this.byMac.entries()) {
+      if (key === mac) continue;
+      if (hosts.some((h) => h.toLowerCase() === key || e.hosts.some((eh) => eh.toLowerCase() === h.toLowerCase()))) {
+        this.byMac.delete(key);
+        if (!existing) existing = e;
+        else {
+          for (const eh of e.hosts) if (!existing.hosts.includes(eh)) existing.hosts.push(eh);
+        }
+      }
+    }
     if (existing) {
-      // Same camera reachable at another address (wired + wireless): keep both.
-      if (!existing.hosts.includes(host)) existing.hosts.push(host);
+      existing.mac = mac;
+      existing.name = name;
+      for (const h of hosts) if (!existing.hosts.includes(h)) existing.hosts.push(h);
+      this.byMac.set(mac, existing);
       return existing;
     }
-    const entry: Tail2Entry = { mac, name: info.device_name, hosts: [host], api };
+    const entry: Tail2Entry = {
+      mac,
+      name,
+      hosts: [...hosts],
+      api: api ?? this.makeApi(hosts[0] ?? mac),
+    };
     this.byMac.set(mac, entry);
+    return entry;
+  }
+
+  /**
+   * Refresh a registered entry's MAC and `device_name` from `api.info()` once
+   * the camera is awake (best-effort; no-op if `info()` still fails).
+   */
+  async refresh(entry: Tail2Entry): Promise<Tail2Entry> {
+    try {
+      const info = await entry.api.info();
+      if (typeof info.mac === "string" && info.mac !== "" && info.device_name) {
+        const hosts = [...entry.hosts];
+        for (const h of [info.wired_ip, info.wireless_ip]) {
+          if (typeof h === "string" && h !== "" && h !== "0.0.0.0" && !hosts.includes(h)) {
+            hosts.push(h);
+          }
+        }
+        return this.upsertIdentified(info.mac.toLowerCase(), info.device_name, hosts, entry.api);
+      }
+    } catch {
+      // Best-effort refresh.
+    }
     return entry;
   }
 
@@ -146,20 +230,7 @@ export class Tail2Registry {
    * own AP subnet, 192.168.55.x, unroutable from here).
    */
   addAnnouncement(a: Tail2Announcement): Tail2Entry {
-    const mac = a.mac.toLowerCase();
-    const existing = this.byMac.get(mac);
-    if (existing) {
-      for (const h of a.hosts) if (!existing.hosts.includes(h)) existing.hosts.push(h);
-      return existing;
-    }
-    const entry: Tail2Entry = {
-      mac,
-      name: a.name,
-      hosts: [...a.hosts],
-      api: this.makeApi(a.hosts[0] ?? mac),
-    };
-    this.byMac.set(mac, entry);
-    return entry;
+    return this.upsertIdentified(a.mac.toLowerCase(), a.name, a.hosts);
   }
 
   /**

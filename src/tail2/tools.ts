@@ -196,8 +196,9 @@ export function createTail2Tools(
       schema: wakeSchema,
       handler: async (args: unknown) => {
         const { camera } = wakeSchema.parse(args);
-        const { api } = await registry.resolve(camera);
-        const r = await api.wake();
+        const entry = await registry.resolve(camera);
+        const r = await entry.api.wake();
+        await registry.refresh(entry);
         return {
           ok: true,
           state: "run",
@@ -242,8 +243,10 @@ export function createTail2Tools(
       schema: statusSchema,
       handler: async (args: unknown) => {
         const { camera } = statusSchema.parse(args);
-        const { api } = await registry.resolve(camera);
-        return { camera: (await api.info()).mac, ...(await api.status()) };
+        const entry = await registry.resolve(camera);
+        const st = await entry.api.status();
+        const refreshed = await registry.refresh(entry);
+        return { camera: refreshed.mac, ...st };
       },
     },
     {

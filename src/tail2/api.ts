@@ -194,9 +194,15 @@ export class Tail2Api {
       const text = await res.text().catch(() => "");
       throw new Tail2HttpError(res.status, path, text.slice(0, 300));
     }
+    const text = await res.text();
     try {
-      return (await res.json()) as T;
+      return JSON.parse(text) as T;
     } catch (e) {
+      // While the Tail 2 is asleep (`power_on: false`), its lightweight CGI/daemon
+      // stub answers with plain-text `code:200` (e.g. for `POST /camera/sdk/poweron`)
+      // instead of `{"code":200,"err_idx":0}` (measured 2026-11-05).
+      const m = /^code:(\d+)\s*$/.exec(text);
+      if (m) return { code: Number(m[1]), err_idx: 0 } as unknown as T;
       // HTTP-level success but a body that isn't JSON: this is some OTHER
       // device's web server on that address, not a Tail 2. Same actionable
       // shape as unreachable — the fix is a different address, not a retry.

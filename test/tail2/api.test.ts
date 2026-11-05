@@ -292,6 +292,12 @@ function makeFakeTail2(): Promise<{ api: Tail2Api; state: FakeState; close: () =
     }
     if (req.method === "POST" && url === "/camera/sdk/poweron") {
       setTimeout(() => (state.powerOn = true), state.delays.portrait);
+      // Real firmware replies with plain-text "code:200" (not JSON) when
+      // POST /camera/sdk/poweron is sent while sleeping (measured 2026-11-05).
+      if (!state.powerOn) {
+        res.writeHead(200, { "Content-Type": "text/plain" });
+        return res.end("code:200");
+      }
       return json(res, 200, { code: 200, err_idx: 0 });
     }
     if (req.method === "POST" && url === "/camera/sdk/ptz/gimbalcontrol") {

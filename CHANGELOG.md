@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.9.6] — 2026-11-05
+
+### Fixed: recognize sleeping Tail 2 cameras in `addHost()` and parse plain-text `code:200` wake ACKs
+
+- **Sleeping Tail 2 host registration (`src/tail2/registry.ts`, `src/tail2/tools.ts`):**
+  - While a Tail 2 is asleep (`POST /camera/sdk/poweroff`), `lighttpd` stays online on port 80 and `ws://<host>/ws/` continues pushing `{"power_on":false}`, but all `GET /camera/sdk/*` endpoints — including `/camera/sdk/device_info` — return HTTP 405 (`"code:405"`).
+  - `Tail2Registry.addHost()` now falls back to a one-shot `api.status()` check on `/ws/` when `api.info()` fails, allowing sleeping cameras to be registered via `OBSBOT_TAIL2_HOSTS`, direct `camera: "<ip>"` tool calls (including `obsbot_tail2_wake` and `obsbot_tail2_status`), and `scanSubnet()` sweeps.
+  - Once awake, `Tail2Registry.refresh()` (called automatically by `obsbot_tail2_wake` and `obsbot_tail2_status`, as well as any subsequent `addHost()` or `addAnnouncement()`) upgrades the host-placeholder entry in-place to the camera's real MAC address, `device_name`, and wired/wireless IPs.
+- **Plain-text `code:200` ACK handling while sleeping (`src/tail2/api.ts`):**
+  - While asleep, `POST /camera/sdk/poweron` replies with HTTP 200 and plain-text body `"code:200"` rather than JSON `{"code":200,"err_idx":0}`. `Tail2Api.req()` now parses `code:<N>` plain-text ACKs so waking a sleeping Tail 2 succeeds cleanly.
+
 ## [0.9.5] — 2026-11-03
 
 ### Security & Dependencies: resolve all 15 `npm audit` advisories (`0 vulnerabilities`)
